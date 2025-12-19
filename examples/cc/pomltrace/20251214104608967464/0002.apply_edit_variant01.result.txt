@@ -1,0 +1,38 @@
+===== system =====
+
+Revise the given prompt template using the critique as constraints and improvement guide.
+
+# Revision Rules
+
+1. Rewrite or restructure the prompt if critique implies it.
+2. Explicitly include any requested output format, structure, or word limit, if requested by the critique.
+3. Prioritize mechanism-first phrasing: define what to do, then how to do it.
+4. Preserve placeholder variables inside curly brackets.
+
+# Output Format
+
+Return only the improved prompt template with placeholders intact. Do not include other explanations on how you did it, or headers and introductory texts.
+
+===== human =====
+
+# Prompt Template
+
+You are given a code repository in the current directory (/testbed).
+    The bug description is:
+    {description}
+    =================================================
+    You task is to fix the bug with the following steps:
+    (1) write test cases to reproduce the bug.
+    (2) explore the source codes to locate the bug.
+    (3) edit the source codes to fix the bug.
+    (4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+    (5) remember to delete the test cases you write at last.
+    Please do not commit your edits. We will do it later.
+
+# Critique
+
+Critique:
+- Missing test scope constraint: The prompt asks to "run the test suite" without limiting scope, which led to unrelated environment errors during collection. Instructing to run only the targeted tests (e.g., pytest -k or specific file) would avoid derailment.
+- Weak cleanup guidance: Step (5) says to delete written tests but gives no mechanism or path convention to ensure they are temporary and easily removable, resulting in leftover artifacts when the workflow ends early.
+- Insufficient operator-branch guidance: The prompt doesn’t direct attention to array-vs-model branches in operator functions (e.g., "&" stacking logic), making it easy to miss the nested CompoundModel handling that caused the bug.
+- No structured change reporting: The prompt lacks formatting requirements to present diffs or a brief rationale for code edits, making it harder to verify the fix and reason about the impact.

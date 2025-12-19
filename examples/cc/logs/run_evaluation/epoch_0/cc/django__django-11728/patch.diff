@@ -1,0 +1,36 @@
+diff --git a/django/contrib/admindocs/utils.py b/django/contrib/admindocs/utils.py
+index 1ce4594501..6a8174abf2 100644
+--- a/django/contrib/admindocs/utils.py
++++ b/django/contrib/admindocs/utils.py
+@@ -167,19 +167,25 @@ def replace_named_groups(pattern):
+         # Handle nested parentheses, e.g. '^(?P<a>(x|y))/b'.
+         unmatched_open_brackets, prev_char = 1, None
+         for idx, val in enumerate(pattern[end:]):
+-            # If brackets are balanced, the end of the string for the current
+-            # named capture group pattern has been reached.
+-            if unmatched_open_brackets == 0:
+-                group_pattern_and_name.append((pattern[start:end + idx], group_name))
+-                break
+-
+             # Check for unescaped `(` and `)`. They mark the start and end of a
+             # nested group.
+             if val == '(' and prev_char != '\\':
+                 unmatched_open_brackets += 1
+             elif val == ')' and prev_char != '\\':
+                 unmatched_open_brackets -= 1
++            # If brackets are balanced, the end of the string for the current
++            # named capture group pattern has been reached. Use idx+1 to include
++            # the closing parenthesis in the slice.
++            if unmatched_open_brackets == 0:
++                group_pattern_and_name.append((pattern[start:end + idx + 1], group_name))
++                break
+             prev_char = val
++        else:
++            # Handle case where the closing parenthesis is the last character in
++            # the input slice (loop exits without hitting the break). If the
++            # brackets are balanced, append the rest of the pattern.
++            if unmatched_open_brackets == 0:
++                group_pattern_and_name.append((pattern[start:], group_name))
+ 
+     # Replace the string for named capture groups with their group names.
+     for group_pattern, group_name in group_pattern_and_name:
