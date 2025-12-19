@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, Generator, Iterable, List, Optional, TypedDict, Union, cast
 
 from pydantic import TypeAdapter
+
+logger = logging.getLogger(__name__)
 
 from agentlightning.types import Span
 
@@ -268,3 +271,119 @@ class TraceToMessages(TraceAdapter[List[OpenAIMessages]]):
                 )
 
         return list(convert_to_openai_messages(raw_prompt_completions))
+
+    def extract_trace(self, span: Span) -> List[Dict[str, Any]]:
+        """
+        从单个span的attributes中提取gen_ai.prompt信息。
+        
+        Args:
+            span: 包含gen_ai.prompt.*属性的Span对象
+            
+        Returns:
+            按顺序排列的消息列表 [{"role": "...", "content": "..."}]
+        """
+        res: Dict[str, Dict[str, Any]] = {}
+        attributes = span.attributes or {}
+        
+        for k, v in attributes.items():
+            if "gen_ai.prompt" in k:
+                # 尝试JSON解析（处理字符串形式的数据）
+                try:
+                    v_eval = json.loads(v) if isinstance(v, str) else v
+                except (json.JSONDecodeError, TypeError):
+                    v_eval = v
+                
+                # 提取索引：gen_ai.prompt.2.role -> parts=['gen_ai', 'prompt', '2', 'role']
+                parts = k.split(".")
+                if len(parts) >= 3 and parts[2].isdigit():
+                    index = parts[2]
+                    
+                    if index not in res:
+                        res[index] = {}
+                    
+                    # 检查是content还是role
+                    if "content" in k:
+                        res[index]["content"] = v_eval
+                    elif "role" in k:
+                        res[index]["role"] = v_eval
+        
+        # 按索引排序构建trace
+        trace: List[Dict[str, Any]] = []
+        for idx in sorted(res.keys(), key=lambda x: int(x)):
+            if "role" in res[idx] and "content" in res[idx]:
+                trace.append(res[idx])
+        
+        return trace
+
+    def find_span_with_max_prompt_index(self, spans: List[Span]) -> Optional[Span]:
+        """
+        找到包含最大gen_ai.prompt索引的span。
+    
+        这个span包含最完整的对话历史。
+    
+        Args:
+            spans: Span列表
+        
+        Returns:
+            包含最大prompt索引的span
+        """
+        max_prompt_index = -1
+        max_span = None
+        
+        logger.info(f"[TraceToMessages] Finding span with max prompt index from {len(spans)} spans")
+    
+        for i, span in enumerate(spans):
+            attributes = span.attributes or {}
+            current_max = -1
+            
+            # 找到这个span中最大的prompt索引
+            for k in attributes.keys():
+                if k.startswith("gen_ai.prompt"):
+                    parts = k.split(".")
+                    if len(parts) >= 3 and parts[2].isdigit():
+                        idx = int(parts[2])
+                        if idx > current_max:
+                            current_max = idx
+
+            logger.debug(f"[TraceToMessages] Span {i} (sequence_id={span.sequence_id}): max_prompt_index={current_max}")
+            
+            # 如果这个span的最大prompt索引更大，记录它
+            if current_max > max_prompt_index:
+                max_prompt_index = current_max
+                max_span = span
+        
+        if max_span:
+            logger.info(f"[TraceToMessages] Selected span with max_prompt_index={max_prompt_index}, sequence_id={max_span.sequence_id}")
+        else:
+            logger.warning(f"[TraceToMessages] No span with gen_ai.prompt found!")
+        
+        return max_span
+
+    def extract_longest_trace(self, spans: List[Span]) -> List[Dict[str, Any]]:
+        """
+        从spans中找到prompt索引最大的span，提取其完整trace。
+        
+        Args:
+            spans: Span列表
+            
+        Returns:
+            最完整的trace: [{"role": "...", "content": "..."}]
+        """
+        max_span = self.find_span_with_max_prompt_index(spans)
+        
+        if max_span:
+            trace = self.extract_trace(max_span)
+            logger.info(f"[TraceToMessages] Extracted trace with {len(trace)} messages")
+            
+            # 打印trace的前2条和最后1条（用于调试）
+            if trace:
+                logger.debug(f"[TraceToMessages] First message: role={trace[0].get('role')}, content_length={len(str(trace[0].get('content', '')))}")
+                if len(trace) > 1:
+                    logger.debug(f"[TraceToMessages] Last message: role={trace[-1].get('role')}, content_length={len(str(trace[-1].get('content', '')))}")
+            
+            return trace
+    
+        logger.warning(f"[TraceToMessages] No max_span found, returning empty trace")
+        return []
+
+

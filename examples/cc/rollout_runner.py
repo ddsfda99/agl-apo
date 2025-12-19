@@ -52,7 +52,7 @@ if __name__ == "__main__":
 
     parser = ArgumentParser()
     parser.add_argument(
-        "--store_address", type=str, default="http://localhost:4747", help="The address of the LightningStore server."
+        "--store_address", type=str, default="http://localhost:4748", help="The address of the LightningStore server."
     )
     parser.add_argument(
         "--agent_config", type=str, default="agent_config.yaml", help="Agent config to run Claude Code."

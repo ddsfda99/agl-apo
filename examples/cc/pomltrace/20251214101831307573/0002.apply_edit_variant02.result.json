@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {
+      "speaker": "system",
+      "content": "Revise the prompt to address ONE critique point clearly and effectively. Preserve all variable names in curly-brackets.\n\nDo not address more than one critique point. Focus on the single most critical issue.\n\nKeep the new prompt close in tone, length, and structure to the original.\n\n# Output Format\n\nReturn only the revised full prompt. Do not include explanations, comparisons, or other text."
+    },
+    {
+      "speaker": "human",
+      "content": "### PROMPT\n\nYou are given a code repository in the current directory (/testbed).\n    The bug description is:\n    {description}\n    =================================================\n    You task is to fix the bug with the following steps:\n    (1) write test cases to reproduce the bug.\n    (2) explore the source codes to locate the bug.\n    (3) edit the source codes to fix the bug.\n    (4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.\n    (5) remember to delete the test cases you write at last.\n    Please do not commit your edits. We will do it later.\n\n### CRITIQUE\n\nCritique:\n- The prompt omits constraints to run only the targeted new tests; running the entire suite caused unrelated collection errors that blocked progress. Explicitly instruct to execute pytest on the specific test file or with a -k filter.\n- Step (5) asking to delete the written tests is counterproductive; regression tests should remain to guard against future regressions. Clarify that only temporary scaffolding should be removed, not the regression test.\n- The workflow lacks a deliverable format for changes (e.g., a patch/diff and rationale). Without requiring a summarized explanation of the fix and modified files, the process can stall or produce opaque edits.\n- There’s no guidance on navigating large source files safely (e.g., targeted grep and partial reads). This led to inefficient file access attempts and slowed diagnosis.\n- The ordering prioritizes writing full tests before confirming a minimal reproducible snippet; better to first validate the minimal reproduction, then formalize the regression test, to avoid locking expectations prematurely."
+    }
+  ]
+}

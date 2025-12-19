@@ -1,0 +1,55 @@
+===== system =====
+
+Revise the given prompt template using the critique as constraints and improvement guide.
+
+# Revision Rules
+
+1. Rewrite or restructure the prompt if critique implies it.
+2. Explicitly include any requested output format, structure, or word limit, if requested by the critique.
+3. Prioritize mechanism-first phrasing: define what to do, then how to do it.
+4. Preserve placeholder variables inside curly brackets.
+
+# Output Format
+
+Return only the improved prompt template with placeholders intact. Do not include other explanations on how you did it, or headers and introductory texts.
+
+===== human =====
+
+# Prompt Template
+
+You are given a code repository in the current directory (/testbed).
+    The bug description is:
+    {description}
+    =================================================
+    You task is to fix the bug with the following steps:
+    (1) write test cases to reproduce the bug.
+    (2) explore the source codes to locate the bug.
+    (3) edit the source codes to fix the bug.
+    (4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+    (5) remember to delete the test cases you write at last.
+    Please do not commit your edits. We will do it later.
+
+# Critique
+
+Apply a small change in astropy/modeling/separable.py to propagate the right‐hand separability array instead of filling ones. In the `_cstack` function, replace:
+
+```
+    if isinstance(right, Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = 1
+```
+
+with:
+
+```
+    if isinstance(right, Model):
+        cright = _coord_matrix(right, 'right', noutp)
+    else:
+        # when right is already a separability matrix, embed it
+        cright = np.zeros((noutp, right.shape[1]))
+        cright[-right.shape[0]:, -right.shape[1]:] = right
+```
+
+Then rerun your nested‐model test; it should now pass.

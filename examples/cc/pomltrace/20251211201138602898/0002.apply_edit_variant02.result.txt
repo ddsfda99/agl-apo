@@ -1,0 +1,51 @@
+===== system =====
+
+Revise the prompt to address ONE critique point clearly and effectively. Preserve all variable names in curly-brackets.
+
+Do not address more than one critique point. Focus on the single most critical issue.
+
+Keep the new prompt close in tone, length, and structure to the original.
+
+# Output Format
+
+Return only the revised full prompt. Do not include explanations, comparisons, or other text.
+
+===== human =====
+
+### PROMPT
+
+You are given a code repository in the current directory (/testbed).
+    The bug description is:
+    {description}
+    =================================================
+    You task is to fix the bug with the following steps:
+    (1) write test cases to reproduce the bug.
+    (2) explore the source codes to locate the bug.
+    (3) edit the source codes to fix the bug.
+    (4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+    (5) remember to delete the test cases you write at last.
+    Please do not commit your edits. We will do it later.
+
+### CRITIQUE
+
+- **Clarify the code snippet extraction and reading approach:** The prompt requested inspection around the code snippet that includes the clause with `data.view(NdarrayMixin)`. Due to file size limits, multiple attempts to read the file failed or returned incomplete portions. Next time, explicitly requesting smaller file chunks or targeted line ranges up front can avoid confusion and incomplete reads.
+
+- **Ensure clear communication of read limitations:** When the file was too large to read, no immediate fallback was implemented to read only relevant line ranges until much later. Embed explicit instructions in the prompt or system about handling large files by reading specific offsets around matches to avoid wasted or failed read attempts.
+
+- **Include explicit instructions for injecting warnings:** The prompt currently instructs to add a warning but does not specify the need to import the `warnings` module. Including such import reminders, or verifying imports early, would prevent missing dependencies during the edit.
+
+- **Define expected warning type and message concretely:** The prompt could explicitly specify the warning class (`FutureWarning`) and exact message format, avoiding ambiguity and ensuring consistent implementation.
+
+- **Encourage early test case creation and validation:** The todo list was created, but the system did not proceed promptly to generate or run test cases to verify the warning or fix behavior. Prompting to prioritize test case creation early would raise confidence and reward.
+
+- **Clarify not committing changes yet:** The prompt states not to commit but does not clarify what to do to validate the change. Encouraging running tests locally (if available) or automated test runs before cleaning could improve validation quality.
+
+- **Specify file paths and locations clearly:** The repository has multiple files related to `NdarrayMixin`. The prompt could specify expected files to edit or exact location snippets to reduce exploratory overhead.
+
+- **Favor concise prompt wording:** The original prompt contains verbose instructions and copied bug reports which lengthen the input and increase token usage. Streamlining the prompt to focus just on actionable steps and relevant code snippets would improve efficiency and reduce overload.
+
+- **Add constraints on output formatting:** To avoid excessive verbosity, prompt constraints such as “return only diffs or line numbers” would allow faster, targeted navigation.
+
+- **Add guidance to clean up created test cases:** Step (5) mentions deleting test cases but does not emphasize preserving tests that validate the fix, which might be useful for later regression testing.
+
+Implementing these concrete changes would likely improve task clarity, reduce exploratory overhead, and facilitate more reliable and validated bug fixing workflows, increasing the reward in future runs.

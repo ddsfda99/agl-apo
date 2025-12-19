@@ -50,6 +50,15 @@ class ClaudeController:
         # prepare prompt safely: write it to a file inside the container using a single-quoted heredoc
         # directly applying prompt for heredoc may raise error for windows line ending \r\n
         prompt_text = self.user_prompt.format(description=instance["problem_statement"].replace('"""', "'''"))
+        
+        # ===== DEBUG =====
+        print("\n" + "=" * 80)
+        print("DEBUG: Prompt being sent to Claude Code:")
+        print("=" * 80)
+        print(prompt_text)
+        print("=" * 80 + "\n")
+        # ===== END DEBUG =====
+        
         # choose a simple filename and a heredoc delimiter unlikely to collide
         heredoc_cmd = "cat > /tmp/cc_prompt.txt <<'CC_PROMPT'\n" + prompt_text + "\nCC_PROMPT\n"
         self.container.send_command(heredoc_cmd)

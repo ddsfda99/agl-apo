@@ -29,7 +29,7 @@ from agentlightning import (
 )
 from agentlightning.litagent import LitAgent
 from agentlightning.llm_proxy import LLMProxy, ModelConfig
-from agentlightning.types import LLM, AttemptedRollout, NamedResources, ProxyLLM, Rollout, RolloutRawResult
+from agentlightning.types import LLM, AttemptedRollout, NamedResources, ProxyLLM, Rollout, RolloutRawResult, PromptTemplate
 
 
 def load_dataset(path: str = "swe_debug.jsonl", epoch: int = 0, limit: Optional[int] = None) -> Dict[str, Any]:
@@ -93,11 +93,41 @@ class CodingAgent(LitAgent):
         run_id = f"epoch_{task.get('epoch', 0)}"
         image = f"{self.namespace}/sweb.eval.x86_64.{task['instance_id'].lower()}".replace("__", "_1776_")
 
+        # ===== Debug: Print all received resources =====
+        import logging as _logging
+        _logging.info(f"📦 Received resources: {list(resources.keys()) if resources else 'None'}")
+        _logging.info(f"📦 Resources type: {type(resources)}")
+        _logging.info(f"📦 Resources content: {resources}")
+        for k, v in (resources.items() if hasattr(resources, 'items') else []):
+            _logging.info(f"  - Resource key: {k}, type: {type(v)}, value: {v}")
+
         llm = resources.get("llm")
+        _logging.info(f"📦 LLM resource: {llm}")
+        if llm is None:
+            _logging.error("❌ LLM resource is missing! All resources: %s", resources)
         assert llm is not None, "LLM resource is required for rollout."
 
         llm = self._strip_proxy_helper(llm, rollout)
+        
+        # Get prompt template from resources (this is what APO optimizes)
+        try:
+            prompt_template_resource = self._get_prompt_template_resource(resources)
+            # Extract the template string from PromptTemplate object
+            user_prompt_str = prompt_template_resource.template
+            _logging.info(f"✅ Using prompt template from resources")
+            # ===== DEBUG: 输出完整的prompt_template =====
+            print("\n" + "=" * 80)
+            print("🔍 DEBUG [cc_agent.py]: prompt_template received from resources:")
+            print("=" * 80)
+            print(user_prompt_str)
+            print("=" * 80 + "\n")
+            # ===== END DEBUG =====
+        except Exception as e:
+            _logging.error(f"❌ Failed to get prompt_template from resources: {e}")
+            _logging.warning(f"⚠️  Falling back to default user_prompt: {self.user_prompt}")
+            user_prompt_str = self.user_prompt
 
+        prediction: Optional[AgentResult] = None
         try:
             # 1. init container
             controller = ClaudeController(
@@ -105,7 +135,7 @@ class CodingAgent(LitAgent):
                 task,
                 run_id,
                 set(self.tools),
-                self.user_prompt,
+                user_prompt_str,  # Use the prompt from resources, not self.user_prompt
                 llm.endpoint,
                 llm.api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy"),
             )
@@ -115,6 +145,8 @@ class CodingAgent(LitAgent):
             del controller
         except Exception as e:
             logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
+            _logging.error(f"❌ Rollout failed with exception: {e}", exc_info=True)
+            return 0.0  # Return zero reward on exception
 
         # 3. obtain rewards (evaluation result)
         reward = 0.0
@@ -176,6 +208,14 @@ class CodingAgent(LitAgent):
             raise ValueError("Rollout is not an AttemptedRollout.")
 
         return proxy_llm.with_attempted_rollout(rollout)
+
+    def _get_prompt_template_resource(
+        self, resources: NamedResources
+    ) -> PromptTemplate:
+        prompt_template = resources.get("prompt_template")
+        if prompt_template is None:
+            raise ValueError("PromptTemplate resource 'prompt_template' is required for rollout.")
+        return prompt_template
 
 
 def flatten_messages(messages: List[Any]) -> List[Dict[str, str]]:

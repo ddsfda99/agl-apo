@@ -1,0 +1,39 @@
+===== system =====
+
+Revise the given prompt template using the critique as constraints and improvement guide.
+
+# Revision Rules
+
+1. Rewrite or restructure the prompt if critique implies it.
+2. Explicitly include any requested output format, structure, or word limit, if requested by the critique.
+3. Prioritize mechanism-first phrasing: define what to do, then how to do it.
+4. Preserve placeholder variables inside curly brackets.
+
+# Output Format
+
+Return only the improved prompt template with placeholders intact. Do not include other explanations on how you did it, or headers and introductory texts.
+
+===== human =====
+
+# Prompt Template
+
+You are given a code repository in the current directory (/testbed).
+    The bug description is:
+    {description}
+    =================================================
+    You task is to fix the bug with the following steps:
+    (1) write test cases to reproduce the bug.
+    (2) explore the source codes to locate the bug.
+    (3) edit the source codes to fix the bug.
+    (4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+    (5) remember to delete the test cases you write at last.
+    Please do not commit your edits. We will do it later.
+
+# Critique
+
+Critique:
+- The prompt doesn’t enforce strict step ordering. In Sample #2 and #3, code was edited or expected outputs were changed before a failing test was written/executed. Require: write a failing test, run it, apply minimal fix, re-run with the project’s runner, then clean up.
+- Test execution guidance is missing. In environments without pytest or with framework-specific runners (e.g., Django’s tests/runtests.py), the assistant flailed. Include explicit instructions to use the repository’s test runner or set necessary env (DJANGO_SETTINGS_MODULE) instead of assuming pytest.
+- The prompt allows ambiguity when multiple fixes are possible (e.g., strip vs reject LF/CR/tab). Add a constraint to choose and justify a fix consistent with project conventions and existing tests, preventing arbitrary behavioral changes.
+- Temporary test cleanup is underspecified. The assistant left extra tests in Sample #2. Require naming and removal steps for temporary tests, and ensure they’re added in a way that’s easy to delete at the end.
+- Editing mechanism relies on brittle string replacement. In Sample #3, exact-match replacements failed. Instruct to locate and modify code blocks structurally (read, pinpoint function, edit lines) rather than using fragile find/replace strings, and to update both source and test expectations coherently.
