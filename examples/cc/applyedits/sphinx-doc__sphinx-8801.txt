@@ -1,0 +1,141 @@
+Revised, focused, and guided prompt for the coding agent
+
+You are working in the Sphinx repository located at /testbed. Do not work on any other repository or package. The bug to fix is in Sphinx’s autodoc extension:
+
+Bug: autodoc: The annotation-only member in superclass is treated as “undocumented” when documenting a subclass with :inherited-members:. It only appears if :undoc-members: is provided, even though it has an inline doc comment (“#: docstring”).
+
+Your tasks:
+1) Write tests that reproduce the bug in Sphinx’s test harness.
+2) Explore Sphinx’s autodoc source to locate the issue.
+3) Implement a fix in Sphinx’s code.
+4) Re-run your tests to validate the fix. If tests fail, iterate.
+5) Delete the tests you added (as per the assignment’s requirement) before finishing. Do not commit any edits.
+
+Important: The previous attempt fixed the wrong project (Astropy) and did not address Sphinx’s autodoc issue. Ensure all changes and tests are in the Sphinx repo at /testbed and that your tests exercise autodoc with :members: and :inherited-members:.
+
+Context and expected behavior:
+- Given a base class Foo that has an annotation-only attribute with an inline comment:
+  class Foo:
+      attr1: int  #: docstring
+- And a subclass Bar(Foo) documented with :
+  .. autoclass:: example.Bar
+     :members:
+     :inherited-members:
+- The documented output for Bar should include Foo.attr1 with its comment (“docstring”) even without :undoc-members:.
+
+High-level diagnosis:
+- Sphinx uses ModuleAnalyzer to extract attribute docs from source (inline “#:” comments), keyed by fully qualified names like example.Foo.attr1.
+- When documenting a subclass (Bar), autodoc looks up docs for example.Bar.attr1. Since the inline docs are stored under example.Foo.attr1, autodoc treats Bar.attr1 as undocumented.
+- The fix is to make autodoc inherit attribute inline docs from base classes when documenting a subclass, similar to how autodoc_inherit_docstrings works for methods, so that AttributeDocumenter.get_doc() can find docs in the MRO if not found for the subclass’s own key.
+
+Step-by-step instructions
+
+1) Write a failing test that reproduces the bug
+- Use Sphinx’s built-in pytest testing approach with test roots.
+
+- Create a test root under tests/roots/test-autodoc-inherited-annonly containing:
+  - conf.py:
+    extensions = ['sphinx.ext.autodoc']
+    master_doc = 'index'
+    # Keep defaults (autodoc_inherit_docstrings is True by default)
+  - example.py:
+    class Foo:
+        '''docstring'''
+        attr1: int  #: docstring
+
+    class Bar(Foo):
+        '''docstring'''
+        attr2: str  #: docstring
+  - index.rst:
+    .. autoclass:: example.Bar
+       :members:
+       :inherited-members:
+
+- Add a pytest test file tests/test_ext_autodoc_inherited_annonly.py with something like:
+  import pytest
+
+  @pytest.mark.sphinx('text', testroot='autodoc-inherited-annonly')
+  def test_inherited_annotation_only_attr_is_documented(app, status, warning):
+      app.build()
+      output = (app.outdir / 'index.txt').read_text(encoding='utf8')
+      # Should include attr1 with its docstring without :undoc-members:
+      assert 'attr1' in output
+      assert 'docstring' in output
+      # Ensure it's not just attr2; attr1 is inherited from Foo
+      # Optional stricter check: attribute section for attr1 shows up under Bar
+
+- Run just this test to see it fail initially:
+  pytest -q tests/test_ext_autodoc_inherited_annonly.py
+
+Expected failure: The output will not include the docstring for attr1 unless :undoc-members: is used, or attr1 might be considered undocumented.
+
+2) Locate the bug in Sphinx’s source
+- Relevant code paths:
+  - sphinx/ext/autodoc/documenters/class.py (ClassDocumenter; member collection and inherited-members handling)
+  - sphinx/ext/autodoc/documenters/data.py (AttributeDocumenter; attribute doc retrieval)
+  - sphinx/ext/autodoc/__init__.py (Documenter.filter_members and common logic)
+  - sphinx/pycode/__init__.py and ModuleAnalyzer: used to extract inline attribute docs keyed by fully-qualified names like module.Class.attr.
+
+- Key things to inspect:
+  - AttributeDocumenter.get_doc() or equivalent method that retrieves documentation for attributes by consulting the ModuleAnalyzer’s find_attr_docs mapping.
+  - How the fullname key is formed for lookup (self.fullname = f"{self.modname}.{self.objpath joined}").
+  - For inherited attribute Bar.attr1, docs exist under example.Foo.attr1, not example.Bar.attr1. There should be a fallback that traverses the MRO and queries analyzer for base classes if initial lookup fails.
+
+3) Implement the fix
+- Modify AttributeDocumenter (likely in sphinx/ext/autodoc/documenters/data.py) to inherit inline attribute docs from bases.
+
+- Concrete approach:
+  - In AttributeDocumenter.get_doc() (or wherever it resolves attr docs from ModuleAnalyzer), after failing to find docs for self.fullname (e.g., example.Bar.attr1), attempt to find docs in base classes:
+    - Determine the current class qualname and module: cls = the class being documented (parent of this attribute documenter). You can obtain it from self.parent or self.object.__objclass__ or via context in the class documenter; in Sphinx, AttributeDocumenter.objpath[-2] may be the class name; self.modname gives the module.
+    - Resolve the class object and compute its MRO (excluding object and the class itself).
+    - For each base in MRO:
+      - Build candidate fullname: f"{base.__module__}.{base.__qualname__}.{attr_name}"
+      - Query the module analyzer for base.__module__ (ModuleAnalyzer.for_module(base.__module__)) and get find_attr_docs().
+      - If a doc entry exists for that candidate fullname, use it as the documentation for this attribute and return it.
+  - This fallback should not depend on :undoc-members:. It’s about finding docs for a discovered member.
+  - Be careful to:
+    - Only do this when the attribute name is annotation-only or otherwise lacks a direct docstring; i.e., perform fallback only when the primary lookup fails.
+    - Preserve existing behavior for non-inherited attributes.
+    - Not break performance: a simple MRO traversal and lookup is fine.
+
+- Alternative but acceptable approach:
+  - Adjust ClassDocumenter.get_object_members() to include analyzer-reported annotation-only attributes from base classes when :inherited-members: is set, and mark them such that AttributeDocumenter.get_doc() can locate the doc by informing it of the base owner. However, modifying AttributeDocumenter.get_doc() for MRO-based lookup is simpler and robust.
+
+- Notes:
+  - autodoc_inherit_docstrings defaults to True; align this behavior for attribute inline docs as well.
+  - Ensure that ModuleAnalyzer for the subclass’s module is still used first; only consult base module analyzers if needed. In the reproduction both classes are in the same module, but your fix should handle cross-module inheritance as well.
+
+4) Validate the fix
+- Re-run the specific test:
+  pytest -q tests/test_ext_autodoc_inherited_annonly.py
+- It should now pass, with index.txt including attr1 and its “docstring” under Bar without requiring :undoc-members:.
+
+- Optionally, add a second assertion to confirm that removing :inherited-members: hides attr1 as expected, to avoid over-including. You can do this transiently if helpful; remember to delete tests at the end.
+
+5) Clean up
+- As required by the assignment, delete all test files and test roots you added:
+  - Remove tests/test_ext_autodoc_inherited_annonly.py
+  - Remove tests/roots/test-autodoc-inherited-annonly/ (conf.py, index.rst, example.py)
+- Do not commit your edits.
+
+Additional guidance and tips
+- Search hints in the code:
+  - grep -R "AttributeDocumenter" -n sphinx/ext/autodoc
+  - grep -R "find_attr_docs" -n
+  - grep -R "inherited-members" -n
+  - Look at Documenter.filter_members and how members are classified as "undocumented" (i.e., docstring resolution returns empty). Your change must ensure that an inherited annotation-only attribute can find its inline doc through the base class.
+
+- Acceptance criteria:
+  - When documenting a subclass with :members: and :inherited-members:, inherited annotation-only attributes from base classes appear with their inline doc comments (“#: docstring”) without requiring :undoc-members:.
+  - Existing autodoc behavior for attributes and methods remains unchanged.
+  - Cross-module inheritance works (if the base class is in another module, the inline doc is still found via that module’s analyzer).
+
+- Constraints:
+  - Do not introduce new public APIs.
+  - Keep changes minimal and well-targeted to autodoc’s attribute doc resolution.
+  - Do not commit any changes; we will commit later.
+
+Run commands summary
+- Run only your target test during development:
+  pytest -q tests/test_ext_autodoc_inherited_annonly.py
+- After fixing and verifying, delete your test files as per step (5).

@@ -1,0 +1,18 @@
+- Read the bug description carefully and run the smallest relevant subset of existing tests to understand expected behavior before making changes. Prioritize running the full module or package tests after a local fix.
+- Write a minimal, focused regression test that reliably reproduces the bug. Place it alongside existing tests for the affected component and avoid modifying or relaxing existing tests.
+- Keep the regression test in place while iterating on the fix. Only delete your added test(s) after the fix is validated by passing both the new test and the broader test suite.
+- Do not modify unrelated files (docs, examples, tutorials) or tests not directly tied to reproducing the bug. Keep changes scoped to the affected code and the temporary regression test.
+- Locate the true source of the bug with targeted exploration: read the relevant modules, search for the responsible functions/paths, and inspect how the feature is implemented and tested.
+- Make minimal, localized changes that integrate with the project’s existing architecture, helpers, and conventions. Avoid ad-hoc workarounds that bypass established utilities or precedence rules.
+- Preserve semantics and performance. Ensure the fix does not broaden or loosen matching/filtering behavior, change algorithmic complexity drastically, or introduce regressions in edge cases (multi-valued relations, alias reuse, etc.).
+- Prefer combining conditions efficiently rather than duplicating work per input token or branch. Avoid multiplicative operations that can blow up SQL joins, loops, or subqueries.
+- Handle common edge cases explicitly and early: empty inputs, scalar vs 1D shapes, dtype consistency, non-invertible configurations, and boundary conditions. Use existing validation utilities where available.
+- Be careful with mutability vs reassignment. When updating object internals (arrays/properties), use official setters or update dependent references to avoid stale local snapshots.
+- Match exact expected outputs for printers/formatters (operators, parentheses, float vs int literals) by using structural checks and established helpers rather than string post-processing.
+- For precision/formatting logic, derive parameters from object data (e.g., boundaries, intervals) rather than hardcoded constants; compute deltas from accessible attributes when inverse mappings are unavailable.
+- Ensure indices and array types are appropriate before indexing (e.g., convert to integer dtype when indexing class arrays). Maintain consistent dtypes in outputs (empty arrays, inverse transforms).
+- For exception and warning tests, use robust assertions (regex matching or project-provided helpers). Do not rely on brittle exact strings unless required; when exact messages are mandated, ensure code emits them.
+- Maintain backward compatibility and avoid API changes. Keep the fix constrained and readable; document non-obvious decisions with brief inline comments.
+- After implementing the fix, rerun your regression test, the relevant test module, and then a broader suite to check for regressions. Iterate until all pass.
+- Remove all temporary test files you added once the fix is verified. Do not revert tests prematurely; cleanup happens at the end.
+- Do not commit your edits. Leave commits to a later step as instructed.

@@ -1,4 +1,5 @@
 import json
+import os
 import platform
 import traceback
 from argparse import ArgumentParser
@@ -81,7 +82,12 @@ def run_instance(
     # Set up logging directory
     instance_id = test_spec.instance_id
     model_name_or_path = pred.get(KEY_MODEL, "None").replace("/", "__")
-    log_dir = RUN_EVALUATION_LOG_DIR / run_id / model_name_or_path / instance_id
+    eval_logs_root = os.environ.get("CC_EVAL_LOG_DIR")
+    if eval_logs_root:
+        eval_logs_root = Path(eval_logs_root)
+    else:
+        eval_logs_root = RUN_EVALUATION_LOG_DIR
+    log_dir = eval_logs_root / run_id / model_name_or_path / instance_id
 
     # Set up report file
     report_path = log_dir / LOG_REPORT

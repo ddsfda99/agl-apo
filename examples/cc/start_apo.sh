@@ -3,17 +3,23 @@
 # 创建 tmux 会话
 SESSION_NAME="cc_apo"
 
+# 获取当前工作目录
+WORK_DIR="$(pwd)"
+
+# 确保 logs 目录存在
+mkdir -p "$WORK_DIR/logs"
+
 # 创建新会话，第一个窗口运行 store
 tmux new-session -d -s $SESSION_NAME -n "store"
-tmux send-keys -t $SESSION_NAME:0 "cd examples/cc && uv run agl store --port 4748" C-m
+tmux send-keys -t $SESSION_NAME:0 "cd '$WORK_DIR' && uv run agl store --port 4748" C-m
 
 # 创建第二个窗口运行 rollout_runner，日志输出到文件
 tmux new-window -t $SESSION_NAME:1 -n "runner"
-tmux send-keys -t $SESSION_NAME:1 "cd examples/cc && uv run rollout_runner.py 2>&1 | tee logs/rollout_runner_$(date +%Y%m%d_%H%M%S).log" C-m
+tmux send-keys -t $SESSION_NAME:1 "cd '$WORK_DIR' && uv run rollout_runner.py 2>&1 | tee logs/rollout_runner_$(date +%Y%m%d_%H%M%S).log" C-m
 
 # 创建第三个窗口运行 cc_apo_algo，日志输出到文件
 tmux new-window -t $SESSION_NAME:2 -n "apo"
-tmux send-keys -t $SESSION_NAME:2 "cd examples/cc && uv run cc_apo_algo.py 2>&1 | tee logs/cc_apo_algo_$(date +%Y%m%d_%H%M%S).log" C-m
+tmux send-keys -t $SESSION_NAME:2 "cd '$WORK_DIR' && uv run cc_apo_algo.py 2>&1 | tee logs/cc_apo_algo_$(date +%Y%m%d_%H%M%S).log" C-m
 
 # 选择第一个窗口
 tmux select-window -t $SESSION_NAME:0
