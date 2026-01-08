@@ -155,17 +155,17 @@ async def apo_algorithm(*, store: agl.LightningStore):
     #     _poml_trace=True
     # )
     
-    # ===== Multi-instance APO config (3 train + 2 val) =====
+    # ===== Single-instance APO config =====
     apo = APO[Dict[str, Any]](
         async_openai_client=async_openai_client,
         gradient_model="gpt-5-20250807",
         apply_edit_model="gpt-5-20250807",
         diversity_temperature=1.0,
-        gradient_batch_size=3,  
-        val_batch_size=2,       # use all 2 validation instances per evaluation
-        beam_width=2,           # keep top 2 prompts in beam
-        branch_factor=2,        # generate 2 variants from each parent
-        beam_rounds=3,          # 3 rounds of optimization
+        gradient_batch_size=1,  
+        val_batch_size=1,
+        beam_width=1,           # single beam for single instance
+        branch_factor=1,
+        beam_rounds=2,
         rollout_batch_timeout=3600.0,
         _poml_trace=True
     )
@@ -191,9 +191,9 @@ async def apo_algorithm(*, store: agl.LightningStore):
     # train = train_dataset[:1]  # Use only 1 instance for gradient computation
     # val = val_dataset  # Use all instances for validation
     
-    # ===== swe_debug_1.jsonl: 3 train + 2 val =====
-    dataset = load_dataset("swe_debug_1.jsonl")
-    train, val = split_dataset(dataset, train_size=3, val_size=2)
+    # ===== astropy__astropy-7606.jsonl for both train and val =====
+    dataset = load_dataset("astropy__astropy-7606.jsonl")
+    train, val = dataset, dataset
     
     # run apo algorithm
     await apo.run(

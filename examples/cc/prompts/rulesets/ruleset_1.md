@@ -1,0 +1,18 @@
+=== Optimized dynamic ruleset ===
+- Run the existing tests first to confirm the bug and establish a baseline; record the failing cases and relevant stack traces.
+- Write minimal, focused tests that reliably reproduce the bug and fail before the fix; include closely related symmetric pathways (e.g., both read and write paths for I/O bugs).
+- Confine code changes to the smallest possible surface area; avoid modifying public APIs, constructors, or shared initialization unless strictly necessary.
+- If changes to public or shared behavior are unavoidable, preserve default behavior, keep backward compatibility, and add tests to verify no regressions.
+- Do not alter configuration, packaging, dependencies, or environment (e.g., version pins) unless the bug is directly caused by them; avoid unrelated changes.
+- Prefer content-aware, data-driven logic over index-based or hardcoded assumptions; derive behavior from structure and existing parameters.
+- Contain fixes to the specific path affected (e.g., reader vs writer) when possible; audit call sites before changing shared components to prevent regressions.
+- Reuse existing utilities and follow project conventions; avoid duplicating functionality or introducing new dependencies.
+- Maintain code style and clarity; add concise comments explaining the bug and the rationale for the fix.
+- After implementing the fix, run relevant module tests and then the full project test suite to catch regressions; iterate until all tests pass.
+- Keep changes minimal and reversible; avoid refactoring beyond what is necessary to fix the bug.
+- Do not modify or remove existing tests except when specifications are incorrect; prefer adding new tests for coverage.
+- Cover edge cases in tests (defaults, non-default configs, empty inputs, variable-length structures) where applicable.
+- Preserve existing exception types and messages unless the specification requires changes; avoid silently altering public behavior.
+- Ensure parameters are passed and applied at the correct stage (e.g., read-time vs write-time) without unintentionally changing parse semantics.
+- After verifying the fix, delete the tests you added as instructed; remove any temporary debugging artifacts.
+- Do not commit changes; leave the repository ready for external commit.

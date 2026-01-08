@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import time
 from typing import Any, Dict, List, Literal, Optional
 
@@ -90,7 +91,11 @@ class CodingAgent(LitAgent):
     async def rollout_async(
         self, task: Dict[str, Any], resources: NamedResources, rollout: Rollout
     ) -> RolloutRawResult:
-        run_id = f"epoch_{task.get('epoch', 0)}"
+        run_suffix = os.environ.get("CC_RUN_TS")
+        if run_suffix:
+            run_id = f"epoch_{task.get('epoch', 0)}_{run_suffix}"
+        else:
+            run_id = f"epoch_{task.get('epoch', 0)}"
         image = f"{self.namespace}/sweb.eval.x86_64.{task['instance_id'].lower()}".replace("__", "_1776_")
 
         # ===== Debug: Print all received resources =====
@@ -126,6 +131,36 @@ class CodingAgent(LitAgent):
             _logging.error(f"❌ Failed to get prompt_template from resources: {e}")
             _logging.warning(f"⚠️  Falling back to default user_prompt: {self.user_prompt}")
             user_prompt_str = self.user_prompt
+
+        base_prompt_dir = os.path.join("examples", "cc", "full_prompts")
+        os.makedirs(base_prompt_dir, exist_ok=True)
+        safe_description = task.get("problem_statement", "").replace('"""', "'''")
+        try:
+            full_prompt = user_prompt_str.format(description=safe_description)
+        except Exception:
+            full_prompt = user_prompt_str
+
+        instance_id = task.get("instance_id", "unknown")
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
+        prefix = f"{safe_id}_v"
+        next_version = 0
+        try:
+            for name in os.listdir(base_prompt_dir):
+                if not name.startswith(prefix) or not name.endswith(".txt"):
+                    continue
+                suffix = name[len(prefix):-4]
+                if suffix.isdigit():
+                    next_version = max(next_version, int(suffix) + 1)
+        except FileNotFoundError:
+            pass
+
+        prompt_dump_path = os.path.join(base_prompt_dir, f"{safe_id}_v{next_version}.txt")
+        try:
+            with open(prompt_dump_path, "w", encoding="utf-8") as f:
+                f.write(full_prompt)
+            _logging.info(f"✅ Saved full prompt to {prompt_dump_path}")
+        except Exception as e:
+            _logging.warning(f"⚠️  Failed to save full prompt to {prompt_dump_path}: {e}")
 
         prediction: Optional[AgentResult] = None
         try:
@@ -314,8 +349,13 @@ async def cc_agent_dry_run_sample(
         triplets = adapter.adapt(spans)
         logging.info(f"dump {len(spans)} spans, extract {len(triplets)} triplets")
         if output_dir is not None:
+            instance_output_dir = f"{output_dir}-{dataset[0]['instance_id']}"
+            os.makedirs(instance_output_dir, exist_ok=True)
             with open(
-                os.path.join(output_dir, f"stream_{dataset[0]['instance_id']}-{rollout.attempt.attempt_id}.json"), "w"
+                os.path.join(
+                    instance_output_dir, f"stream_{dataset[0]['instance_id']}-{rollout.attempt.attempt_id}.json"
+                ),
+                "w",
             ) as f:
                 for span in spans:
                     f.write(json.dumps(span.model_dump()) + "\n")
@@ -342,7 +382,7 @@ async def cc_agent_dry_run_sample(
                 )
 
             ds = Dataset.from_list(all_triplets)
-            ds.save_to_disk(os.path.join(output_dir, f"dataset-{dataset[0]['instance_id']}"))
+            ds.save_to_disk(os.path.join(instance_output_dir, f"dataset-{dataset[0]['instance_id']}"))
             logging.info(f"Saved dataset with {len(ds)} samples to dataset-{dataset[0]['instance_id']}")
 
     await llm_proxy.stop()
@@ -359,6 +399,7 @@ async def gold_cc_agent_run_dataset(
     This is a simple test function that runs the math agent on the first 4 problems
     using a single worker. Useful for testing the setup and configuration.
     """
+    # Load dataset from config to avoid hard-coded path
     dataset = load_dataset(config["dataset"]["dataset_path"])
 
     logging = configure_logger(name="Claude Code Agent")
@@ -375,16 +416,31 @@ async def gold_cc_agent_run_dataset(
     )
 
     await store.start()
+    sleep_seconds = config.get("runtime", {}).get("sleep_seconds", 6)
 
+    # Use CloudGPT configuration (same as cc_apo_algo.py)
+    from utils.cloudgpt_aoai import get_openai_token_provider
+    token_provider = get_openai_token_provider()
+    
     llm_proxy.update_model_list(
         [
             ModelConfig(
                 model_name=f"{sonnet_name}",
-                litellm_params={"model": f"anthropic/{sonnet_name}", "api_key": "os.environ/ANTHROPIC_API_KEY"},
+                litellm_params={
+                    "model": "azure/gpt-5-20250807",
+                    "api_base": "https://cloudgpt-openai.azure-api.net/",
+                    "api_version": "2025-04-01-preview",
+                    "azure_ad_token": token_provider(),
+                },
             ),
             ModelConfig(
                 model_name=f"{haiku_name}",
-                litellm_params={"model": f"anthropic/{haiku_name}", "api_key": "os.environ/ANTHROPIC_API_KEY"},
+                litellm_params={
+                    "model": "azure/gpt-5-nano-20250807",
+                    "api_base": "https://cloudgpt-openai.azure-api.net/",
+                    "api_version": "2025-04-01-preview",
+                    "azure_ad_token": token_provider(),
+                },
             ),
         ]
     )
@@ -414,12 +470,14 @@ async def gold_cc_agent_run_dataset(
         if output_dir is None:
             logging.info(f"instance {each['instance_id']} generate {len(spans)} spans")
         else:
-            logging.info(f"instance {each['instance_id']} dump {len(spans)} spans to {output_dir}")
-            with open(os.path.join(output_dir, f"{each['instance_id']}.json"), "w") as f:
+            instance_output_dir = f"{output_dir}-{each['instance_id']}"
+            os.makedirs(instance_output_dir, exist_ok=True)
+            logging.info(f"instance {each['instance_id']} dump {len(spans)} spans to {instance_output_dir}")
+            with open(os.path.join(instance_output_dir, f"{each['instance_id']}.json"), "w") as f:
                 for span in spans:
                     f.write(json.dumps(span.model_dump()) + "\n")
 
-        time.sleep(2 * 60)
+        time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":
@@ -445,10 +503,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    run_ts = time.strftime("%Y%m%d_%H%M%S")
+    os.environ.setdefault("CC_RUN_TS", run_ts)
+    logs_root = f"logs_{run_ts}"
+    os.environ.setdefault("CC_LOGS_DIR", logs_root)
+    os.environ.setdefault("CC_EVAL_LOG_DIR", os.path.join(logs_root, "run_evaluation"))
+
     with open(args.agent_config) as f:
         config = yaml.safe_load(f)
 
     if args.output_dir is not None:
+        args.output_dir = f"{args.output_dir}_{run_ts}"
         os.makedirs(args.output_dir, exist_ok=True)
 
     if not args.official:

@@ -1,0 +1,95 @@
+You are working in the /testbed repository. Your goal is to fix a MathML presentation printing bug where symbols ending with a digit (e.g., x2) become invisible in Safari.
+
+Bug description: A symbol ending with a number is made invisible when printing with MathML
+A variable with a number, such as x1, is made invisible when printing in a MathML format.
+`import sympy
+from sympy.printing.mathml import mathml
+
+x2, y, z = sympy.symbols('x2 y z')
+y = x2*z+x2**3
+f = open('sympy_test.html', 'w')
+f.write('\n')
+f.write('\n')
+f.write('\n')
+f.write('\n')
+f.write(sympy.mathml(y, printer='presentation')+'\n')
+f.write('\n')
+f.write('\n')
+f.write('\n')
+f.close()`
+
+Viewing the output in Safari 12.0.2:
+<img width="93" alt="screen shot 2018-12-31 at 12 21 00 pm" src="https://user-images.githubusercontent.com/46286768/50567565-48d8c080-0cfb-11e9-84d2-5738f1c2e2ba.png">
+
+If 'x' is used instead of 'x2', it works as expected:
+x, y, z = sympy.symbols('x y z')
+y = x*z+x**3
+<img width="78" alt="screen shot 2018-12-31 at 12 26 24 pm" src="https://user-images.githubusercontent.com/46286768/50567570-542bec00-0cfb-11e9-986d-015e0023a2a1.png">
+
+BTW, I'm on a MacBook Pro, OS 10.14.2, Sympy 1.3, in Eclipse 2018-19, and Python 3.7.
+
+
+Important context from prior attempts and what you must do differently:
+- The invisibility is caused by the presentation printer wrapping structural MathML tags (msub/msup/msubsup) inside an outer mi element. This nesting is invalid for Presentation MathML and can cause Safari to render parts as invisible.
+- The correct minimal fix is to remove the invalid outer mi wrapper and return the structural tag directly when there are subscripts/superscripts, while keeping subscripts/superscripts content as mi nodes (even for digits). Do not switch digits in subscripts/superscripts from mi to mn. Exponents in powers (x**2) are already printed as mn and should remain so.
+- Keep changes limited to the presentation printer. Do not alter the content printer.
+- Preserve styling (e.g., bold) by applying it to the base mi element inside msub/msup/msubsup, rather than on any outer wrapper.
+
+Follow these steps precisely:
+
+1) Write temporary tests that reproduce the bug and assert the desired fixed structure
+   - Create a temporary test file, for example sympy/printing/tests/tmp_test_mathml_symbol_visibility.py. These tests are meant only to guide the fix and must be deleted at the end.
+   - Tests to add:
+     - Test that printing a Symbol with a trailing digit uses structural tags directly without an outer mi wrapper:
+       - Using MathMLPresentationPrinter or sympy.mathml with printer='presentation', assert that doprint(Symbol('x2')) or sympy.mathml(Symbol('x2'), printer='presentation') starts with '<msub>' (not '<mi>').
+       - Inside the msub, assert the base is '<mi>x</mi>'.
+       - Assert the subscript digit is printed as '<mi>2</mi>' (do not expect '<mn>2</mn>' in subscript).
+     - Test that a plain symbol with no trailing digits remains a simple mi:
+       - doprint(Symbol('x')) yields '<mi>x</mi>'.
+     - Optional: Test superscript-only symbol variants if present in the printer’s logic; otherwise, test x**3 to ensure exponents remain mn:
+       - doprint(Symbol('x')**3) should contain '<msup>' with exponent printed as '<mn>3</mn>'.
+   - Keep these assertions structural and string-based; we cannot test browser rendering here.
+
+2) Explore the source code to locate the bug
+   - Open sympy/printing/mathml.py.
+   - Locate the MathMLPresentationPrinter class and the _print_Symbol method.
+   - Identify where an outer mi element is created that wraps msub/msup/msubsup for symbols with subscripts/superscripts or trailing digits.
+
+3) Edit the source code to implement the minimal, compatible fix
+   - Modify MathMLPresentationPrinter._print_Symbol so that:
+     - When the symbol has no subscript/superscript/trailing-digit parsing, return a simple mi element with the symbol’s name (preserving any style such as bold).
+     - When the symbol has subscript/superscript parts (e.g., x2, x_2, x^{2}, x_2^3), return the structural tag (msub, msup, or msubsup) directly. The base should be a single mi element with the symbol’s base name and any style applied to this base mi. Do not wrap the structural tag inside an outer mi.
+     - For the subscript/superscript items, keep using mi nodes even when the content is digits. Do not introduce mn for sub/sup digits. This maintains compatibility with existing expectations for sub/sup content. Exponents in power expressions should continue to be mn.
+   - Do not change the content MathML printer.
+   - Do not broaden edits beyond what is necessary; avoid refactoring unrelated logic.
+
+4) Run tests and validate the fix
+   - Run your temporary tests:
+     - If pytest is available: python -m pytest sympy/printing/tests/tmp_test_mathml_symbol_visibility.py -q
+     - If pytest is not available, use a small Python script to import SymPy from the repo and assert on the output strings, e.g., using print or simple assert statements in a script under sympy/printing/tests, then execute it with python.
+   - Also, run existing MathML tests if present:
+     - Try: python -m pytest sympy/printing/tests/test_mathml.py -q
+     - If pytest is unavailable, at least manually validate key behaviors covered by those tests: printing plain symbols (mi), subscripts/superscripts structure, and exponents (mn). Ensure that removing the outer mi does not regress other tested outputs.
+   - If you see test failures:
+     - Do NOT revert to the invalid outer mi wrapper.
+     - Make minimal adjustments to preserve existing expectations without reintroducing invalid nesting. In particular, keep digits in subscripts/superscripts as mi, exponents in powers as mn, and apply style on the base mi only.
+     - Re-run tests until both your temporary tests and the repository’s tests pass or until your manual validations confirm the outputs match expectations.
+
+5) Delete your temporary tests
+   - Remove sympy/printing/tests/tmp_test_mathml_symbol_visibility.py and any other new test artifacts you added.
+   - Do not commit any changes. We will commit later.
+
+Reference reproduction snippet for local manual checks (do not add permanently to the repo):
+- Before fix (current buggy behavior often yields): '<mi><msub><mi>x</mi><mi>2</mi></msub></mi>'
+- After fix (desired): '<msub><mi>x</mi><mi>2</mi></msub>'
+- Plain symbol: '<mi>x</mi>'
+- Power: x**3 should contain '<msup>' with exponent '<mn>3</mn>'
+
+Key constraints to respect:
+- Only fix the presentation MathML printer.
+- Remove the invalid outer mi wrapper around msub/msup/msubsup.
+- Keep subscripts/superscripts content as mi, even for digits.
+- Preserve bold/style on the base mi element.
+- Keep changes minimal and avoid unnecessary refactoring.
+- Write temporary tests to guide the fix and delete them at the end.
+- Do not commit your edits.

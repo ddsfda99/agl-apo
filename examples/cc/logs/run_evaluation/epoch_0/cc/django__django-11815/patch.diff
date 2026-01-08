@@ -1,0 +1,46 @@
+diff --git a/django/db/migrations/serializer.py b/django/db/migrations/serializer.py
+index 27b5cbd379..36c97a7233 100644
+--- a/django/db/migrations/serializer.py
++++ b/django/db/migrations/serializer.py
+@@ -120,6 +120,12 @@ class EnumSerializer(BaseSerializer):
+     def serialize(self):
+         enum_class = self.value.__class__
+         module = enum_class.__module__
++        # If the enum value is a lazily-translated string (Promise), serialize
++        # by enum member name to avoid depending on the translatable value.
++        from django.utils.functional import Promise
++        if isinstance(self.value.value, Promise):
++            imports = {f'import {module}'}
++            return f"{module}.{enum_class.__name__}['{self.value.name}']", imports
+         v_string, v_imports = serializer_factory(self.value.value).serialize()
+         imports = {'import %s' % module, *v_imports}
+         return "%s.%s(%s)" % (module, enum_class.__name__, v_string), imports
+diff --git a/tests/migrations/test_writer.py b/tests/migrations/test_writer.py
+index f97d76e9ad..a2927c0d02 100644
+--- a/tests/migrations/test_writer.py
++++ b/tests/migrations/test_writer.py
+@@ -306,6 +306,24 @@ class WriterTests(SimpleTestCase):
+             "default=migrations.test_writer.IntEnum(1))"
+         )
+ 
++    def test_serialize_enums_with_lazy_values(self):
++        class Status(enum.Enum):
++            GOOD = _('Good')
++            BAD = _('Bad')
++
++        # Single enum member should be serialized by name access for lazy values.
++        string, imports = MigrationWriter.serialize(Status.BAD)
++        self.assertEqual(string, "migrations.test_writer.Status['BAD']")
++
++        # Field default using an enum with lazy values should be serialized by name.
++        field = models.CharField(default=Status.GOOD, max_length=128, choices=[(m.value, m) for m in Status])
++        string = MigrationWriter.serialize(field)[0]
++        self.assertEqual(
++            string,
++            "models.CharField(choices=[('Good', migrations.test_writer.Status['GOOD']), ('Bad', migrations.test_writer.Status['BAD'])], "
++            "default=migrations.test_writer.Status['GOOD'], max_length=128)"
++        )
++
+     def test_serialize_choices(self):
+         class TextChoices(models.TextChoices):
+             A = 'A', 'A value'

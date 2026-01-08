@@ -1,0 +1,72 @@
+diff --git a/sympy/parsing/sympy_parser.py b/sympy/parsing/sympy_parser.py
+index 52711d1324..a8ab6b2bb1 100644
+--- a/sympy/parsing/sympy_parser.py
++++ b/sympy/parsing/sympy_parser.py
+@@ -1118,6 +1118,15 @@ class EvaluateFalseTransformer(ast.NodeTransformer):
+         'cosh', 'coth', 'csch', 'sech', 'sinh', 'tanh',
+         'exp', 'ln', 'log', 'sqrt', 'cbrt',
+     )
++    # Comparison operator strings map to function names in sympy.core.relational
++    compare_ops = {
++        ast.Lt: 'Lt',
++        ast.Gt: 'Gt',
++        ast.LtE: 'Le',
++        ast.GtE: 'Ge',
++        ast.Eq: 'Eq',
++        ast.NotEq: 'Ne',
++    }
+ 
+     def flatten(self, args, func):
+         result = []
+@@ -1186,6 +1195,51 @@ def visit_BinOp(self, node):
+             return new_node
+         return node
+ 
++    def visit_Compare(self, node):
++        # Handle comparison operators (e.g. <, >, ==, !=, <=, >=)
++        # Convert to the corresponding SymPy relational calls with evaluate=False.
++        left = self.visit(node.left)
++        comparators = [self.visit(c) for c in node.comparators]
++
++        op_map = {
++            ast.Lt: 'Lt',
++            ast.Gt: 'Gt',
++            ast.LtE: 'Le',
++            ast.GtE: 'Ge',
++            ast.Eq: 'Eq',
++            ast.NotEq: 'Ne',
++        }
++
++        calls = []
++        curr_left = left
++        for op, comp in zip(node.ops, comparators):
++            sympy_name = op_map.get(op.__class__)
++            if not sympy_name:
++                # Unknown comparison operator; leave as-is
++                return node
++            call = ast.Call(
++                func=ast.Name(id=sympy_name, ctx=ast.Load()),
++                args=[curr_left, comp],
++                keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                starargs=None,
++                kwargs=None,
++            )
++            calls.append(call)
++            curr_left = comp
++
++        if len(calls) == 1:
++            return calls[0]
++        else:
++            # Chain comparisons into an And of individual relations
++            and_call = ast.Call(
++                func=ast.Name(id='And', ctx=ast.Load()),
++                args=calls,
++                keywords=[ast.keyword(arg='evaluate', value=ast.NameConstant(value=False, ctx=ast.Load()))],
++                starargs=None,
++                kwargs=None,
++            )
++            return and_call
++
+     def visit_Call(self, node):
+         new_node = self.generic_visit(node)
+         if isinstance(node.func, ast.Name) and node.func.id in self.functions:
