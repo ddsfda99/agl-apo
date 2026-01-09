@@ -4,6 +4,7 @@ import os
 import platform
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import yaml
@@ -46,11 +47,31 @@ def load_dataset(path: str = "swe_debug.jsonl", epoch: int = 0, limit: Optional[
     return instances
 
 
+def get_dockerhub_image_uri(uid: str, dockerhub_username: str, repo_name: str = "") -> str:
+    repo_base, repo_name_only = repo_name.lower().split("/")
+    hsh = uid.replace("instance_", "")
+
+    if uid == "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan":
+        repo_name_only = "element-web"
+    elif "element-hq" in repo_name.lower() and "element-web" in repo_name.lower():
+        repo_name_only = "element"
+        if hsh.endswith("-vnan"):
+            hsh = hsh[:-5]
+    elif hsh.endswith("-vnan"):
+        hsh = hsh[:-5]
+
+    tag = f"{repo_base}.{repo_name_only}-{hsh}"
+    if len(tag) > 128:
+        tag = tag[:128]
+
+    return f"{dockerhub_username}/sweap-images:{tag}"
+
+
 class CodingAgent(LitAgent):
     def __init__(
         self,
-        namespace: Literal["swebench", "starryzhang"] = "swebench",
-        full_set: Literal["princeton-nlp/SWE-bench", "SWE-bench-Live/SWE-bench-Live"] = "princeton-nlp/SWE-bench",
+        namespace: str = "swebench",
+        full_set: str = "princeton-nlp/SWE-bench",
         split: str = "test",
         max_step: int = 5,
         run_method: Literal["python", "cli"] = "cli",
@@ -63,6 +84,8 @@ class CodingAgent(LitAgent):
         timeout: int = 1_800,  # in sec
         instance_image_tag: str = "latest",
         rewrite_reports: bool = False,
+        image_uri_mode: Literal["swebench", "swebench_pro"] = "swebench",
+        dockerhub_username: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.namespace = namespace
@@ -77,6 +100,8 @@ class CodingAgent(LitAgent):
         self.timeout = timeout
         self.instance_image_tag = instance_image_tag
         self.rewrite_reports = rewrite_reports
+        self.image_uri_mode = image_uri_mode
+        self.dockerhub_username = dockerhub_username
 
         full_dataset = load_swebench_dataset(full_set, split)
         self.dataset = {each["instance_id"]: each for each in full_dataset}
@@ -88,6 +113,18 @@ class CodingAgent(LitAgent):
         if platform.system() == "Linux":
             resource.setrlimit(resource.RLIMIT_NOFILE, (open_file_limit, open_file_limit))
 
+    def _get_instance_image(self, task: Dict[str, Any]) -> str:
+        if self.image_uri_mode == "swebench_pro":
+            if not self.dockerhub_username:
+                raise ValueError("dockerhub_username is required when image_uri_mode is swebench_pro")
+            repo_name = task.get("repo") or self.dataset.get(task["instance_id"], {}).get("repo")
+            if not repo_name:
+                raise KeyError("repo")
+            return get_dockerhub_image_uri(task["instance_id"], self.dockerhub_username, repo_name)
+        if self.image_uri_mode == "swebench":
+            return f"{self.namespace}/sweb.eval.x86_64.{task['instance_id'].lower()}".replace("__", "_1776_")
+        raise ValueError(f"Unsupported image_uri_mode: {self.image_uri_mode}")
+
     async def rollout_async(
         self, task: Dict[str, Any], resources: NamedResources, rollout: Rollout
     ) -> RolloutRawResult:
@@ -96,7 +133,7 @@ class CodingAgent(LitAgent):
             run_id = f"epoch_{task.get('epoch', 0)}_{run_suffix}"
         else:
             run_id = f"epoch_{task.get('epoch', 0)}"
-        image = f"{self.namespace}/sweb.eval.x86_64.{task['instance_id'].lower()}".replace("__", "_1776_")
+        image = self._get_instance_image(task)
 
         # ===== Debug: Print all received resources =====
         import logging as _logging
@@ -132,8 +169,8 @@ class CodingAgent(LitAgent):
             _logging.warning(f"⚠️  Falling back to default user_prompt: {self.user_prompt}")
             user_prompt_str = self.user_prompt
 
-        base_prompt_dir = os.path.join("examples", "cc", "full_prompts")
-        os.makedirs(base_prompt_dir, exist_ok=True)
+        base_prompt_dir = Path(__file__).resolve().parent / "full_prompts"
+        base_prompt_dir.mkdir(parents=True, exist_ok=True)
         safe_description = task.get("problem_statement", "").replace('"""', "'''")
         try:
             full_prompt = user_prompt_str.format(description=safe_description)
@@ -154,7 +191,7 @@ class CodingAgent(LitAgent):
         except FileNotFoundError:
             pass
 
-        prompt_dump_path = os.path.join(base_prompt_dir, f"{safe_id}_v{next_version}.txt")
+        prompt_dump_path = base_prompt_dir / f"{safe_id}_v{next_version}.txt"
         try:
             with open(prompt_dump_path, "w", encoding="utf-8") as f:
                 f.write(full_prompt)
@@ -191,9 +228,11 @@ class CodingAgent(LitAgent):
 
         instance_id = prediction["instance_id"]
 
+        instance = self.dataset.get(instance_id) or task
+        instance_image_key_override = image if self.image_uri_mode == "swebench_pro" else None
         result = evaluate(
             prediction,
-            self.dataset[instance_id],
+            instance,
             self.cache_level,
             self.clean,
             self.force_rebuild,
@@ -202,6 +241,9 @@ class CodingAgent(LitAgent):
             namespace=self.namespace,
             instance_image_tag=self.instance_image_tag,
             rewrite_reports=self.rewrite_reports,
+            instance_image_key_override=instance_image_key_override,
+            use_pro_harness=self.image_uri_mode == "swebench_pro",
+            dockerhub_username=self.dockerhub_username,
         )
 
         # error patch
@@ -338,6 +380,8 @@ async def cc_agent_dry_run_sample(
         run_method=config["runtime"]["run_method"],
         tools=config["agent"]["tools"],
         user_prompt=config["agent"]["user_prompt"],
+        image_uri_mode=config["dataset"].get("image_uri_mode", "swebench"),
+        dockerhub_username=config["dataset"].get("dockerhub_username"),
     )
 
     with runner.run_context(agent=agent, store=store):
@@ -462,6 +506,8 @@ async def gold_cc_agent_run_dataset(
             run_method=config["runtime"]["run_method"],
             tools=config["agent"]["tools"],
             user_prompt=config["agent"]["user_prompt"],
+            image_uri_mode=config["dataset"].get("image_uri_mode", "swebench"),
+            dockerhub_username=config["dataset"].get("dockerhub_username"),
         )
         with runner.run_context(agent=agent, store=store):
             rollout = await runner.step(each)

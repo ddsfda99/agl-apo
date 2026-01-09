@@ -34,8 +34,23 @@ class ClaudeController:
             log_function=partial(logger, run_id=self.run_id, instance_id=instance["instance_id"]),
             platform="linux",
         )
-        container.send_command("curl -fsSL https://claude.ai/install.sh | bash")
-        container.send_command('alias claude="$HOME/.local/bin/claude"')
+        container.send_command(
+            "command -v curl >/dev/null 2>&1 || "
+            "(command -v apt-get >/dev/null 2>&1 && apt-get update && apt-get install -y curl)"
+        )
+        install_res = container.send_command("curl -fsSL https://claude.ai/install.sh | bash")
+        if install_res.metadata and install_res.metadata.exit_code != 0:
+            raise RuntimeError(f"Claude install failed:\n{install_res.output}")
+        container.send_command('export PATH="$HOME/.local/bin:$HOME/.claude/bin:$PATH"')
+        which_res = container.send_command("command -v claude || true")
+        claude_path = ""
+        for line in which_res.output.splitlines():
+            if line.strip().endswith("/claude"):
+                claude_path = line.strip()
+                break
+        if not claude_path:
+            raise RuntimeError(f"Claude CLI not found after install. Output:\n{which_res.output}")
+        self.claude_path = claude_path
         dotenv.load_dotenv()
         # anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
         # container.send_command(f"export ANTHROPIC_API_KEY={anthropic_api_key}")
@@ -79,10 +94,18 @@ class ClaudeController:
         # self.container.send_command("chmod +x /tmp/handle_hook.sh")
 
         # run claude reading the prompt from the file to avoid shell interpolation issues
-        claude_cmd = f'claude -p "$(cat /tmp/cc_prompt.txt)" --append-system-prompt "{self.system_prompt}" --max-turns {max_step}  --output-format json --verbose'
+        claude_bin = getattr(self, "claude_path", "claude")
+        claude_cmd = (
+            f'{claude_bin} -p "$(cat /tmp/cc_prompt.txt)" '
+            f'--system-prompt "{self.system_prompt}" '
+            f'--max-turns {max_step} --output-format json --verbose'
+        )
         res = self.container.send_command(claude_cmd, timelimit * 60)
         traj = [i for i in res.output.splitlines() if "session_id" in i]
-        assert len(traj) > 0, "traj not found!"
+        if len(traj) == 0:
+            snippet = res.output.strip().splitlines()
+            snippet = "\n".join(snippet[:200])  # keep log size reasonable
+            raise AssertionError(f"traj not found! claude output:\n{snippet}")
         traj = json.loads(traj[0])
         # self.container.send_command("cat /tmp/hook.out")
         return traj

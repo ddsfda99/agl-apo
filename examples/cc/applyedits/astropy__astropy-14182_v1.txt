@@ -1,0 +1,136 @@
+You are an expert coding agent working in the current repository (/testbed). Your goal is to fix a bug so that the code supports header rows in RestructuredText output.
+
+Bug description
+{description}
+
+Key objective
+Enable the ascii.rst writer to accept and correctly handle header_rows (e.g., ["name", "unit"]) similar to ascii.fixed_width, and produce valid ReStructuredText simple tables with multiple header rows.
+
+Strict workflow and constraints
+- Follow these steps in order:
+  1) Write failing tests that reproduce the desired behavior (i.e., correct multi-row headers in ascii.rst). These tests should fail initially due to the current TypeError or incorrect output.
+  2) Explore source code to locate the defect and understand current behavior.
+  3) Implement minimal changes to fix the bug.
+  4) Rerun only the tests you wrote to confirm the fix; iterate if needed until they pass.
+  5) Run relevant existing tests for regressions (at least RST and fixed-width writer tests).
+  6) Delete the temporary test files you added.
+- Do not commit any changes. We will commit later.
+- Keep changes minimal and focused; avoid refactors unrelated to the bug.
+
+Repository context and likely files to change
+- astropy/io/ascii/rst.py: RST writer implementation. Root cause is here: RST does not accept header_rows and assumes a single header row when selecting the rule line.
+- astropy/io/ascii/fixedwidth.py: FixedWidth writer already supports header_rows; use it as a reference for how header rows are handled.
+- astropy/io/ascii/core.py and astropy/io/ascii/ui.py: Writer initialization, kwargs handling, and write flow (inspect only if needed for kwargs passthrough).
+- astropy/io/ascii/tests/: Existing tests for RST and fixed-width outputs; add and later remove temporary tests here.
+
+Plan and detailed instructions
+
+1) Write failing tests (temporary) to reproduce the bug and desired behavior
+- Create a new temporary test file: astropy/io/ascii/tests/test_rst_header_rows_tmp.py
+- In that file, add tests that specify the desired behavior (not tests that expect a TypeError). Before the fix, these tests will error/fail due to the current bug; after the fix, they should pass.
+
+- Test 1: RST writer supports two header rows and produces a valid simple table
+  - Build a QTable with units:
+    - wave: [350, 950] * u.nm
+    - response: [0.7, 1.2] * u.count
+  - Use 'tbl.write(io.StringIO(), format="ascii.rst", header_rows=["name", "unit"])' to get output.
+  - Validate structure without relying on exact spacing:
+    - Split the output by lines; let n_hdr = 2.
+    - Assert there is a top rule line at index 0 composed of '=' and spaces only, and the same rule line appears:
+      - immediately after the header rows (at index n_hdr + 1), and
+      - as the last line.
+    - Assert the header name line (index 1) contains 'wave' and 'response' as substrings at their respective positions (you can simply assert both substrings occur in the line).
+    - Assert the unit line (index 2) contains 'nm' and 'ct'.
+    - Assert data lines contain expected values ('350.0', '0.7', '950.0', '1.2').
+    - Assert top and bottom rule lines are identical, and the middle rule equals them as well.
+  - This test should fail before the fix (due to TypeError) and pass after the fix.
+
+- Optional Test 2 (recommended for robustness, then delete later): Three header rows
+  - header_rows=["name", "unit", "dtype"] on a small Table/QTable.
+  - Verify there are three header lines, and the rule line is placed after those three header lines, and again at the bottom, identical to the top rule line.
+
+- Do not write a test that expects a TypeError. The goal is verifying the final correct behavior; initially it will fail with an error, which is acceptable as a failing test.
+
+- Run only this temporary test file first to see it fail:
+  - Command: 'python -m pytest -q astropy/io/ascii/tests/test_rst_header_rows_tmp.py'
+
+2) Explore source code to locate the defect
+- Open astropy/io/ascii/rst.py and inspect the RST writer class:
+  - Confirm that 'RST.__init__' does not accept 'header_rows', thus writer initialization errors when header_rows is provided.
+  - Confirm that 'RST.write' frames the table by taking a rule line at a fixed index (commonly lines[1]), which only works for a single header row.
+
+- Open astropy/io/ascii/fixedwidth.py and inspect how header_rows is implemented in FixedWidth:
+  - It accepts 'header_rows' and constructs output with:
+    - one or more header rows,
+    - a rule line inserted immediately after the last header row,
+    - data rows afterwards.
+  - The index of the rule line is 'len(header_rows)' within the table part constructed by FixedWidth.
+
+- You generally should not need to modify ui.py or core.py for this fix; ensure kwargs are passed through correctly.
+
+3) Implement the minimal fix
+- In astropy/io/ascii/rst.py:
+  - Update class RST.__init__ to accept 'header_rows' and forward it to the base FixedWidth initializer (preserving current defaults for RST):
+    - Add a parameter 'header_rows=None' to __init__ and pass it into 'super().__init__(header_rows=header_rows, delimiter_pad=None, bookend=False, ...)' as appropriate for the existing signature. Do not change other defaults.
+  - Update RST.write to compute the correct rule line index dynamically based on the number of header rows:
+    - After the FixedWidth machinery builds the 'lines' for the table body (header rows, rule, data), determine 'rule_index' as:
+      - If available, use 'len(self.header.header_rows)' (this is set by FixedWidth.__init__), else fall back to 1.
+      - Guard for edge cases: if 'rule_index >= len(lines)', fall back to 1 to avoid IndexError.
+    - Use 'rule_line = lines[rule_index]' as the rule line that separates header and data.
+    - Surround the table lines with this rule line at the top and bottom:
+      - 'lines = [rule_line] + lines + [rule_line]'
+    - This preserves prior behavior for a single header row and correctly supports multiple header rows.
+  - Do not change reading behavior or unrelated logic.
+
+Notes and rationale
+- This preserves current RST formatting choices (no delimiter padding, no bookend) and only augments header_rows support.
+- The rule line placement must reflect the number of header rows; FixedWidth constructs the internal table such that the rule line appears immediately after the last header row.
+
+4) Rerun the temporary tests you wrote
+- Command: 'python -m pytest -q astropy/io/ascii/tests/test_rst_header_rows_tmp.py'
+- Ensure they now pass. Iterate on minimal code changes if needed.
+
+5) Run regression tests to ensure no breaks
+- At minimum run:
+  - 'python -m pytest -q astropy/io/ascii/tests/test_rst.py'
+  - 'python -m pytest -q astropy/io/ascii/tests/test_fixedwidth.py'
+- Optionally run a broader subset or full test suite:
+  - 'python -m pytest -q'
+- If any regressions appear, adjust only the minimal necessary parts in rst.py.
+
+6) Clean up temporary tests
+- Delete the file you added: 'astropy/io/ascii/tests/test_rst_header_rows_tmp.py'
+- Verify there are no leftover temporary tests.
+- Do not commit changes.
+
+Acceptance criteria
+- 'tbl.write(..., format="ascii.rst", header_rows=["name", "unit"])' works without errors and produces a valid ReStructuredText simple table with:
+  - A top rule line composed of '=' and spaces.
+  - Two header rows (“name” then “unit”) properly aligned and padded consistently with FixedWidth behavior.
+  - A middle rule line immediately after the header rows.
+  - Data rows aligned with the fixed-width columns.
+  - A bottom rule line identical to the rule line used at the top and middle.
+- Behavior with default single header row (no header_rows specified) remains unchanged; existing tests continue to pass.
+- The fix is minimal and isolated to RST writer initialization and write logic; no unrelated refactors.
+
+Additional edge considerations (no extra implementation required unless tests indicate issues)
+- More than two header rows should work since the rule line index is derived from 'len(header_rows)'.
+- Tables without units (plain Table instead of QTable) should still work; the header rows will just reflect the requested fields.
+- Comments placement relative to the rule lines is not altered from previous behavior; the writer frames the entire table block consistently.
+
+What to change exactly (guidance)
+- In 'astropy/io/ascii/rst.py':
+  - Modify RST.__init__ signature to include 'header_rows=None' and pass it to the parent initializer alongside existing defaults (delimiter_pad=None, bookend=False).
+  - In RST.write, determine 'rule_index = len(self.header.header_rows) if available else 1', select 'rule_line = lines[rule_index]', and wrap the output as '[rule_line] + lines + [rule_line]'. Add a defensive check for out-of-range rule_index and fall back to 1 if necessary.
+- Do not change reading classes or other writers.
+
+Commands summary you should run
+- Before fix (to see tests fail): 'python -m pytest -q astropy/io/ascii/tests/test_rst_header_rows_tmp.py'
+- After fix: rerun the same command to confirm passing.
+- Regression checks:
+  - 'python -m pytest -q astropy/io/ascii/tests/test_rst.py'
+  - 'python -m pytest -q astropy/io/ascii/tests/test_fixedwidth.py'
+  - Optionally: 'python -m pytest -q'
+- Cleanup: remove 'astropy/io/ascii/tests/test_rst_header_rows_tmp.py'
+
+Do not commit any changes.

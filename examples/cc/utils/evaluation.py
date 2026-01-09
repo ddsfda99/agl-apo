@@ -1,9 +1,13 @@
+import ast
+import dataclasses
 import json
 import os
 import platform
 import traceback
+import urllib.request
 from argparse import ArgumentParser
 from pathlib import Path, PurePosixPath
+from typing import Optional
 
 import docker
 
@@ -54,6 +58,229 @@ GIT_APPLY_CMDS = [
     "git apply --verbose --reject",
     "patch --batch --fuzz=5 -p1 -i",
 ]
+
+PRO_REPO_RAW_BASE = "https://raw.githubusercontent.com/scaleapi/SWE-bench_Pro-os/main"
+PRO_CACHE_DIR = Path(os.environ.get("CC_PRO_HARNESS_DIR", "examples/cc/pro_harness"))
+PRO_SCRIPTS_DIR = PRO_CACHE_DIR / "run_scripts"
+PRO_DOCKERFILES_DIR = PRO_CACHE_DIR / "dockerfiles"
+PRO_BASE_DOCKER_DIR = PRO_DOCKERFILES_DIR / "base_dockerfile"
+PRO_INSTANCE_DOCKER_DIR = PRO_DOCKERFILES_DIR / "instance_dockerfile"
+
+
+def _download_text(url: str, dest: Path) -> None:
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url) as resp:
+        dest.write_text(resp.read().decode("utf-8"))
+
+
+def _ensure_pro_artifacts(instance_id: str) -> dict[str, Path]:
+    run_script = PRO_SCRIPTS_DIR / instance_id / "run_script.sh"
+    parser_script = PRO_SCRIPTS_DIR / instance_id / "parser.py"
+    base_dockerfile = PRO_BASE_DOCKER_DIR / instance_id / "Dockerfile"
+    instance_dockerfile = PRO_INSTANCE_DOCKER_DIR / instance_id / "Dockerfile"
+
+    _download_text(
+        f"{PRO_REPO_RAW_BASE}/run_scripts/{instance_id}/run_script.sh",
+        run_script,
+    )
+    _download_text(
+        f"{PRO_REPO_RAW_BASE}/run_scripts/{instance_id}/parser.py",
+        parser_script,
+    )
+    _download_text(
+        f"{PRO_REPO_RAW_BASE}/dockerfiles/base_dockerfile/{instance_id}/Dockerfile",
+        base_dockerfile,
+    )
+    _download_text(
+        f"{PRO_REPO_RAW_BASE}/dockerfiles/instance_dockerfile/{instance_id}/Dockerfile",
+        instance_dockerfile,
+    )
+
+    return {
+        "run_script": run_script,
+        "parser_script": parser_script,
+        "base_dockerfile": base_dockerfile,
+        "instance_dockerfile": instance_dockerfile,
+    }
+
+
+def _extract_env_exports(dockerfile_text: str) -> list[str]:
+    exports = []
+    for line in dockerfile_text.splitlines():
+        line = line.strip()
+        if line.startswith("ENV "):
+            exports.append(line.replace("ENV", "export", 1))
+    return exports
+
+
+def _create_pro_entryscript(instance: SWEbenchInstance, base_dockerfile: str, instance_dockerfile: str) -> str:
+    if "before_repo_set_cmd" not in instance:
+        raise KeyError("before_repo_set_cmd missing from pro instance")
+    if "selected_test_files_to_run" not in instance:
+        raise KeyError("selected_test_files_to_run missing from pro instance")
+
+    before_repo_set_cmd = instance["before_repo_set_cmd"].strip().split("\n")[-1]
+    try:
+        selected_tests = ast.literal_eval(instance["selected_test_files_to_run"])
+    except Exception as exc:
+        raise ValueError("selected_test_files_to_run is not a valid list") from exc
+    selected_tests_arg = ",".join(selected_tests)
+    base_commit = instance["base_commit"]
+
+    env_cmds = []
+    env_cmds.extend(_extract_env_exports(base_dockerfile))
+    env_cmds.extend(_extract_env_exports(instance_dockerfile))
+
+    env_block = "\n".join(env_cmds)
+    return f"""{env_block}
+# apply patch
+cd /app
+git reset --hard {base_commit}
+git checkout {base_commit}
+git apply -v /workspace/patch.diff
+{before_repo_set_cmd}
+# run tests
+bash /workspace/run_script.sh {selected_tests_arg} > /workspace/stdout.log 2> /workspace/stderr.log
+# parse results
+python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
+"""
+
+
+def _get_dockerhub_image_uri(uid: str, dockerhub_username: str, repo_name: str = "") -> str:
+    repo_base, repo_name_only = repo_name.lower().split("/")
+    hsh = uid.replace("instance_", "")
+
+    if uid == "instance_element-hq__element-web-ec0f940ef0e8e3b61078f145f34dc40d1938e6c5-vnan":
+        repo_name_only = "element-web"
+    elif "element-hq" in repo_name.lower() and "element-web" in repo_name.lower():
+        repo_name_only = "element"
+        if hsh.endswith("-vnan"):
+            hsh = hsh[:-5]
+    elif hsh.endswith("-vnan"):
+        hsh = hsh[:-5]
+
+    tag = f"{repo_base}.{repo_name_only}-{hsh}"
+    if len(tag) > 128:
+        tag = tag[:128]
+
+    return f"{dockerhub_username}/sweap-images:{tag}"
+
+
+def _pro_resolved(output: Optional[dict]) -> bool:
+    if not output:
+        return False
+    tests = output.get("tests")
+    if not tests:
+        return False
+    for test in tests:
+        status = str(test.get("status", "")).upper()
+        if status in {"FAILED", "ERROR"}:
+            return False
+    return True
+
+
+def run_instance_pro(
+    pred: dict,
+    instance: SWEbenchInstance,
+    run_id: str,
+    timeout: int | None,
+    dockerhub_username: str,
+) -> tuple[str, dict]:
+    instance_id = instance["instance_id"]
+    model_name_or_path = pred.get(KEY_MODEL, "None").replace("/", "__")
+    eval_logs_root = os.environ.get("CC_EVAL_LOG_DIR")
+    if eval_logs_root:
+        eval_logs_root = Path(eval_logs_root)
+    else:
+        eval_logs_root = RUN_EVALUATION_LOG_DIR
+    log_dir = eval_logs_root / run_id / model_name_or_path / instance_id
+    report_path = log_dir / LOG_REPORT
+
+    if report_path.exists():
+        return instance_id, json.loads(report_path.read_text())
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir = log_dir / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    artifacts = _ensure_pro_artifacts(instance_id)
+    base_dockerfile = artifacts["base_dockerfile"].read_text()
+    instance_dockerfile = artifacts["instance_dockerfile"].read_text()
+    entryscript = _create_pro_entryscript(instance, base_dockerfile, instance_dockerfile)
+
+    (workspace_dir / "patch.diff").write_text(pred.get(KEY_PREDICTION) or "")
+    (workspace_dir / "run_script.sh").write_text(artifacts["run_script"].read_text())
+    (workspace_dir / "parser.py").write_text(artifacts["parser_script"].read_text())
+    (workspace_dir / "entryscript.sh").write_text(entryscript)
+
+    image = _get_dockerhub_image_uri(instance_id, dockerhub_username, instance.get("repo", ""))
+    client = docker.from_env()
+    try:
+        client.images.pull(image)
+    except Exception:
+        try:
+            client.images.get(image)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to pull or find image: {image}") from exc
+
+    container = None
+    try:
+        container = client.containers.run(
+            image,
+            volumes={str(workspace_dir): {"bind": "/workspace", "mode": "rw"}},
+            detach=True,
+            entrypoint="/bin/bash",
+            command=["-c", "bash /workspace/entryscript.sh"],
+        )
+        container.wait(timeout=timeout)
+    except Exception:
+        if container is not None:
+            container.kill()
+        raise
+    finally:
+        if container is not None:
+            container.remove(force=True)
+
+    stdout_path = workspace_dir / "stdout.log"
+    stderr_path = workspace_dir / "stderr.log"
+    stdout = stdout_path.read_text() if stdout_path.exists() else ""
+    stderr = stderr_path.read_text() if stderr_path.exists() else ""
+    (log_dir / "stdout.log").write_text(stdout)
+    (log_dir / "stderr.log").write_text(stderr)
+    (log_dir / LOG_TEST_OUTPUT).write_text(f"{stdout}\n{stderr}")
+
+    output_path = workspace_dir / "output.json"
+    output = json.loads(output_path.read_text()) if output_path.exists() else None
+    report = {
+        instance_id: {
+            "resolved": _pro_resolved(output),
+            "output": output,
+        }
+    }
+    report_path.write_text(json.dumps(report, indent=4))
+    return instance_id, report
+
+
+def _override_test_spec_image(test_spec: TestSpec, instance_image_key_override: str) -> TestSpec:
+    if not instance_image_key_override:
+        return test_spec
+    try:
+        if dataclasses.is_dataclass(test_spec):
+            return dataclasses.replace(
+                test_spec,
+                instance_image_key=instance_image_key_override,
+                is_remote_image=True,
+            )
+    except Exception:
+        pass
+    try:
+        test_spec.instance_image_key = instance_image_key_override
+        test_spec.is_remote_image = True
+        return test_spec
+    except Exception as exc:  # pragma: no cover - defensive for unknown TestSpec types
+        raise RuntimeError("Failed to override instance_image_key on TestSpec") from exc
 
 
 def run_instance(
@@ -246,9 +473,25 @@ def evaluate(
     namespace,
     instance_image_tag,
     rewrite_reports,
+    instance_image_key_override: str | None = None,
+    use_pro_harness: bool = False,
+    dockerhub_username: Optional[str] = None,
 ):
+    if use_pro_harness:
+        if not dockerhub_username:
+            raise ValueError("dockerhub_username is required for swebench_pro evaluation")
+        return run_instance_pro(
+            prediction,
+            instance,
+            run_id,
+            timeout,
+            dockerhub_username,
+        )
+
     client = docker.from_env()
     test_spec = make_test_spec(instance, namespace=namespace, instance_image_tag=instance_image_tag)
+    if instance_image_key_override:
+        test_spec = _override_test_spec_image(test_spec, instance_image_key_override)
 
     instance_image_ids = {
         test_spec.instance_image_key,

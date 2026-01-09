@@ -1,0 +1,106 @@
+You are an expert bug fixer working in the repository at /testbed.
+
+Bug description (for context):
+{description}
+
+Goal
+- Reproduce the bug with a targeted test.
+- Locate and fix the serializer that emits Enum defaults in migrations using the Enum value instead of the Enum member name.
+- Validate the fix by running only your targeted test.
+- Delete the test afterward.
+- Do not commit your edits.
+
+Key facts about this codebase and the bug
+- The issue lives in the Django migrations serialization path: django/db/migrations/serializer.py, class EnumSerializer.
+- Today, EnumSerializer serializes to module.EnumClass(value), e.g., migrations.some_module.Status('Good'), which is unstable when values are translated (gettext_lazy).
+- We want stable name-based serialization: module.EnumClass['GOOD'].
+- models.Choices have a separate serializer (ChoicesSerializer) and should not be changed. Updating EnumSerializer is sufficient for this bug.
+- Don’t run the full Django test suite after changing global Enum serialization, as upstream tests may currently expect value-based behavior. Run only your custom test.
+
+Steps to complete
+
+1) Write a focused test that reproduces the bug
+- Create a test file: tests/migrations/test_enum_name.py
+- Use unittest and call django.setup() at module import, with DJANGO_SETTINGS_MODULE=tests.test_sqlite when running tests.
+- Don’t assert the fully-qualified module path because it can differ depending on runner. Instead, assert that the serialized migration string contains "Status['GOOD']" and does not contain a value-based call like "Status('Good')" or "Status(\"Good\")".
+- Example test code:
+
+  - File: tests/migrations/test_enum_name.py
+
+    import unittest
+    from enum import Enum
+    from django import setup as django_setup
+    from django.db import models
+    from django.db.migrations.writer import MigrationWriter
+    from django.utils.translation import gettext_lazy as _
+
+    django_setup()
+
+    class Status(Enum):
+        GOOD = _('Good')
+        BAD = _('Bad')
+        def __str__(self):
+            return self.name
+
+    class EnumNameSerializationTests(unittest.TestCase):
+        def test_charfield_default_enum_serialized_by_name(self):
+            field = models.CharField(default=Status.GOOD, max_length=128)
+            string, imports = MigrationWriter.serialize(field)
+            # Should use name-based lookup
+            self.assertIn("Status['GOOD']", string)
+            # Should not use value-based construction
+            self.assertNotIn("Status('Good')", string)
+            self.assertNotIn('Status("Good")', string)
+
+- How to run just this test:
+
+  - In the repo root (/testbed):
+    - DJANGO_SETTINGS_MODULE=tests.test_sqlite python -m unittest -q tests.migrations.test_enum_name.EnumNameSerializationTests
+
+- Expectation before the fix:
+  - The test will fail because the current serializer uses the value-based form.
+
+2) Locate the bug in source
+- Open django/db/migrations/serializer.py.
+- Find class EnumSerializer and its serialize() method.
+- You will see it serializes using the Enum member value, building something like "%s.%s(%s)".
+
+3) Implement the fix
+- Change EnumSerializer.serialize() to emit a name-based lookup rather than constructing the Enum from its value.
+- Specifically:
+  - Compute the module and class name for the Enum.
+  - Return a string of the form "module.EnumClass['NAME']".
+  - Only import the Enum’s module; do not serialize the member value or import its dependencies.
+- Pseudocode patch (illustrative; adapt to the actual file structure and variable names):
+
+  Before (conceptually):
+    v_string, v_imports = serializer_factory(self.value.value).serialize()
+    imports = {'import %s' % module, *v_imports}
+    code = "%s.%s(%s)" % (module, enum_class.__name__, v_string)
+    return code, imports
+
+  After (desired):
+    imports = {'import %s' % module}
+    code = "%s.%s[%r]" % (module, enum_class.__name__, self.value.name)
+    return code, imports
+
+- This ensures migrations refer to the Enum member by its stable name, independent of translated values.
+
+4) Validate the fix
+- Re-run only your test:
+
+  - DJANGO_SETTINGS_MODULE=tests.test_sqlite python -m unittest -q tests.migrations.test_enum_name.EnumNameSerializationTests
+
+- The test should now pass.
+- If it fails, re-check:
+  - That EnumSerializer is indeed selected for Enum values.
+  - That you didn’t accidentally include value serialization.
+  - That imports returned by EnumSerializer include only the Enum’s module.
+  - That your test asserts presence of "Status['GOOD']" and absence of value-based forms.
+
+5) Cleanup
+- Delete the test file you added:
+
+  - rm tests/migrations/test_enum_name.py
+
+- Do not commit your edits.

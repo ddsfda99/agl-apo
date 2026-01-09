@@ -1,0 +1,27 @@
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8ef..bf96f537e 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -57,10 +57,19 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+ 
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++    def __init__(self, header_rows=None):
++        # Allow header_rows to be specified and pass through to FixedWidth
++        super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)
+ 
+     def write(self, lines):
+         lines = super().write(lines)
+-        lines = [lines[1]] + lines + [lines[1]]
++        # Determine the rule line (position line) index based on number of header rows
++        try:
++            rule_index = len(self.header.header_rows)
++        except Exception:
++            rule_index = 1
++        if rule_index >= len(lines):
++            rule_index = 1 if len(lines) > 1 else 0
++        rule_line = lines[rule_index]
++        lines = [rule_line] + lines + [rule_line]
+         return lines

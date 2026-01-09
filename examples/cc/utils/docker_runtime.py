@@ -568,6 +568,13 @@ if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
                 "cpu_quota": int(CPU_CORES * 100000),
                 "mem_limit": MEM_LIMIT,
             }
+            try:
+                image = client.images.get(image_name)
+                entrypoint = image.attrs.get("Config", {}).get("Entrypoint")
+                if entrypoint == ["/bin/bash"] or entrypoint == "/bin/bash":
+                    shell_command = None
+            except docker.errors.ImageNotFound:
+                pass
 
         container = client.containers.run(
             image_name,
@@ -586,6 +593,20 @@ if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
         )
 
         session = cls(container, container_platform=platform, log_function=log_function)
+
+        repo = instance.get("repo")
+        base_commit = instance.get("base_commit")
+        if platform != "windows" and repo and base_commit:
+            # Some images don't ship the repo; clone on demand to ensure /testbed exists.
+            has_git = session.send_command('test -d /testbed/.git && echo "git_ok" || echo "git_missing"').output
+            if "git_missing" in has_git:
+                session.send_command(
+                    "command -v git >/dev/null 2>&1 || "
+                    "(command -v apt-get >/dev/null 2>&1 && apt-get update && apt-get install -y git)"
+                )
+                session.send_command('rm -rf /testbed/* /testbed/.[!.]* /testbed/..?* || true')
+                session.send_command(f"git clone https://github.com/{repo}.git /testbed")
+                session.send_command(f"git -C /testbed reset --hard {base_commit}")
 
         # We avoid copying due to performance issues
         # session.copy_dir_to_container(str(workspace), "/workspace")
