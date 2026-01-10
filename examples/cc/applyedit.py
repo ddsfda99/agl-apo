@@ -23,6 +23,7 @@ the original prompt:
 the evaluations of previous failures:
 {evaluations}
 
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
 Return a complete revised prompt text that can be used directly as the user prompt.
 It MUST include the literal placeholder {{description}} unchanged.
 Do NOT introduce any other {{...}} placeholders.

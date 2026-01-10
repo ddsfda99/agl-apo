@@ -1,0 +1,62 @@
+You are working in the repository at /testbed.
+
+Bug description: {description}
+
+Goal
+Prevent adding the same component instance to multiple pipelines. Add a meaningful error in Pipeline.add_component when the instance is already part of a different Pipeline, and explain why this is unsupported.
+
+What to implement
+- Track ownership of a component instance when it is first added to a Pipeline.
+- If the same instance is added to a different Pipeline, raise a clear, actionable error (preferably PipelineValidationError) explaining that reusing instances across pipelines can cause side effects and is unsupported. Suggest creating a new instance for each pipeline.
+- Ensure this check applies to all ways of constructing pipelines that eventually call add_component (including from_dict, if applicable).
+- Update any misleading docstrings/comments that currently say instances can be reused across pipelines.
+
+Follow these steps precisely:
+
+1) Write tests to reproduce the bug
+- Create a new test file, for example tests/test_component_instance_reuse.py.
+- Write a test that:
+  - Instantiates a minimal working component (use an existing simple component from the repository if available; otherwise define a minimal custom component in the test file that follows the project’s Component interface and does not use warm_up).
+  - Creates two Pipeline instances.
+  - Adds the component instance to the first pipeline.
+  - Attempts to add the same instance to the second pipeline.
+  - Expects a PipelineValidationError (import from haystack.core.errors) with a message explaining that reusing the same component instance across different pipelines is not supported and why.
+- Also write a second test covering deserialization behavior:
+  - Inspect the Pipeline.from_dict implementation and its signature to see how components are added.
+  - If from_dict supports passing pre-instantiated components (e.g., via a components argument or similar), construct a pipeline using the same instance there, then try to add the same instance to a different pipeline and assert the same error.
+  - If from_dict does not accept pre-instantiated components directly, ensure that pipelines created via from_dict still call add_component internally, and assert that adding the same instance to a different pipeline fails in the same way. If that path cannot reuse a Python instance, document this in the test and focus on the direct add_component case.
+- Optionally, add a sanity test that using two distinct instances in two pipelines works fine (no error).
+
+2) Explore the source to locate the bug
+- Open haystack/core/pipeline/pipeline.py and inspect the add_component method. It currently allows reusing the same instance across pipelines.
+- Inspect haystack/core/errors.py and select an appropriate error type. PipelineValidationError is suitable and already used for other add_component validations.
+- Check how from_dict constructs pipelines and confirm that it goes through add_component, so the fix applies uniformly.
+
+3) Edit the source code to fix the bug
+- In haystack/core/pipeline/pipeline.py, inside Pipeline.add_component, add ownership tracking for the instance:
+  - On the first successful add, set a private attribute on the component instance to identify its owning pipeline (for example, instance._haystack_pipeline_owner = self or instance._haystack_pipeline_owner_id = id(self)). Using a direct reference or id is acceptable here; if you prefer avoiding strong references, you can store a weakref to the pipeline.
+  - Before adding, check if the instance already has that ownership set and it points to a different pipeline. If so, raise PipelineValidationError with a clear message:
+    - Explain that adding the same component instance to multiple pipelines is not supported because components, while generally stateless, do carry internal socket state that can be mutated and leak across pipelines, causing side effects.
+    - Suggest creating a new component instance for each pipeline.
+    - Include details such as the component class/name to aid debugging.
+  - If the ownership is already set to the same pipeline, allow it to proceed (component names must still be unique; your change should not alter name uniqueness validation).
+- Update any docstrings/comments in add_component that currently claim instances can be reused; adjust them to reflect the new behavior and rationale.
+
+4) Rerun your tests to validate the fix
+- Run the repository’s test suite including your new tests, for example using pytest.
+- Ensure your tests fail before the change and pass after the change.
+- If any tests fail, iterate on the implementation until they pass.
+
+5) Cleanup
+- After validating the fix, delete the temporary test file(s) you added.
+- Do not commit any changes.
+
+Additional guidance and guardrails
+- Keep the fix minimal and localized to add_component and related documentation comments.
+- Ensure the error type and message are consistent with the project’s style in haystack/core/errors.py.
+- Do not change public APIs beyond raising the new error when a component instance is already owned by another pipeline.
+- Consider future maintainability: using a simple attribute like _haystack_pipeline_owner or _haystack_pipeline_owner_id on the component instance is sufficient to detect cross-pipeline reuse reliably during the lifetime of the process.
+- Remember that from_dict should also benefit from this check because it calls add_component; verify this path and adapt tests accordingly.
+- When crafting the error message, prefer something like:
+  - "Adding the same component instance to different pipelines is not supported because it can cause side effects. Please create a new instance of MyComponent for each pipeline."
+- Do not commit your edits. We will do it later.

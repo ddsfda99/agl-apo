@@ -1,0 +1,84 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+Pad gets incorrect difference with forecast plugin
+I am using the forecast plugin to set down some income, and when I try adding pad/balance at the end of the year, it's not generating the correct amount to match the given balance.
+
+versions: 
+beancount 2.3.5
+python 3.10.4
+
+Here is the sample beancount file for testing:
+
+```
+plugin "beancount.plugins.forecast"
+
+2022-01-01 open Assets:Income
+2022-01-01 open Income:Fulltime
+2022-01-01 open Equity:Opening-Balances
+
+2022-01-01 # "Income [MONTHLY UNTIL 2022-03-01]"
+    Income:Fulltime               -1000 AUD
+    Assets:Income                  1000 AUD
+
+2022-12-24 pad Assets:Income Equity:Opening-Balances
+2022-12-25 balance Assets:Income   3000 AUD
+
+```
+
+results for `bean-check`
+
+```
+Balance failed for 'Assets:Income': expected 3000 AUD != accumulated 5000 AUD (2000 too much)
+
+   2022-12-25 balance Assets:Income                                   3000 AUD
+```
+
+the generated pad transaction:
+
+```
+** Balances before transaction --------------------------------
+
+  Assets:Income                                                     3000 AUD
+
+  Equity:Opening-Balances                                                   
+
+
+** Unbooked Transaction --------------------------------
+
+2022-12-24 P "(Padding inserted for Balance of 3000 AUD for difference 2000 AUD)"
+  Assets:Income             2000 AUD
+  Equity:Opening-Balances  -2000 AUD
+
+
+** Transaction --------------------------------
+
+2022-12-24 P "(Padding inserted for Balance of 3000 AUD for difference 2000 AUD)"
+  Assets:Income             2000 AUD
+  Equity:Opening-Balances  -2000 AUD
+
+
+** Residual and Tolerances --------------------------------
+
+
+
+** Balances after transaction --------------------------------
+
+* Assets:Income                                                     5000 AUD
+
+* Equity:Opening-Balances                                          -2000 AUD
+```
+
+I expect a unused pad entry in above case, which it should report:
+```
+Unused Pad entry
+  2022-12-24 pad Assets:Income Equity:Opening-Balances
+```
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

@@ -85,6 +85,7 @@ ClaudeCodeTraj = list[ClaudeCodeStep]
 
 class AgentResult(SWEbenchInput):
     trajectory: ClaudeCodeTraj
+    reproduction_file: str
 
 
 # class TrajSlice(TypedDict):

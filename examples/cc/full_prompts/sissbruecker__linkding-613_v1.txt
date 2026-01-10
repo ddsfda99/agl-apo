@@ -1,0 +1,76 @@
+You are given a code repository in the current directory (/testbed).
+
+Bug description:
+Support disabling alphabetical grouping in tag cloud
+Different from the alphabetical characters, the Chinese characters are diverse and will result in one line, one tag. 
+It would be nice to have an option to disable the line break between groups.
+
+Currently I use the Stylus for a workaround:
+
+```css
+.tag-cloud .group {
+  display: inline;
+}
+```
+
+
+
+Goal:
+Add an option to disable alphabetical group line breaks in the tag cloud. When the preference is enabled, render tag groups inline so there aren’t separate lines for each group (especially for languages like Chinese). Preserve current behavior by default.
+
+Repository context and likely code locations to inspect:
+- Template that renders the tag cloud: bookmarks/templates/bookmarks/tag_cloud.html. It currently renders each tag group as a paragraph element p with class group, which creates line breaks.
+- Tag groups and context building: bookmarks/views/partials/contexts.py, specifically TagGroup.create_tag_groups and TagCloudContext.
+- User preferences: UserProfile.search_preferences. Preferences are injected into search defaults and passed to templates via the context. Today templates can access tag_cloud.search.defaults, but prefer adding an explicit context flag to decouple the template from BookmarkSearch internals.
+
+Constraints:
+- Follow the workflow strictly: write tests to reproduce, fix, validate by re-running your tests, and delete the tests before finishing.
+- Do not commit any edits; we will commit later.
+
+Plan:
+1) Write a focused test that reproduces the issue and asserts the desired behavior.
+   - Create a test file under bookmarks/tests/, e.g., test_tag_cloud_inline_groups.py.
+   - The test should:
+     - Render the tag cloud template or the view/partial that produces the tag cloud.
+     - Configure a user or request with a preference inline_tag_groups=True (set via UserProfile.search_preferences or equivalent).
+     - Assert that when inline_tag_groups=True, groups are rendered inline {e.g., as span elements with class "group"} and that p.group is absent.
+     - Assert that when inline_tag_groups is False or missing, the template falls back to the current behavior (p.group present, span.group absent).
+   - Run only the new test initially to iterate faster.
+
+2) Explore the source to locate where to implement the option.
+   - Confirm that tag_cloud.html uses p class="group" for each group.
+   - Identify how the template receives its context: via TagCloudContext in bookmarks/views/partials/contexts.py.
+   - Identify how user preferences are available: UserProfile.search_preferences. Although you can read tag_cloud.search.defaults.inline_tag_groups, prefer setting and using a dedicated context boolean for clarity and maintainability.
+
+3) Implement the fix with minimal coupling and safe defaults.
+   - In bookmarks/views/partials/contexts.py:
+     - In TagCloudContext.__init__, compute a boolean inline_tag_groups from user_profile.search_preferences, e.g., bool(user_profile.search_preferences.get("inline_tag_groups")).
+     - Expose it as a public attribute, e.g., self.inline_tag_groups, so the template can reference tag_cloud.inline_tag_groups.
+   - In bookmarks/templates/bookmarks/tag_cloud.html:
+     - Conditionally render group elements:
+       - If inline_tag_groups is True: render a span with class "group" for each group to avoid line breaks.
+       - Else: keep rendering as p class="group" to preserve current behavior.
+     - Preserve the "group" class on both element types so existing CSS selectors continue to work.
+   - Ensure the default behavior remains unchanged when the preference is not set {inline_tag_groups should be False unless explicitly enabled}.
+
+4) Rerun your tests.
+   - First run only the new test to confirm it passes.
+   - Then run the full test suite to ensure there are no regressions.
+
+5) Clean up.
+   - Delete the test file(s) you added so the repository returns to its original state, as required by the task.
+   - Do not commit any changes.
+
+Hints and notes:
+- Accessing tag_cloud.search.defaults.inline_tag_groups directly in the template will work but is more fragile. Prefer adding tag_cloud.inline_tag_groups in TagCloudContext so the template is decoupled from BookmarkSearch internals.
+- Keep semantics clear: switching from p to span achieves inline layout. If there are CSS rules targeting .tag-cloud .group that assume block-level margins, they will simply have no effect on span elements, which is acceptable for removing line breaks.
+- No need to add or change any UI form; just respect the preference if present.
+- Acceptance criteria:
+  - When inline_tag_groups=True: the tag cloud renders groups inline {span.group present, p.group absent}.
+  - When inline_tag_groups=False or missing: the tag cloud renders groups as before {p.group present, span.group absent}.
+  - Full test suite passes after the change.
+
+Execution reminders:
+- Work under /testbed.
+- Do not commit your edits.
+- Remember to delete the tests you wrote at the end.

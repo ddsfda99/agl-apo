@@ -4,6 +4,7 @@ import os
 import platform
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import yaml
@@ -49,7 +50,7 @@ def load_dataset(path: str = "swe_debug.jsonl", epoch: int = 0, limit: Optional[
 class CodingAgent(LitAgent):
     def __init__(
         self,
-        namespace: Literal["swebench", "starryzhang"] = "swebench",
+        namespace: Literal["swebench", "starryzhang"] = "starryzhang",
         full_set: Literal["princeton-nlp/SWE-bench", "SWE-bench-Live/SWE-bench-Live"] = "princeton-nlp/SWE-bench",
         split: str = "test",
         max_step: int = 5,
@@ -132,8 +133,8 @@ class CodingAgent(LitAgent):
             _logging.warning(f"⚠️  Falling back to default user_prompt: {self.user_prompt}")
             user_prompt_str = self.user_prompt
 
-        base_prompt_dir = os.path.join("examples", "cc", "full_prompts")
-        os.makedirs(base_prompt_dir, exist_ok=True)
+        base_prompt_dir = Path(__file__).resolve().parent / "full_prompts"
+        base_prompt_dir.mkdir(parents=True, exist_ok=True)
         safe_description = task.get("problem_statement", "").replace('"""', "'''")
         try:
             full_prompt = user_prompt_str.format(description=safe_description)
@@ -144,25 +145,25 @@ class CodingAgent(LitAgent):
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
         prefix = f"{safe_id}_v"
         next_version = 0
-        try:
-            for name in os.listdir(base_prompt_dir):
-                if not name.startswith(prefix) or not name.endswith(".txt"):
-                    continue
-                suffix = name[len(prefix):-4]
-                if suffix.isdigit():
-                    next_version = max(next_version, int(suffix) + 1)
-        except FileNotFoundError:
-            pass
+        for path in base_prompt_dir.iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            if not name.startswith(prefix) or not name.endswith(".txt"):
+                continue
+            suffix = name[len(prefix):-4]
+            if suffix.isdigit():
+                next_version = max(next_version, int(suffix) + 1)
 
-        prompt_dump_path = os.path.join(base_prompt_dir, f"{safe_id}_v{next_version}.txt")
+        prompt_dump_path = base_prompt_dir / f"{safe_id}_v{next_version}.txt"
         try:
-            with open(prompt_dump_path, "w", encoding="utf-8") as f:
-                f.write(full_prompt)
+            prompt_dump_path.write_text(full_prompt, encoding="utf-8")
             _logging.info(f"✅ Saved full prompt to {prompt_dump_path}")
         except Exception as e:
             _logging.warning(f"⚠️  Failed to save full prompt to {prompt_dump_path}: {e}")
 
         prediction: Optional[AgentResult] = None
+        controller: Optional[ClaudeController] = None
         try:
             # 1. init container
             controller = ClaudeController(
@@ -175,13 +176,18 @@ class CodingAgent(LitAgent):
                 llm.api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy"),
             )
             # 2. execute task
-            prediction: AgentResult = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
+            prediction = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
             logger(run_id, task["instance_id"], json.dumps(prediction, indent=4))
-            del controller
         except Exception as e:
             logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
             _logging.error(f"❌ Rollout failed with exception: {e}", exc_info=True)
             return 0.0  # Return zero reward on exception
+        finally:
+            if controller is not None:
+                try:
+                    controller.container.cleanup()
+                except Exception as cleanup_err:
+                    _logging.warning(f"⚠️  Failed to cleanup container: {cleanup_err}")
 
         # 3. obtain rewards (evaluation result)
         reward = 0.0
@@ -190,10 +196,19 @@ class CodingAgent(LitAgent):
             return reward
 
         instance_id = prediction["instance_id"]
+        instance = self.dataset.get(instance_id)
+        if instance is None:
+            _logging.warning(
+                "Instance %s not found in dataset %s/%s; falling back to task payload.",
+                instance_id,
+                self.full_set,
+                self.split,
+            )
+            instance = task
 
         result = evaluate(
             prediction,
-            self.dataset[instance_id],
+            instance,
             self.cache_level,
             self.clean,
             self.force_rebuild,

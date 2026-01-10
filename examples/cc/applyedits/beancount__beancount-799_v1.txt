@@ -1,0 +1,119 @@
+Goal
+Improve the original prompt so the coding agent reliably reproduces, fixes, and validates the bug where pad runs before user plugins, leading to incorrect padding with forecasted transactions. This revised prompt adds specific, actionable instructions to avoid prior pitfalls and ensures the agent’s test harness imports the local plugin and uses valid Beancount syntax.
+
+Original bug description
+{description}
+
+Context summary
+- The ledger uses a forecast-like plugin that synthesizes future income transactions.
+- A pad directive should generate padding only if it is needed to satisfy a subsequent balance assertion.
+- Currently, pad runs before user plugins, so it inserts padding based on an incomplete journal. After the forecast plugin adds transactions, the padding becomes incorrect. The correct behavior is that pad should be considered unused, and an “Unused Pad entry” error should be reported instead of generating padding.
+
+Critical fix to implement
+- In beancount/loader.py, change plugin execution order so beancount.ops.pad runs after user plugins and before balance checks.
+
+Primary pitfalls to avoid
+- Do not create a test plugin under the beancount namespace. Use a top-level module name forecast_local at the repository root.
+- Implement the actual code fix in beancount/loader.py, not just tests.
+- Ensure pad is ordered after user plugins and before balance checks.
+- Use valid Beancount transaction syntax with a flag on the transaction line.
+- Make the local plugin importable in the test runner by explicitly inserting the repository root on sys.path.
+- Clean up temporary files after validation as requested.
+
+Tasks and steps
+1) Create a minimal local forecast plugin that is guaranteed to import
+- Create a file at the repository root named forecast_local.py.
+- Implement the module with:
+  - __plugins__ = ('forecast_local',)
+  - A function forecast_local(entries, options_map) that:
+    - Copies all entries through unchanged.
+    - For any Transaction whose narration contains the substring [MONTHLY UNTIL 2022-03-01], append two clones of that transaction dated 2022-02-01 and 2022-03-01 with identical postings.
+    - Return the new list of entries and an empty list of errors: (new_entries, []).
+- Keep the implementation small and deterministic. Use only beancount core types and Python’s standard library. Do not place this module under the beancount package; it must live at the repository root.
+
+Example content for forecast_local.py:
+- from datetime import date
+- from beancount.core.data import Transaction
+- __plugins__ = ('forecast_local',)
+- def forecast_local(entries, options_map):
+  new_entries = []
+  for entry in entries:
+    new_entries.append(entry)
+    if isinstance(entry, Transaction) and entry.narration and '[MONTHLY UNTIL 2022-03-01]' in entry.narration:
+      for d in (date(2022, 2, 1), date(2022, 3, 1)):
+        new_entries.append(entry._replace(date=d))
+  return new_entries, []
+
+2) Write a regression test that reproduces the bug before the fix
+- Create tests/test_pad_after_forecast.py using unittest.
+- At the very top of the test file, insert the repository root to sys.path so the loader can import forecast_local regardless of the test runner’s working directory:
+  - from pathlib import Path
+  - import sys
+  - repo_root = Path(__file__).resolve().parents[1]
+  - sys.path.insert(0, str(repo_root))
+- Use a syntactically valid Beancount ledger string with a transaction flag:
+  plugin "forecast_local"
+
+  2022-01-01 open Assets:Income
+  2022-01-01 open Income:Fulltime
+  2022-01-01 open Equity:Opening-Balances
+
+  2022-01-01 * "Income [MONTHLY UNTIL 2022-03-01]"
+    Income:Fulltime               -1000 AUD
+    Assets:Income                  1000 AUD
+
+  2022-12-24 pad Assets:Income Equity:Opening-Balances
+  2022-12-25 balance Assets:Income   3000 AUD
+- In the test:
+  - Call beancount.loader.load_string(ledger_text).
+  - Handle return arity robustly. For example:
+    - ret = loader.load_string(ledger_text)
+    - if len(ret) == 3: entries, errors, options_map = ret
+    - else: entries, errors = ret
+  - Assert that:
+    - Any error string contains “Unused Pad entry”.
+    - No error string contains “Balance failed”.
+- Rationale: With the forecast expansion to 2022-02-01 and 2022-03-01, the account balance at 2022-12-25 is already 3000 AUD; the pad at 2022-12-24 should be unused.
+
+3) Run the test to confirm the bug with current code
+- Before modifying loader.py, run the test.
+- With the current ordering {pad before user plugins}, the test should fail:
+  - You will typically see a “Balance failed” error or no “Unused Pad entry” error.
+
+4) Implement the fix in beancount/loader.py: move pad execution after user plugins and before balance checks
+- Open beancount/loader.py and locate the plugin ordering lists and the function that chains and runs them. Look for PLUGINS_PRE, PLUGINS_AUTO, PLUGINS_POST and the code building the transformation pipeline {often run_transformations or equivalent}.
+- Make these changes:
+  - Remove the pad plugin from the pre-transform list. Concretely, remove ("beancount.ops.pad", None) from PLUGINS_PRE.
+  - Insert pad in the sequence that runs after user plugins and before balance verification. Ensure PLUGINS_POST {or the equivalent list executed after user plugins} contains ("beancount.ops.pad", None) immediately before ("beancount.ops.balance", None).
+- Verify the pipeline ordering in the code so that it executes:
+  - Core pre transforms {now without pad}
+  - User plugins
+  - Auto transforms {if present}
+  - Post transforms with pad before balance
+- Do not move balance earlier; pad must precede balance checks.
+
+5) Re-run the regression test and validate the fix
+- After reordering pad, run the tests again.
+- The test should now pass:
+  - You should see an “Unused Pad entry” error.
+  - You should not see any “Balance failed” error.
+
+6) Double-check for regressions
+- Optionally run any existing pad-related tests in the repository to ensure nothing else breaks.
+- The key requirement is that pad now sees the fully transformed journal {including user plugins} and runs before balance verification.
+
+7) Clean up
+- Delete the temporary files you created:
+  - forecast_local.py
+  - tests/test_pad_after_forecast.py
+- Confirm both are removed from the working tree.
+- Do not commit your edits. Leave the repository with only the source fix in beancount/loader.py.
+
+Important implementation details and safeguards
+- Use a top-level plugin module name forecast_local in the ledger. Do not use a beancount.plugins.* path to avoid import shadowing by the installed beancount package.
+- Insert the repository root on sys.path in the test so the loader can import forecast_local under typical pytest/unittest runners where the CWD may not be the repo root.
+- Ensure the ledger transaction uses a valid flag on the posting line: 2022-01-01 * "Income [MONTHLY UNTIL 2022-03-01]".
+- Assert on error message substrings to avoid tight coupling: look for “Unused Pad entry” and absence of “Balance failed”.
+- Be mindful that beancount.loader.load_string may return either a 2-tuple or 3-tuple; handle both forms.
+- Keep pad ordered after user plugins and before balance checks. Do not move balance earlier.
+- Remove only the temporary test and plugin files; keep the loader fix in place. Do not commit.

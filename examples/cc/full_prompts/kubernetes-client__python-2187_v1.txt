@@ -1,0 +1,172 @@
+You are working in the code repository at /testbed.
+
+Bug description:
+KUBECONFIG loading does not match kubectl behavior
+**What happened (please include outputs or screenshots)**:
+
+Calling `config.load_kube_config()` with a KUBECONFIG that uses colon delimited files throws an error:
+
+```shell
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:815: in load_kube_config
+    loader = _get_kube_config_loader(
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:775: in _get_kube_config_loader
+    return KubeConfigLoader(
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:206: in __init__
+    self.set_active_context(active_context)
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:258: in set_active_context
+    context_name = self._config['current-context']
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <kubernetes.config.kube_config.ConfigNode object at 0x7fb7e4108f90>, key = 'current-context'
+
+    def __getitem__(self, key):
+        v = self.safe_get(key)
+        if v is None:
+>           raise ConfigException(
+                'Invalid kube-config file. Expected key %s in %s'
+                % (key, self.name))
+E           kubernetes.config.config_exception.ConfigException: Invalid kube-config file. Expected key current-context in /var/home/seb/.config/kube/clusters/kube.example.com.yaml
+
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:625: ConfigException
+```
+
+The code that causes this is just:
+
+```python
+    @pytest.fixture
+    def k8s_client():
+        config.load_kube_config()
+```
+
+`KUBECONFIG` is defined as follows:
+
+```shell
+echo $KUBECONFIG
+/var/home/seb/.config/kube/clusters/kube.example.com.yaml:/var/home/seb/.config/kube/contexts/kube.example.com.yaml:/var/home/seb/.config/kube/users/kube.example.com.yaml
+```
+
+These files define clusters, contexts, and users each on their own.
+
+**What you expected to happen**:
+
+The `load_kube_config` call should behave just like kubectl which merges all files first and then attempts to load them and thus does not care about the order of these files.
+
+**How to reproduce it (as minimally and precisely as possible)**:
+
+Create 3 files for cluster, context, and user:
+
+```yaml
+# cluster
+apiVersion: v1
+kind: Config
+clusters:
+  - name: kube.example.com
+    cluster:
+      certificate-authority-data: doesnotmatter
+      server: https://kube.example.com:6443
+```
+
+```yaml
+# context
+apiVersion: v1
+kind: Config
+contexts:
+  - name: kube.example.com
+    context:
+      cluster: kube.example.com
+      user: kube.example.com
+      namespace: kube-system
+current-context: kube.example.com
+```
+
+```yaml
+# user
+apiVersion: v1
+kind: Config
+users:
+  - name: kube.example.com
+```
+
+Then define `KUBECONFIG` to something like `cluster.yaml:context.yaml:user.yaml`.
+
+**Anything else we need to know?**:
+
+Changing the order of these files so that the context file is at the first position fixes this!
+
+Support for colon separated files was introduced with https://github.com/kubernetes-client/python/issues/636 (?)
+
+**Environment**:
+- Kubernetes version (`kubectl version`): v1.29.0
+- OS (e.g., MacOS 10.13.6): Fedora 39
+- Python version (`python --version`): 3.11.7
+- Python client version (`pip list | grep kubernetes`): 29.0.0
+
+
+
+Goal:
+Fix KUBECONFIG merging so that load_kube_config() matches kubectl behavior when KUBECONFIG contains multiple files separated by the OS path separator (colon on Unix, semicolon on Windows). Specifically, ensure that “current-context” is merged with “last file wins” semantics even if it appears only in a later KUBECONFIG file, and do not ignore empty string overrides for “current-context”.
+
+Important constraints:
+- Follow the workflow: (1) write tests to reproduce the bug, (2) locate and diagnose the source, (3) implement a fix, (4) rerun tests and iterate if needed, (5) delete any temporary tests you wrote at the end.
+- Do not commit your edits; we will commit later.
+- Use the OS-specific path separator via os.pathsep for building KUBECONFIG.
+- Align behavior with kubectl: last file wins for top-level scalars like “current-context”. This should apply even when the later file sets “current-context” to an empty string, meaning it intentionally clears the current context.
+- Keep the fix minimal and localized without changing public APIs.
+
+Plan and detailed guidance:
+
+1) Write temporary tests that reproduce and verify the bug and the intended fix.
+- Create a new temporary pytest file (e.g., tests/test_kubeconfig_merge_temp.py). You will delete it at the end.
+- Test A: Multiple files where “current-context” exists only in a later file.
+  - Create three YAML files under a temporary directory:
+    - cluster.yaml containing apiVersion v1, kind Config, and one cluster entry named kube.example.com with server https://kube.example.com:6443 and any certificate-authority-data.
+    - context.yaml containing apiVersion v1, kind Config, one context named kube.example.com that refers to cluster kube.example.com and user kube.example.com, and top-level current-context: kube.example.com.
+    - user.yaml containing apiVersion v1, kind Config, one user named kube.example.com.
+  - Set KUBECONFIG to "cluster.yaml{pathsep}user.yaml{pathsep}context.yaml" where {pathsep} is os.pathsep, purposely placing the context file last to prove order independence and proper merging.
+  - Call kubernetes.config.load_kube_config() and assert no exception is thrown.
+  - Optionally assert that list_kube_config_contexts() returns at least the context kube.example.com and that the active context is kube.example.com. Also verify that configuration such as the cluster server URL is correctly set from the merged config.
+- Test B: Last-file-wins semantics including empty string override.
+  - Create two YAML files:
+    - ctx1.yaml with current-context: ctx1 and a corresponding contexts entry.
+    - ctx2.yaml with current-context: "" (empty string) and a contexts entry for a different name or none.
+  - Set KUBECONFIG to "ctx1.yaml{pathsep}ctx2.yaml".
+  - Verify that the merging result sets the top-level “current-context” to the empty string from the later file. If load_kube_config() fails due to empty current-context semantics, still confirm the merged value was set to empty by instantiating and inspecting the merger directly if necessary (see step 2 for where to find the merger). If load_kube_config() handles empty current-context gracefully, assert no exception is thrown.
+- Test C: Last-file-wins non-empty override.
+  - Two files: first sets current-context: ctxA, second sets current-context: ctxB.
+  - KUBECONFIG = "first{pathsep}second".
+  - Assert that after load_kube_config(), the active context is ctxB.
+
+Notes for tests:
+- Use pytest’s tmp_path fixture to create files and monkeypatch to set environment variable KUBECONFIG.
+- Always use os.pathsep when building KUBECONFIG to be cross-platform.
+- Keep tests focused on merging behavior; do not require contacting a real cluster.
+- These tests are temporary and must be deleted at the end (step 5).
+
+2) Explore the source code and locate the bug.
+- Look in kubernetes/config/kube_config.py for the merger logic, specifically KubeConfigMerger.load_config().
+- Observe that list fields (clusters, contexts, users) are merged, but “current-context” (a top-level scalar) is not properly merged across files. As a result, if the first file lacks current-context and later file provides it, KubeConfigLoader.__init__ calls set_active_context which attempts to read current-context before it has been merged, raising “Invalid kube-config file. Expected key current-context …”.
+
+3) Implement the fix with kubectl-compatible semantics.
+- Update KubeConfigMerger.load_config() to also merge top-level scalars, at minimum “current-context”, with “last file wins” semantics.
+- Important detail: Do not ignore empty strings. The condition must check for the presence of the key, not truthiness of its value. For example:
+  - When processing each file’s parsed dict (e.g., via ConfigNode.value), if 'current-context' in config.value: set self.config_merged.value['current-context'] = config.value['current-context'].
+- Optionally consider merging other top-level scalars for parity, such as preferences, kind, apiVersion, with last-file-wins semantics, but keep the change minimal and safe. The primary fix required is for current-context.
+- Do not alter public APIs; keep behavior backward compatible aside from fixing the merge semantics to match kubectl.
+
+4) Rerun tests to validate and iterate if needed.
+- First, run just your temporary tests to verify they fail before the fix and pass after the fix.
+- Then run the existing kube_config tests in the repository (e.g., tests targeting kubernetes/config/kube_config.py) to ensure no regressions. Prefer running the full test suite if feasible.
+- If Test B reveals that an empty current-context causes a downstream failure, ensure the merger sets the empty string correctly (presence), and consider adjusting loader behavior only if necessary and safe. The primary requirement is to emulate kubectl’s merging semantics where last file wins even if empty. Avoid broad behavioral changes unless justified by tests and parity requirements.
+
+5) Clean up.
+- Delete the temporary test file(s) you created.
+- Do not commit any changes.
+
+Deliverables to provide in your response:
+- A summary of the tests you added, what they assert, and how they reproduce the original failure.
+- The exact location(s) in the code you modified and a clear description of the change, including the “presence-based” merge for current-context (set even when empty).
+- The test results before and after the fix, including confirmation that existing tests still pass.
+- Confirmation that you removed the temporary tests and did not commit edits.
+
+Reminder:
+- Be explicit in your implementation about checking for the key’s presence rather than truthiness for “current-context”. Using if 'current-context' in the underlying dict ensures empty strings are respected, matching kubectl’s “last file wins” behavior.

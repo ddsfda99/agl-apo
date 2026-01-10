@@ -1,0 +1,109 @@
+You are working in the code repository at /testbed.
+
+{description}
+
+Goal
+- Fix validation so axes.prop_cycle can accept numeric marker constants (for example, matplotlib.markers.CARETRIGHT) in a cycler, while keeping existing behavior for string markers.
+- Validate via a targeted test and a quick runtime smoke test.
+- Avoid the previous pitfalls: do not add a brand-new tests module, prevent circular imports, and delete any temporary test additions after verification.
+- Do not commit changes.
+
+High-level plan
+1) Reproduce the bug with a minimal test function appended to an existing tests file that already runs in this environment.
+2) Patch the rcParams validator for markers in prop cycles to accept integers 0 through 11 (including numpy integer types), and explicitly reject bool, without importing matplotlib.markers.
+3) Run the targeted test and a quick smoke script to confirm the fix.
+4) Remove the temporary test code to leave the repository clean.
+5) Do not commit.
+
+Detailed steps
+
+Step 1: Add a targeted test to an existing tests file
+- Do NOT create a new tests module. Instead, append a single test function to the end of lib/matplotlib/tests/test_cycles.py.
+
+Append this test function at the end of lib/matplotlib/tests/test_cycles.py:
+
+def test_marker_cycle_allows_numeric_markers_in_prop_cycle():
+    import matplotlib.pyplot as plt
+    import matplotlib.markers as mk
+    from cycler import cycler
+
+    old_cycle = plt.rcParams['axes.prop_cycle']
+    try:
+        cycle = cycler(marker=['+', mk.CARETRIGHT])
+        plt.rc('axes', prop_cycle=cycle)
+
+        fig, ax = plt.subplots()
+        l0, = ax.plot([0, 1], [0, 1])
+        l1, = ax.plot([0, 1], [1, 2])
+        assert l0.get_marker() == '+'
+        assert l1.get_marker() == mk.CARETRIGHT
+    finally:
+        plt.rcParams['axes.prop_cycle'] = old_cycle
+
+- Run only this test function by node id to reproduce the failure:
+  pytest -q lib/matplotlib/tests/test_cycles.py::test_marker_cycle_allows_numeric_markers_in_prop_cycle
+- Confirm it currently fails with the error "Could not convert 5 to str".
+
+Step 2: Patch the validator in rcsetup.py
+- Open lib/matplotlib/rcsetup.py.
+- Ensure numpy is imported near the top. If it is not, add:
+  import numpy as np
+- Define a new validator function that accepts strings and integer marker codes, and explicitly rejects bool. Place it near the other validators, before the _prop_validators dict:
+
+def _validate_marker_for_prop_cycle(s):
+    if isinstance(s, str):
+        return s
+    if isinstance(s, bool):
+        raise ValueError("bool is not a valid marker for prop_cycle")
+    if isinstance(s, (int, np.integer)):
+        val = int(s)
+        if 0 <= val <= 11:
+            return val
+        raise ValueError("not a valid numeric marker code for prop_cycle: %r" % s)
+    raise ValueError("not a valid marker for prop_cycle: %r" % s)
+
+Notes:
+- Do not import matplotlib.markers in rcsetup.py to avoid circular imports during rcParams initialization.
+- The allowed range 0 through 11 matches Matplotlib’s numeric marker codes.
+
+- In the _prop_validators dict, change the 'marker' entry to use the new validator via _listify_validator:
+
+'marker': _listify_validator(_validate_marker_for_prop_cycle),
+
+This replaces the previous validator that only accepted strings.
+
+Step 3: Validate the fix
+- Re-run the targeted test:
+  pytest -q lib/matplotlib/tests/test_cycles.py::test_marker_cycle_allows_numeric_markers_in_prop_cycle
+- It should now pass.
+
+- Also run a quick smoke test mirroring the user’s snippet:
+  python - << 'PY'
+from cycler import cycler
+import matplotlib.pyplot as plt
+import matplotlib.markers as mk
+
+plt.rc('axes', prop_cycle=cycler(marker=['+', mk.CARETRIGHT]))
+fig, ax = plt.subplots()
+ax.plot([0,1], [5,6])
+print("OK: plot created with '+' and CARETRIGHT markers in prop_cycle.")
+PY
+
+- Confirm no exception is raised and that it prints the confirmation.
+
+Step 4: Clean up the temporary test
+- Remove the function test_marker_cycle_allows_numeric_markers_in_prop_cycle that you appended to lib/matplotlib/tests/test_cycles.py.
+
+Step 5: Do not commit edits
+- Leave changes in the working directory only.
+
+Acceptance criteria
+- Setting plt.rc('axes', prop_cycle=cycler(marker=['+', mk.CARETRIGHT])) no longer raises a ValueError.
+- Plotting two lines cycles the markers so the first is '+' and the second is CARETRIGHT (an integer code).
+- The targeted test passes when run via node id, and the temporary test code is removed afterwards.
+- No commits are made.
+
+Why this approach avoids previous failures
+- We changed the rcParams validator to accept integers 0 through 11 while explicitly rejecting bool, preventing surprising acceptance of True and False and avoiding circular imports by not touching matplotlib.markers in rcsetup.py.
+- We appended the test to an existing tests file and ran it via node id, avoiding issues with adding a new tests module.
+- We remove the temporary test after validation to keep the repo clean.

@@ -1,9 +1,17 @@
+import importlib.util
 import json
+import logging
 import os
 import platform
+import sys
+import tempfile
 import traceback
+import urllib.request
+import zipfile
 from argparse import ArgumentParser
+from enum import Enum
 from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 import docker
 
@@ -54,6 +62,275 @@ GIT_APPLY_CMDS = [
     "git apply --verbose --reject",
     "patch --batch --fuzz=5 -p1 -i",
 ]
+
+LIVE_TIMEOUT = 40 * 60
+
+
+def _normalize_cmds(cmds: Any) -> str:
+    if cmds is None:
+        return ""
+    if isinstance(cmds, str):
+        return cmds
+    if isinstance(cmds, (list, tuple)):
+        return " ; ".join([str(cmd) for cmd in cmds if cmd])
+    return str(cmds)
+
+
+def _normalize_test_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return [value]
+            if isinstance(parsed, list):
+                return parsed
+        return [value]
+    return [str(value)]
+
+
+def _cleanup_eval_containers(client: docker.DockerClient, instance_id: str, logger: logging.Logger | None) -> None:
+    prefix = f"sweb.eval.{instance_id.lower()}"
+    try:
+        containers = client.containers.list(all=True, filters={"name": prefix})
+    except Exception as exc:
+        msg = f"Failed to list eval containers for {instance_id}: {exc}"
+        if logger:
+            logger.warning(msg)
+        else:
+            print(msg)
+        return
+
+    for container in containers:
+        cleanup_container(client, container, logger)
+
+
+def _load_launch_from_repo(repo_root: Path):
+    runtime_path = repo_root / "launch" / "core" / "runtime.py"
+    parser_path = repo_root / "launch" / "scripts" / "parser.py"
+    if not runtime_path.exists() or not parser_path.exists():
+        return None
+
+    runtime_spec = importlib.util.spec_from_file_location("repolaunch_runtime", runtime_path)
+    parser_spec = importlib.util.spec_from_file_location("repolaunch_parser", parser_path)
+    if runtime_spec is None or parser_spec is None:
+        return None
+    runtime_module = importlib.util.module_from_spec(runtime_spec)
+    parser_module = importlib.util.module_from_spec(parser_spec)
+    assert runtime_spec.loader is not None
+    assert parser_spec.loader is not None
+    sys.modules[runtime_spec.name] = runtime_module
+    sys.modules[parser_spec.name] = parser_module
+    runtime_spec.loader.exec_module(runtime_module)
+    parser_spec.loader.exec_module(parser_module)
+    return runtime_module.SetupRuntime, parser_module.run_parser
+
+
+def _ensure_launch_available():
+    try:
+        from launch.core.runtime import SetupRuntime
+        from launch.scripts.parser import run_parser
+        return SetupRuntime, run_parser
+    except Exception:
+        pass
+
+    repo_path = os.environ.get("REPOLAUNCH_PATH")
+    if repo_path:
+        loaded = _load_launch_from_repo(Path(repo_path))
+        if loaded is not None:
+            return loaded
+
+    cache_root = Path(os.environ.get("CC_REPOLAUNCH_CACHE", ".repolaunch")).resolve()
+    repo_root = cache_root / "RepoLaunch-main"
+    runtime_path = repo_root / "launch" / "core" / "runtime.py"
+    parser_path = repo_root / "launch" / "scripts" / "parser.py"
+    if not runtime_path.exists() or not parser_path.exists():
+        cache_root.mkdir(parents=True, exist_ok=True)
+        url = "https://github.com/microsoft/RepoLaunch/archive/refs/heads/main.zip"
+        with urllib.request.urlopen(url) as response, tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(response.read())
+            tmp_path = tmp.name
+        with zipfile.ZipFile(tmp_path) as zf:
+            zf.extractall(cache_root)
+        os.unlink(tmp_path)
+
+    loaded = _load_launch_from_repo(repo_root)
+    if loaded is not None:
+        return loaded
+
+    raise RuntimeError(
+        "RepoLaunch package 'launch' is required for SWE-bench-Live evaluation. "
+        "Install with: pip install git+https://github.com/microsoft/RepoLaunch.git "
+        "or set REPOLAUNCH_PATH to a local RepoLaunch checkout."
+    )
+
+
+def _parse_log_pytest(log: str) -> dict[str, str]:
+    class TestStatus(Enum):
+        FAILED = "FAILED"
+        PASSED = "PASSED"
+        SKIPPED = "SKIPPED"
+        ERROR = "ERROR"
+        XFAIL = "XFAIL"
+
+    test_status_map: dict[str, str] = {}
+    for line in log.split("\n"):
+        if any(line.startswith(status.value) for status in TestStatus):
+            if line.startswith(TestStatus.FAILED.value):
+                line = line.replace(" - ", " ")
+            test_case = line.split()
+            if len(test_case) <= 1:
+                continue
+            test_status_map[test_case[1]] = test_case[0]
+    return test_status_map
+
+
+def _default_pytest_parser(log: str) -> dict[str, str]:
+    mapping = _parse_log_pytest(log)
+    normalized: dict[str, str] = {}
+    for test, status in mapping.items():
+        lowered = status.lower()
+        if "pass" in lowered:
+            normalized[test] = "pass"
+        elif "skip" in lowered:
+            normalized[test] = "skip"
+        else:
+            normalized[test] = "fail"
+    return normalized
+
+
+def _get_default_image_name(
+    instance_id: str, platform_name: Literal["windows", "linux"], namespace: str | None
+) -> str:
+    med = "x86_64" if platform_name == "linux" else "win"
+    name = instance_id.replace("__", "_1776_").lower()
+    prefix = f"{namespace}/" if namespace else ""
+    return f"{prefix}sweb.eval.{med}.{name}"
+
+
+def _apply_solution_patch_best_effort(solution_patch: str, container, platform_name: Literal["windows", "linux"]) -> None:
+    if not solution_patch.strip():
+        return
+    if platform_name == "linux":
+        container.send_command("cd /testbed")
+        container.send_command(
+            """[ -d .git ] || { g=$(find . -maxdepth 2 -mindepth 2 -type d -name .git -print -quit); [ -n "$g" ] && cd "${g%/.git}"; } ;"""
+        )
+        container.apply_patch(solution_patch, verbose=True)
+        container.send_command("cd /testbed")
+    else:
+        container.send_command(r"cd C:\testbed")
+        container.send_command(
+            r"""if (-not (Test-Path .git)) { $g = Get-ChildItem -Directory -Recurse -Depth 2 -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq '.git' } | Select-Object -First 1; if ($g) { Set-Location $g.Parent.FullName } };"""
+        )
+        container.apply_patch(solution_patch, verbose=True)
+        container.send_command(r"cd C:\testbed")
+
+
+def _evaluate_instance_live(
+    instance: dict,
+    prediction: dict,
+    platform_name: Literal["windows", "linux"],
+    output_dir: Path,
+    namespace: str | None,
+    instance_image_tag: str | None,
+    overwrite: bool,
+) -> dict:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "report.json"
+    if report_path.exists() and not overwrite:
+        try:
+            report = json.loads(report_path.read_text())
+            if report.get("resolved") is not None:
+                return report
+        except Exception:
+            pass
+
+    SetupRuntime, run_parser = _ensure_launch_available()
+    instance_id = instance["instance_id"]
+    image = instance.get("docker_image") or _get_default_image_name(instance_id, platform_name, namespace)
+    if instance_image_tag and ":" not in image:
+        image = f"{image}:{instance_image_tag}"
+
+    container = None
+    try:
+        container = SetupRuntime.from_launch_image(image, instance_id, platform_name)
+        test_patch = instance.get("test_patch", "")
+        if test_patch.strip():
+            container.apply_patch(test_patch)
+        _apply_solution_patch_best_effort(prediction.get(KEY_PREDICTION, ""), container, platform_name)
+
+        rebuild_cmd = _normalize_cmds(instance.get("rebuild_cmds", []))
+        if rebuild_cmd.strip():
+            container.send_command(rebuild_cmd, timeout=LIVE_TIMEOUT)
+
+        test_cmd = _normalize_cmds(instance.get("test_cmds", []))
+        print_cmd = _normalize_cmds(instance.get("print_cmds", []))
+        if not print_cmd.strip():
+            if platform_name == "linux":
+                container.send_command(f"cat > run_test.sh <<'CC_PROMPT'\n{test_cmd}\nCC_PROMPT\n")
+                test_cmd = "bash run_test.sh > testlog.out 2>&1"
+                print_cmd = "cat testlog.out"
+            else:
+                container.send_command(
+                    "@'\n" + test_cmd + "\n'@ | Out-File -FilePath run_test.ps1 -Encoding UTF8"
+                )
+                test_cmd = "powershell -ExecutionPolicy Bypass -File run_test.ps1 > testlog.out 2>&1"
+                print_cmd = "type testlog.out"
+
+        container.send_command(test_cmd, timeout=LIVE_TIMEOUT)
+        post_patch_log = container.send_command(print_cmd).output
+        (output_dir / "post_patch_log.txt").write_text(post_patch_log)
+
+        parser_name = (instance.get("log_parser") or instance.get("parser") or "").strip().lower()
+        if parser_name == "pytest":
+            post_patch_status = _default_pytest_parser(post_patch_log)
+        else:
+            post_patch_status = run_parser(parser_name, post_patch_log)
+
+        (output_dir / "status.json").write_text(json.dumps(post_patch_status, indent=2))
+
+        pass_to_pass = _normalize_test_list(instance.get("PASS_TO_PASS"))
+        fail_to_pass = _normalize_test_list(instance.get("FAIL_TO_PASS"))
+        passed = {test for test, status in post_patch_status.items() if "pass" in status}
+        failed = {test for test, status in post_patch_status.items() if "fail" in status}
+
+        report = {
+            "instance_id": instance_id,
+            "resolved": False,
+            "PASS_TO_PASS": {
+                "success": list(passed & set(pass_to_pass)),
+                "failure": list(failed & set(pass_to_pass)),
+            },
+            "FAIL_TO_PASS": {
+                "success": list(passed & set(fail_to_pass)),
+                "failure": list(failed & set(fail_to_pass)),
+            },
+        }
+        if (
+            len(report["PASS_TO_PASS"]["failure"]) == 0
+            and len(report["FAIL_TO_PASS"]["failure"]) == 0
+            and len(report["FAIL_TO_PASS"]["success"]) > 0
+        ):
+            report["resolved"] = True
+
+        report_path.write_text(json.dumps(report, indent=2))
+        return report
+    finally:
+        if container is not None:
+            try:
+                container.cleanup()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Failed to cleanup eval container: %s", exc)
 
 
 def run_instance(
@@ -124,6 +401,7 @@ def run_instance(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / LOG_INSTANCE
     logger = setup_logger(instance_id, log_file)
+    _cleanup_eval_containers(client, instance_id, logger)
 
     # Run the instance
     container = None
@@ -235,7 +513,7 @@ def run_instance(
     return
 
 
-def evaluate(
+def evaluate_swebench(
     prediction: dict,
     instance: SWEbenchInstance,
     cache_level,
@@ -248,7 +526,26 @@ def evaluate(
     rewrite_reports,
 ):
     client = docker.from_env()
-    test_spec = make_test_spec(instance, namespace=namespace, instance_image_tag=instance_image_tag)
+    try:
+        test_spec = make_test_spec(instance, namespace=namespace, instance_image_tag=instance_image_tag)
+    except KeyError as exc:
+        logger = logging.getLogger(__name__)
+        if isinstance(instance, dict):
+            instance_id = instance.get(KEY_INSTANCE_ID)
+            repo = instance.get("repo")
+            version = instance.get("version")
+        else:
+            instance_id = None
+            repo = None
+            version = None
+        logger.warning(
+            "Skipping evaluation for unsupported repo/version (instance_id=%s repo=%s version=%s): %s",
+            instance_id,
+            repo,
+            version,
+            exc,
+        )
+        return None
 
     instance_image_ids = {
         test_spec.instance_image_key,
@@ -265,6 +562,71 @@ def evaluate(
         timeout,
         rewrite_reports,
     )
+
+
+def evaluate(
+    prediction: dict,
+    instance: SWEbenchInstance,
+    cache_level,
+    clean,
+    force_rebuild,
+    run_id,
+    timeout,
+    namespace,
+    instance_image_tag,
+    rewrite_reports,
+    backend: str | None = None,
+):
+    backend_name = (backend or os.environ.get("CC_EVAL_BACKEND", "live")).lower()
+    if backend_name in {"live", "repolaunch", "swebench-live"}:
+        if not isinstance(instance, dict):
+            raise ValueError("SWE-bench-Live evaluation requires instance data as a dict.")
+        instance_id = prediction.get(KEY_INSTANCE_ID) or instance.get(KEY_INSTANCE_ID)
+        if not instance_id:
+            raise ValueError("Missing instance_id for SWE-bench-Live evaluation.")
+        if "PASS_TO_PASS" not in instance or "FAIL_TO_PASS" not in instance:
+            raise ValueError("SWE-bench-Live evaluation requires PASS_TO_PASS/FAIL_TO_PASS in instance data.")
+        if not _normalize_cmds(instance.get("test_cmds", [])).strip():
+            raise ValueError("SWE-bench-Live evaluation requires test_cmds in instance data.")
+
+        model_name_or_path = prediction.get(KEY_MODEL, "None").replace("/", "__")
+        eval_logs_root = os.environ.get("CC_EVAL_LOG_DIR")
+        eval_logs_root = Path(eval_logs_root) if eval_logs_root else RUN_EVALUATION_LOG_DIR
+        log_dir = eval_logs_root / run_id / model_name_or_path / instance_id
+        platform_name = instance.get("platform") or ("linux" if platform.system() == "Linux" else "windows")
+
+        try:
+            report = _evaluate_instance_live(
+                instance=instance,
+                prediction=prediction,
+                platform_name=platform_name,
+                output_dir=log_dir,
+                namespace=namespace,
+                instance_image_tag=instance_image_tag,
+                overwrite=bool(rewrite_reports),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).error(
+                "SWE-bench-Live evaluation failed for %s: %s", instance_id, exc, exc_info=True
+            )
+            return None
+        return instance_id, {instance_id: report}
+
+    if backend_name in {"swebench", "legacy"}:
+        return evaluate_swebench(
+            prediction,
+            instance,
+            cache_level,
+            clean,
+            force_rebuild,
+            run_id,
+            timeout,
+            namespace,
+            instance_image_tag,
+            rewrite_reports,
+        )
+
+    raise ValueError(f"Unknown evaluation backend: {backend_name}")
 
 
 def filter_dataset_by_predictions(predictions, dataset_name, split):
@@ -303,6 +665,7 @@ def main(
     namespace: str | None,
     rewrite_reports: bool,
     instance_image_tag: str = "latest",
+    backend: str | None = None,
 ):
     # load predictions as map of instance_id to prediction
     predictions = get_predictions_from_file(predictions_path, dataset_name, split)
@@ -334,6 +697,7 @@ def main(
             namespace=namespace,
             instance_image_tag=instance_image_tag,
             rewrite_reports=rewrite_reports,
+            backend=backend,
         )
         results[instance_id] = result
 
@@ -382,8 +746,15 @@ if __name__ == "__main__":
     # if clean is false, we only remove images above the cache level if they don't already exist
     parser.add_argument("--clean", type=str2bool, default=False, help="Clean images above cache level")
     parser.add_argument("--run_id", type=str, required=True, help="Run ID - identifies the run")
-    parser.add_argument("--namespace", type=str, default="swebench", help="Namespace for images")
+    parser.add_argument("--namespace", type=str, default="starryzhang", help="Namespace for images")
     parser.add_argument("--instance_image_tag", type=str, default="latest", help="Instance image tag")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=os.environ.get("CC_EVAL_BACKEND", "live"),
+        choices=["live", "repolaunch", "swebench-live", "swebench", "legacy"],
+        help="Evaluation backend (default: live via RepoLaunch).",
+    )
     parser.add_argument(
         "--rewrite_reports",
         type=str2bool,

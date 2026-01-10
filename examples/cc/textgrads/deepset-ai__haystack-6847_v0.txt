@@ -1,0 +1,76 @@
+Here’s a thorough review of the coding agent’s execution trace and why it failed to fix the reported bug. I’ll also outline how it can be improved to pass all tests.
+
+What the bug requires
+- The bug states: adding the same component instance to multiple pipelines causes side effects and is not supported. We should document this and add a meaningful error in add_component to detect when an instance is already part of another pipeline and fail the operation with an explanation.
+- In other words, Pipeline.add_component must reject a Component instance that has been previously added to a different Pipeline.
+
+Where the bug is in the code
+- In haystack/core/pipeline/pipeline.py, the add_component method explicitly says: “Component names must be unique, but component instances can be reused if needed.”
+- There is no tracking of whether a component instance has already been added to another pipeline, so the same instance can be added to multiple Pipeline objects.
+- That propagation of an instance across pipelines (or even multiple times in one pipeline) can lead to shared internal state (sockets, senders/receivers lists) being mutated by one pipeline and leaking into the other. This is the side effect the bug mentions.
+
+What the agent did
+- The agent explored the codebase and found pipeline.py, component.py, serialization, and pipeline subclass in haystack/pipeline.py.
+- It identified the relevant add_component method but did not implement any checks or fix.
+- It did not write any tests to reproduce the issue.
+- It did not run tests nor validate any fix.
+- It did not delete test files (since none were created).
+
+Why the agent failed
+- It did not perform the required steps (1) through (5). Specifically:
+  - No test cases were written to reproduce the bug.
+  - No code change was made to add the error detection in add_component.
+  - No tests were executed to verify the fix.
+  - No cleanup was done.
+- It missed the need to add state-tracking on component instances so that add_component can detect prior association with another pipeline.
+- It didn’t inspect haystack/core/errors.py to decide on the correct exception type and a meaningful message.
+- It didn’t consider that from_dict uses add_component (so a fix in add_component will automatically apply to pipelines constructed via deserialization and reuse via the “components” kwargs).
+
+Key technical gaps and what should have been done
+
+1) Write tests to reproduce the bug
+- Create a test that:
+  - Builds a simple component via haystack.testing.factory.component_class (e.g., a trivial component with simple input/output).
+  - Create two Pipeline instances.
+  - Add the same component instance to the first pipeline. Then try to add the same instance to the second pipeline.
+  - Expect a specific exception (preferably PipelineValidationError or ValueError) with a meaningful message explaining that reusing the same instance across different pipelines is unsupported because of potential side effects.
+- Also consider a variant where from_dict is used:
+  - Create one pipeline via from_dict(components=...), passing a pre-instantiated component instance.
+  - Try to reuse that same instance by adding it to a different Pipeline and expect the same failure.
+- Optionally, a test ensuring using two different instances is fine, and possibly re-adding the same instance to the same pipeline is either disallowed or documented behavior. The bug specifically targets multiple pipelines, so the latter isn’t strictly required unless current behavior is pathological.
+
+2) Implement the fix in add_component
+- In haystack/core/pipeline/pipeline.py, add a check before adding a node to the graph:
+  - When an instance is added to a pipeline, set a private attribute on the instance (for example, _haystack_pipeline_owner or __haystack_pipeline_id__) to track the owning pipeline (could be a weakref or just id(self)).
+  - On subsequent add_component calls, if the instance has this attribute set and points to a different pipeline, raise an error (PipelineValidationError is suitable, although ValueError could also be used).
+  - Provide a clear message describing why this is not supported and how to fix: “Adding the same component instance to different pipelines is not supported because it can cause side effects. Please create a new instance of the component for each pipeline.”
+- Since from_dict calls add_component, this change will automatically apply to deserialization scenarios as well.
+
+3) Decide on error type and message
+- PipelineValidationError is already used in add_component for invalid instance type; it fits well for rejecting an instance already tied to another pipeline.
+- Include in the message the name/class of the component and possibly the pipeline identification to aid debugging.
+
+4) Consider internal state and sockets
+- The core reason for this bug is that the instance carries __haystack_input__/__haystack_output__ sockets with lists of senders/receivers that get mutated when connecting components. Sharing the same instance across pipelines shares those socket objects, causing cross-pipeline interference. The check prevents that.
+- The agent should have called out this side effect explicitly to motivate the fix.
+
+5) After implementing, run tests and clean up
+- Execute the newly created tests to verify the fix.
+- Remove any temporary test files after validation, as requested.
+
+Additional considerations the agent missed
+- haystack/core/errors.py should be inspected to choose PipelineValidationError and ensure message consistency.
+- The docstring in add_component still claims instances can be reused. This contradicts the new requirement and should be updated (at least in code comments), although the prompt doesn’t require documentation changes, just a meaningful error.
+
+Summary of specific improvements to the agent’s process
+- Follow the five-step plan closely:
+  - Write targeted tests first.
+  - Locate and modify the specific add_component method to implement instance ownership tracking and error on cross-pipeline reuse.
+  - Use the correct exception type and a clear error message.
+  - Validate by running the tests.
+  - Clean up test files.
+- Provide rationale about shared sockets and state to justify the fix.
+- Consider from_dict behavior and ensure the fix covers it.
+- Update docstrings or comments to reflect new behavior (instances cannot be reused across pipelines).
+
+By implementing the above, the agent would satisfy the bug’s requirements and ensure the problem is caught and communicated clearly at the earliest point, which is add_component.
