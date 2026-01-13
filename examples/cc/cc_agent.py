@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import platform
+import random
 import re
 import time
 from pathlib import Path
@@ -179,9 +180,31 @@ class CodingAgent(LitAgent):
             prediction = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
             logger(run_id, task["instance_id"], json.dumps(prediction, indent=4))
         except Exception as e:
-            logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
-            _logging.error(f"❌ Rollout failed with exception: {e}", exc_info=True)
-            return 0.0  # Return zero reward on exception
+            error_msg = str(e).lower()
+            # Check for rate limit errors
+            is_rate_limit = any(
+                marker in error_msg
+                for marker in ["rate limit", "429", "too many requests", "quota", "throttle"]
+            )
+            if is_rate_limit:
+                wait_time = random.randint(30, 90)  # Random wait 30-90 seconds
+                _logging.warning(
+                    f"⚠️ Rate limit detected, waiting {wait_time}s before retry. Error: {e}"
+                )
+                logger(run_id, task["instance_id"], f"Rate limit hit, waiting {wait_time}s")
+                time.sleep(wait_time)
+                # Retry once
+                try:
+                    prediction = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
+                    logger(run_id, task["instance_id"], json.dumps(prediction, indent=4))
+                except Exception as retry_err:
+                    logger(run_id, task["instance_id"], f"Retry failed: {retry_err}")
+                    _logging.error(f"❌ Retry failed with exception: {retry_err}", exc_info=True)
+                    return 0.0
+            else:
+                logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
+                _logging.error(f"❌ Rollout failed with exception: {e}", exc_info=True)
+                return 0.0  # Return zero reward on exception
         finally:
             if controller is not None:
                 try:
@@ -425,6 +448,18 @@ async def gold_cc_agent_run_dataset(
     llm_proxy = LLMProxy(
         port=12358,
         store=store,
+        num_retries=30,  # 最多重试30次，够撑过速率限制
+        litellm_config={
+            "litellm_settings": {
+                "num_retries": 30,
+                "retry": {
+                    "timeout": 120,      # 每次请求2分钟超时
+                    "max_retries": 30,
+                    "min_wait": 15,      # 至少等15秒
+                    "max_wait": 300,     # 最多等5分钟
+                }
+            }
+        },
         callbacks=[
             "opentelemetry",
         ],
@@ -492,7 +527,11 @@ async def gold_cc_agent_run_dataset(
                 for span in spans:
                     f.write(json.dumps(span.model_dump()) + "\n")
 
-        time.sleep(sleep_seconds)
+        # Add jitter: sleep ± 30% to prevent synchronized requests
+        jitter = random.uniform(-0.3, 0.3)
+        actual_sleep = sleep_seconds * (1 + jitter)
+        logging.info(f"Sleeping {actual_sleep:.1f}s before next instance (jitter: {jitter*100:.1f}%)")
+        time.sleep(actual_sleep)
 
 
 if __name__ == "__main__":

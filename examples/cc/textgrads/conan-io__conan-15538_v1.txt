@@ -1,0 +1,53 @@
+Analysis of failure and corrective actions
+
+Root cause of the crash
+- The text formatter for the build-order command (conan/cli/commands/graph.py: cli_build_order) assumed the build-order serialization always had a 'packages' key. That is only true for the recipe-order shape.
+- When running with --order=configuration, the InstallGraph produces a flat item per package configuration that does not include 'packages'. Attempting item['packages'] raised a KeyError.
+
+Relevant code and data shapes
+- conan/cli/commands/graph.py: cli_build_order() iterated item['packages'] unconditionally.
+- conans/client/graph/install_graph.py shows the two serializations:
+  - Recipe order: items have 'ref', 'depends', and 'packages' (list of levels with package dicts).
+  - Configuration order: items are flat with keys like 'ref', 'pref', 'package_id', 'binary', no 'packages'.
+
+What needed to change
+- The text formatter must be robust to both shapes:
+  - If 'packages' exists (recipe mode), iterate package levels and print each entry.
+  - Else (configuration mode), print one line per item using 'ref', 'package_id', and 'binary'.
+- The JSON formatter must remain unchanged (dump raw data).
+
+What the agent did well
+- Located the cli_build_order function and the unconditional item['packages'] access.
+- Confirmed the two serialization shapes in InstallGraph.
+- Implemented a minimal, localized fix in cli_build_order:
+  - Used item.get('packages') to detect recipe-mode shape.
+  - Printed “ref:package_id - binary” per package entry (recipe) or per item (configuration).
+  - Added a docstring explaining the dual-shape requirement.
+  - Left json_build_order unchanged.
+- Wrote focused, self-contained unit tests that:
+  - Directly import cli_build_order.
+  - Capture stdout output.
+  - Cover recipe mode with nested packages-levels and configuration mode with flat items.
+  - Validate the printed lines as required.
+- Ran only the new tests and removed them after validation.
+
+Gaps and opportunities for improvement
+- Test breadth:
+  - Could add a test with multiple levels and multiple items per level for configuration mode to ensure nested iteration works across levels, not just a single level. Current tests still exercise the nested loops sufficiently for both shapes.
+  - Could validate that the number of output lines matches the number of input items/packages exactly (counts), not just presence, though current assertions are adequate for the task.
+- Defensive programming:
+  - If future shapes add or remove keys, being slightly more defensive (e.g., verify package dicts contain package_id and binary) could avoid future KeyErrors. The current solution follows the expected schema, which is fine for this fix.
+- Output consistency:
+  - The formatter could include context or other optional fields if desired, but the goal and acceptance criteria specify only “ref:package_id - binary”, so keeping it minimal is correct here.
+
+Summary of the fix
+- Updated cli_build_order to handle both shapes:
+  - Recipe shape: iterate item['packages'] (levels) and print each package.
+  - Configuration shape: no 'packages' key; print one line per item.
+- Added tests in tests/test_cli_build_order_formatter.py that:
+  - Reproduce the original KeyError (if unfixed) by simulating configuration-mode input.
+  - Validate correct output for both recipe-mode and configuration-mode inputs.
+- Ensured JSON formatter behavior unchanged.
+- Ran only the new tests and removed them afterward.
+
+With these changes, running “conan graph build-order --order=configuration” will no longer crash, and text output formatting is correct for both modes.

@@ -1,0 +1,87 @@
+You are working in the repository at /testbed.
+
+Bug description:
+{description}
+
+Context and desired outcome
+- Problem: When parsing an INSERT … SELECT without an explicit target column list, the column lineage is currently using the names from the SELECT list (e.g., user_id, user_name) as the target columns. Instead, if a MetaDataProvider is available for the target table and the number of selected columns matches the number of target columns, the lineage should use the target table’s actual column names (e.g., id, name).
+- Desired behavior: For INSERT INTO target SELECT ... FROM source statements, if the metadata provider can supply target table columns and the count matches, use those as if the statement were INSERT INTO target(id, name) SELECT user_id, user_name FROM source.
+
+Your task
+Follow these steps strictly:
+1) Write failing tests that reproduce the bug.
+2) Explore the code to locate the exact place to implement the fix.
+3) Implement the fix in the source code.
+4) Run your tests to validate the fix; if tests still fail, iterate until they pass.
+5) After verification, delete the tests you added (do not commit tests). Do not commit any code; we will commit later.
+
+Technical guidance and where to change the code
+- Root cause: Target columns are only set when explicitly provided in DML (via holder.add_write_column from CreateInsertExtractor). When no target columns are specified in the INSERT, SourceHandlerMixin.end_of_query_cleanup resolves column lineage using the SELECT list’s derived/alias names unless holder.write_columns is already populated. There is currently no logic to populate write_columns from the MetaDataProvider for this case.
+- Where to fix: sqllineage/core/parser/__init__.py, class SourceHandlerMixin, method end_of_query_cleanup. This method already uses holder.write_columns to override mapping when lengths match. Populate holder.write_columns from metadata when it’s empty and lengths match.
+- Implementation plan inside end_of_query_cleanup:
+  - For each union segment (the method already iterates over union barriers/segments and computes the selected column group, often a variable like col_grp), determine the target table (tgt_tbl) from holder.write.
+  - If holder.write_columns is empty and a metadata provider exists on self, fetch the target table’s column names from the metadata provider.
+  - If the number of fetched target columns equals len(col_grp) and is greater than zero, call holder.add_write_column with these names.
+  - Do not override if write_columns already populated or counts don’t match. Leave existing logic intact so that if write_columns length matches col_grp, the mapping uses target columns.
+
+Reference for the provider API and codebase integration
+- There is usually an attribute self.metadata_provider passed into parsers/runners. Search for MetaDataProvider usage in the codebase to confirm the provider API. In many places, the method is get_table_columns(table) or similar. Reuse the same API that is already used for wildcard expansion or table introspection elsewhere in the project.
+- Use holder.add_write_column(*cols) to populate write columns. Ensure you don’t add them multiple times; holder.add_write_column is typically idempotent if called once when empty.
+- Ensure this logic happens before the existing branch that checks len(holder.write_columns) == len(col_grp) to influence the lineage mapping.
+
+Test plan (add tests first)
+- Place a new test file under tests/sql/column/, e.g., tests/sql/column/test_metadata_target_columns.py.
+- Look at existing column lineage tests in tests/sql/column/ to follow the project’s test style and helpers. Reuse any common helpers/assertions already present (e.g., via LineageRunner and asserting on runner.get_column_lineage()).
+- You need a metadata provider that exposes the target table’s columns. Search the repository’s tests for an existing helper such as generate_metadata_providers or a dummy provider class to define in-memory table schemas for tests. Use whatever the test suite already uses for metadata-driven tests.
+- Create a failing test scenario:
+  - Given: target table target has columns ["id", "name"]; source table source has columns ["user_id", "user_name"].
+  - SQL: INSERT INTO target SELECT user_id, user_name FROM source.
+  - Expectation: Column lineage maps from user_id -> id and user_name -> name for the target table. That is, the target column names should be the actual target table column names from the metadata provider, not the SELECT aliases.
+- The test should fail before the fix, showing current behavior maps the target to user_id and user_name.
+- Optional additional test (only if straightforward with existing utilities): A mismatch count scenario (e.g., target has 3 columns, SELECT has 2) should not override and should retain current behavior. This is not mandatory if time is constrained but is useful for coverage.
+
+Example test sketch (adapt this to the project’s actual testing helpers and classes)
+- Note: This is illustrative; adjust imports and assertions to match existing tests.
+
+- Use a metadata provider fixture or build one inline:
+  - If there’s a helper like generate_metadata_providers, create a provider with:
+    - Table "source" columns: ["user_id", "user_name"]
+    - Table "target" columns: ["id", "name"]
+  - Run LineageRunner(sql, metadata_provider=provider) and extract column lineage pairs.
+  - Assert that the lineage target columns are "id" and "name" for the "target" table.
+
+Implementation details to add in sqllineage/core/parser/__init__.py
+- In SourceHandlerMixin.end_of_query_cleanup, inside the loop where col_grp is determined and mapping is about to be established:
+  - Determine the single target table for this statement. Typically holder.write is a set; use something like:
+    - tgt_tbl = next(iter(holder.write), None)
+    - Guard if None.
+  - If not holder.write_columns:
+    - Get provider: metadata_provider = getattr(self, "metadata_provider", None)
+    - If available, fetch target columns via the repo’s actual API (e.g., metadata_provider.get_table_columns(tgt_tbl)).
+    - If the provider API differs (e.g., metadata_provider.get_columns(tgt_tbl) or metadata_provider.get_table(tgt_tbl).columns), follow the existing pattern found elsewhere in the repo.
+    - If len(target_columns) == len(col_grp) and len(target_columns) > 0:
+      - holder.add_write_column(*target_columns)
+  - Leave the following existing logic unchanged so it will pick up holder.write_columns when lengths match.
+
+Edge cases and safeguards
+- Do not change behavior when:
+  - No metadata provider is configured.
+  - The provider cannot resolve the target table or returns zero columns.
+  - The number of target columns does not match the number of selected columns in this union segment.
+- For UNION queries, ensure the check is performed per barrier/segment so that only matching segments are overridden.
+- Do not overwrite holder.write_columns if already populated (i.e., when target column list is explicitly provided in the SQL).
+
+Validation
+- Run the test suite with pytest from the repository root to ensure your new test fails before the fix.
+- Implement the fix as described and rerun the test suite. The new test should now pass, and no existing tests should fail.
+- If any tests fail, iterate on the implementation to match the project’s APIs and expectations.
+
+Clean up
+- After confirming the fix, delete any test files you added (e.g., tests/sql/column/test_metadata_target_columns.py). The instruction requires deleting the test cases you wrote at last.
+- Do not commit your changes; we will handle commits separately.
+
+Acceptance criteria
+- Before the fix, your added test fails due to incorrect target column names in lineage.
+- After the fix, your added test passes and demonstrates that when metadata is available and counts match, lineage uses the target table’s column names.
+- All existing tests continue to pass.
+- You remove the temporary test(s) you added at the end.

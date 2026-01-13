@@ -1,0 +1,57 @@
+You are working in the repository at /testbed.
+
+Bug summary to fix
+{description}
+
+Important context and constraints
+- The failure occurs when Briefcase tries to move the built RPM to the dist directory on openSUSE because the expected filename contains a distro tag that openSUSE does not include.
+- The offending logic is in src/briefcase/platforms/linux/system.py within LinuxSystemMostlyPassiveMixin.distribution_filename() for the "rpm" packaging format. It constructs rpm filenames as name-version-revision.{rpm_tag}.{rpm_abi}.rpm, which is correct for RHEL/Fedora but wrong for SUSE where the distro tag is omitted.
+- Past attempts caused AttributeError in tests because they accessed app.target_vendor_base directly, which is not always set in test AppConfig. Use getattr(app, "target_vendor_base", None) and getattr(app, "target_vendor", None).
+- You must follow the full 5-step process and remove any temporary tests at the end.
+- Do not commit any changes.
+
+Your tasks
+1) Write tests to reproduce the bug
+- Add unit tests under tests/platforms/linux/system/ that verify the constructed RPM filename for different vendors. These tests should focus on distribution_filename() or distribution_path() in LinuxSystemMostlyPassiveMixin for packaging format "rpm".
+- Cover at least:
+  - A Red Hat-like case (e.g., vendor_base "redhat" or vendor "fedora/37") where the filename must include both distro tag and ABI: name-version-revision.{rpm_tag}.{rpm_abi}.rpm.
+  - An openSUSE case (e.g., vendor_base "suse" and/or vendor starting with "opensuse") where the filename must omit the distro tag: name-version-revision.{rpm_abi}.rpm.
+  - Optionally, SLES branding (vendor starting with "sles") should behave like SUSE and omit the distro tag.
+- Use minimal AppConfig-like objects the Briefcase tests already employ. Guard for missing attributes by relying on getattr in your code change; do not mutate global state or require rpmbuild execution.
+- The tests should fail with the current code on openSUSE because the expected filename lacks the distro tag, reproducing the bug.
+
+2) Explore the source to locate the bug
+- Focus on src/briefcase/platforms/linux/system.py in LinuxSystemMostlyPassiveMixin.distribution_filename(), specifically the branch that handles packaging_format == "rpm".
+- Confirm that the constructed rpm filename always includes rpm_tag, which is not present on SUSE-built RPMs.
+
+3) Edit the source code to fix the bug
+- In distribution_filename() when packaging_format == "rpm":
+  - If the target is SUSE, omit the distro tag segment from the filename.
+  - Detect SUSE using robust, non-crashy checks:
+    - suse_like = (
+      (getattr(app, "target_vendor_base", None) == "suse")
+      or (str(getattr(app, "target_vendor", ""))).lower().startswith("opensuse")
+      or (str(getattr(app, "target_vendor", ""))).lower().startswith("sles")
+    )
+    - If suse_like is True, return name-version-revision.{rpm_abi}.rpm.
+    - Otherwise, return the original name-version-revision.{rpm_tag}.{rpm_abi}.rpm.
+  - Add a concise comment explaining why: On some RPM-based distributions (e.g., openSUSE/SLES), %{?dist} is omitted, so the built RPM filename does not contain a distro tag.
+  - Keep behavior unchanged for other RPM-based distros (RHEL/Fedora).
+
+4) Rerun your tests to validate the fix
+- Run the full test suite to ensure no regressions: pytest -q
+- Ensure your new tests pass:
+  - Red Hat/Fedora case still includes distro tag.
+  - openSUSE/SLES cases omit distro tag.
+- If any test fails, revisit the code and refine the detection logic without introducing brittle vendor string assumptions beyond the checks outlined above.
+
+5) Cleanup
+- Delete all tests you added in step (1) after validation.
+- Do not commit any changes.
+
+Acceptance criteria
+- The constructed RPM filename matches the actual rpmbuild output format for openSUSE/SLES: helloworld-0.0.1-1.x86_64.rpm (no distro tag).
+- The constructed RPM filename is unchanged for RHEL/Fedora-like targets: includes distro tag and ABI.
+- The tests you added initially fail before the fix and pass after the fix; you remove those tests at the end.
+- No AttributeError occurs due to missing target_vendor_base/target_vendor on AppConfig in tests; use getattr as described.
+- No commits are made.

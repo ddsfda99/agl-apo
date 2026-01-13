@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -91,19 +92,20 @@ def next_trace_path(trace_dir: Path, instance_id: str) -> Path:
 
 
 def next_textgrad_path(output_dir: Path, instance_id: str) -> Path:
-    prefix = f"{instance_id}_v"
-    next_version = 0
+    pattern_iter = re.compile(
+        rf"^{re.escape(instance_id)}_iter(\d+)_\d{{8}}_\d{{6}}\.txt$"
+    )
+    next_iter = 0
     if output_dir.exists():
         for path in output_dir.iterdir():
             if not path.is_file():
                 continue
             name = path.name
-            if not name.startswith(prefix) or not name.endswith(".txt"):
-                continue
-            suffix = name[len(prefix):-4]
-            if suffix.isdigit():
-                next_version = max(next_version, int(suffix) + 1)
-    return output_dir / f"{instance_id}_v{next_version}.txt"
+            match = pattern_iter.match(name)
+            if match:
+                next_iter = max(next_iter, int(match.group(1)) + 1)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_dir / f"{instance_id}_iter{next_iter}_{timestamp}.txt"
 
 
 def _load_agent_log_from_data_dir(instance_id: str) -> Optional[str]:

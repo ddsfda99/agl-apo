@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -89,37 +90,43 @@ def find_latest_textgrad(textgrads_dir: Path, instance_id: str) -> Optional[Path
     """Find the latest versioned textgrad output for the instance."""
     if not textgrads_dir.exists():
         return None
-    pattern = re.compile(rf"^{re.escape(instance_id)}_v(\d+)\.txt$")
+    pattern_iter = re.compile(
+        rf"^{re.escape(instance_id)}_iter(\d+)_([0-9]{{8}}_[0-9]{{6}})\.txt$"
+    )
     latest_path = None
-    latest_version = -1
+    latest_key = (-1, "00000000_000000")
     for path in textgrads_dir.iterdir():
         if not path.is_file():
             continue
-        match = pattern.match(path.name)
+        name = path.name
+        match = pattern_iter.match(name)
         if not match:
             continue
-        version = int(match.group(1))
-        if version > latest_version:
-            latest_version = version
+        iter_idx = int(match.group(1))
+        ts = match.group(2)
+        key = (iter_idx, ts)
+        if key > latest_key:
+            latest_key = key
             latest_path = path
     return latest_path
 
 
 def next_applyedit_path(output_dir: Path, instance_id: str) -> Path:
     """Get the next versioned applyedit path for the instance."""
-    prefix = f"{instance_id}_v"
-    next_version = 0
+    pattern_iter = re.compile(
+        rf"^{re.escape(instance_id)}_iter(\d+)_\d{{8}}_\d{{6}}\.txt$"
+    )
+    next_iter = 0
     if output_dir.exists():
         for path in output_dir.iterdir():
             if not path.is_file():
                 continue
             name = path.name
-            if not name.startswith(prefix) or not name.endswith(".txt"):
-                continue
-            suffix = name[len(prefix):-4]
-            if suffix.isdigit():
-                next_version = max(next_version, int(suffix) + 1)
-    return output_dir / f"{instance_id}_v{next_version}.txt"
+            match = pattern_iter.match(name)
+            if match:
+                next_iter = max(next_iter, int(match.group(1)) + 1)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_dir / f"{instance_id}_iter{next_iter}_{timestamp}.txt"
 
 
 async def main(dataset_path: Path, instance_id: Optional[str]) -> None:

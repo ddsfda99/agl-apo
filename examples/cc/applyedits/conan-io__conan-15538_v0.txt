@@ -1,0 +1,78 @@
+You are given a code repository in the current directory (/testbed).
+
+Bug description:
+{description}
+
+Goal
+Fix the crash when running “conan graph build-order --order=configuration” by making the CLI formatter robust to the two different build-order serialization shapes produced by the graph API. Then validate with targeted unit tests and remove the tests at the end.
+
+Important context learned from previous failures
+- The KeyError happens in conan/cli/commands/graph.py inside cli_build_order(), where it blindly accesses item['packages'].
+- The graph_build_order command supports two ordering modes:
+  - recipe order: items include a nested ‘packages’ list with levels.
+  - configuration order: items are flat objects for a single package configuration and do not include a ‘packages’ key.
+- The formatter must branch based on the shape. JSON formatting must remain unchanged.
+- Running the full test suite in this environment will fail due to missing external tools. Only run the new focused tests you add.
+
+Your tasks
+1) Write focused unit tests that reproduce the crash and validate the fix.
+   - Create tests in a single file, for example: tests/test_cli_build_order_formatter.py.
+   - Test 1 (recipe mode):
+     - Construct minimal build-order data with the following shape:
+       - A list of items. Each item has:
+         - ‘ref’: a recipe reference string like "pkg/1.0".
+         - ‘packages’: a list of levels (list of lists). Each inner package object contains at least ‘package_id’ and ‘binary’.
+     - Call the cli formatter function to ensure it correctly iterates levels and prints one line per package level entry without crashing.
+     - Assert that the printed lines include “ref:package_id - binary”.
+   - Test 2 (configuration mode):
+     - Construct minimal build-order data where items do NOT include ‘packages’. Each item has at least:
+       - ‘ref’: a recipe reference string.
+       - ‘package_id’: the package id string.
+       - ‘binary’: the binary status string (e.g., “Build”, “Cache”).
+       - Optionally present keys like ‘pref’ exist in real data, but do not rely on them in the formatter assertions.
+     - Call the cli formatter function and assert it prints exactly one line per item using “ref:package_id - binary”.
+   - Capture stdout in tests to validate the printed output.
+   - Do not depend on external tools or run the entire Conan CLI; directly import and invoke the formatter function under test.
+
+2) Explore the source to locate and understand the bug.
+   - Inspect conan/cli/commands/graph.py and find cli_build_order(). Note it currently assumes ‘packages’ exists.
+   - Inspect conans/client/graph/install_graph.py to confirm the two serialization shapes:
+     - Recipe shape uses nested ‘packages’ levels.
+     - Configuration shape is a flat item without ‘packages’.
+
+3) Implement a minimal, targeted fix in the CLI formatter.
+   - In conan/cli/commands/graph.py, update cli_build_order(info) to handle both shapes:
+     - If ‘packages’ exists in the item:
+       - Iterate the levels and print one line per package as currently done.
+     - Else:
+       - Treat it as configuration mode and print a single line per item using ‘ref’, ‘package_id’, and ‘binary’.
+   - Do not change json_build_order(); it should continue to dump the raw data.
+   - Add a brief docstring or comment explaining why cli_build_order must handle both serialization shapes for maintainability.
+   - Keep the change minimal and localized to the formatter function.
+
+4) Run only the tests you added to validate the fix.
+   - Command example: python -m pytest tests/test_cli_build_order_formatter.py -q
+   - Ensure both tests pass.
+   - Do not run the full test suite; it will fail due to missing external tools and is unrelated to this bug.
+
+5) Clean up test artifacts.
+   - After validating the fix, delete the test file(s) you created in the tests directory.
+   - Confirm the test files are removed.
+
+Constraints and acceptance criteria
+- The fix must prevent KeyError when processing configuration-mode build-order items that do not have ‘packages’.
+- The formatter output for:
+  - Recipe mode: iterate levels and print “ref:package_id - binary” for each package entry.
+  - Configuration mode: print exactly one line per item using “ref:package_id - binary”.
+- JSON formatter remains unchanged.
+- Keep changes minimal and well-documented.
+- Do not commit any edits. Only modify files locally for validation.
+- Ensure the tests are self-contained, do not depend on external binaries or services, and run quickly.
+
+Suggested workflow
+- Use grep/find to locate cli_build_order in conan/cli/commands/graph.py.
+- Review serialization helpers in conans/client/graph/install_graph.py for both order modes.
+- Implement the conditional logic in cli_build_order.
+- Author tests that directly import cli_build_order and pass constructed info lists representing both shapes.
+- Run only the new tests.
+- Remove tests after confirming success.

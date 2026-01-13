@@ -1,0 +1,113 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+Leading slash in uri followed by column fails
+Leading slash in uri followed by column fails.
+
+## Expected Result
+
+```python
+requests.get('http://127.0.0.1:10000//v:h')
+<Response [200]>
+```
+
+## Actual Result
+
+```python
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/site-packages/urllib3/util/url.py", line 425, in parse_url
+    host, port = _HOST_PORT_RE.match(host_port).groups()  # type: ignore[union-attr]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'groups'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<stdin>", line 1, in <module>
+  File "/usr/local/lib/python3.11/site-packages/requests/api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 486, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/connectionpool.py", line 711, in urlopen
+    parsed_url = parse_url(url)
+                 ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/site-packages/urllib3/util/url.py", line 451, in parse_url
+    raise LocationParseError(source_url) from e
+urllib3.exceptions.LocationParseError: Failed to parse: //v:h
+```
+
+## Reproduction Steps
+
+```python
+import requests
+requests.get('http://127.0.0.1:10000//v:h')
+
+```
+
+## System Information
+
+    $ python -m requests.help
+
+```json
+{
+  "chardet": {
+    "version": null
+  },
+  "charset_normalizer": {
+    "version": "3.3.2"
+  },
+  "cryptography": {
+    "version": ""
+  },
+  "idna": {
+    "version": "3.6"
+  },
+  "implementation": {
+    "name": "CPython",
+    "version": "3.11.8"
+  },
+  "platform": {
+    "release": "5.10.209-198.812.amzn2.x86_64",
+    "system": "Linux"
+  },
+  "pyOpenSSL": {
+    "openssl_version": "",
+    "version": null
+  },
+  "requests": {
+    "version": "2.31.0"
+  },
+  "system_ssl": {
+    "version": "300000b0"
+  },
+  "urllib3": {
+    "version": "2.2.1"
+  },
+  "using_charset_normalizer": true,
+  "using_pyopenssl": false
+}
+```
+
+<!-- This command is only available on Requests v2.16.4 and greater. Otherwise,
+please provide some basic information about your system (Python version,
+operating system, &c). -->
+
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

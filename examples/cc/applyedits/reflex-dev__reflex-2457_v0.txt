@@ -1,0 +1,110 @@
+You are an expert coding agent working in the current repository at /testbed.
+
+Bug context:
+{description}
+
+Goal:
+Implement an environment-variable override for Reflex.DIR in reflex/constants/base.py so that REFLEX_DIR, if set, is used instead of PlatformDirs(MODULE_NAME, False).user_data_dir.
+
+Important constraints and lessons from prior failures:
+- Do not import reflex.constants.base via the package (e.g., import reflex.constants.base). That triggers reflex/__init__.py and a cascade of heavy dependencies (pydantic, compiler, etc.) and package metadata lookup, causing failures.
+- Avoid importlib.reload misuse; reloading a submodule requires its parent package in sys.modules.
+- Isolate tests to load the target module by file path only, bypassing the package-level imports.
+- Run only your new tests and avoid collecting the repo's existing tests and conftest.
+- Delete any test files you create after verification.
+- Do not commit any changes.
+
+Step-by-step plan:
+
+1) Write isolated unit tests to reproduce and validate the bug/behavior
+- Create a new directory for isolated tests, e.g., unit/.
+- Add a test file unit/test_reflex_dir_env.py that:
+  - Loads reflex/constants/base.py directly from its file path using importlib.util.spec_from_file_location and spec.loader.exec_module to avoid importing the entire reflex package.
+  - Stubs platformdirs via sys.modules to avoid any dependency issues and to control the default path returned by PlatformDirs(MODULE_NAME, False).user_data_dir.
+  - Temporarily patches importlib.metadata.version to avoid PackageNotFoundError during module import when the package is not installed.
+  - Includes two tests:
+    - test_env_overrides_dir: sets REFLEX_DIR and asserts base.Reflex.DIR equals the env var.
+    - test_default_uses_platformdirs: unsets REFLEX_DIR and asserts base.Reflex.DIR equals the stubbed PlatformDirs().user_data_dir.
+- Example test content to use as a template:
+  - Please create this exact file so the tests are robust and isolated:
+
+    import importlib.util
+    import sys
+    import types
+    import os
+    from pathlib import Path
+    import importlib.metadata as metadata
+
+    def load_base_module(fake_default_dir):
+        # Stub out platformdirs so tests do not require the real dependency.
+        fake_pd = types.ModuleType("platformdirs")
+        class PlatformDirs:
+            def __init__(self, module_name, roaming):
+                self.user_data_dir = fake_default_dir
+        fake_pd.PlatformDirs = PlatformDirs
+        sys.modules["platformdirs"] = fake_pd
+
+        # Patch importlib.metadata.version to avoid PackageNotFoundError.
+        orig_version = metadata.version
+        metadata.version = lambda name: "0.0"
+        try:
+            base_path = Path("reflex/constants/base.py").resolve()
+            spec = importlib.util.spec_from_file_location("reflex_constants_base", str(base_path))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        finally:
+            # Restore patched symbols and cleanup stubbed module.
+            metadata.version = orig_version
+            sys.modules.pop("platformdirs", None)
+
+    def test_env_overrides_dir():
+        os.environ["REFLEX_DIR"] = "/tmp/reflexdir"
+        try:
+            base = load_base_module("/tmp/default")
+            assert base.Reflex.DIR == "/tmp/reflexdir"
+        finally:
+            os.environ.pop("REFLEX_DIR", None)
+
+    def test_default_uses_platformdirs():
+        os.environ.pop("REFLEX_DIR", None)
+        base = load_base_module("/tmp/defaultdir")
+        assert base.Reflex.DIR == "/tmp/defaultdir"
+
+2) Explore the source code to locate the bug
+- Open reflex/constants/base.py.
+- Find the Reflex class. Locate the DIR constant assignment.
+- Confirm it currently uses PlatformDirs(MODULE_NAME, False).user_data_dir without checking an environment variable.
+
+3) Edit the source code to fix the bug
+- In reflex/constants/base.py, within class Reflex, change the DIR assignment to prefer an environment variable:
+  - DIR = os.environ.get("REFLEX_DIR", PlatformDirs(MODULE_NAME, False).user_data_dir)
+- Ensure the file imports os at the top if it doesn’t already:
+  - import os
+- Do not change unrelated logic.
+- Optional but not required: You may keep VERSION lookup as-is; the tests patch importlib.metadata.version to avoid PackageNotFoundError during import.
+
+4) Run only your tests to validate the fix
+- Execute pytest on your isolated test file and avoid loading the repo’s conftest or other tests:
+  - python -m pytest -q -c /dev/null unit/test_reflex_dir_env.py
+- Both tests must pass:
+  - test_env_overrides_dir should pass, confirming REFLEX_DIR overrides.
+  - test_default_uses_platformdirs should pass, confirming the default behavior when the env var is not set.
+
+5) If tests fail, iterate
+- If tests fail, revisit reflex/constants/base.py and ensure:
+  - DIR uses os.environ.get("REFLEX_DIR", PlatformDirs(MODULE_NAME, False).user_data_dir).
+  - os is imported.
+  - No typos in the environment variable name.
+- Rerun the tests until both pass.
+
+6) Clean up
+- Delete the unit/test_reflex_dir_env.py file and the unit/ directory you created.
+- Do not commit any changes.
+
+Notes and cautions:
+- Do not import reflex.constants.base via the package in tests (e.g., import reflex.constants.base). Always load the module from its file path to avoid heavy imports and package initialization.
+- Do not attempt importlib.reload on submodules without their parent package in sys.modules.
+- Avoid installing or pulling in unrelated dependencies; the tests stub platformdirs and patch importlib.metadata.version so they work in this environment.
+- Respect the repository paths; reflex/constants/base.py is the only file to change for this bug.
+- Do not commit your edits.

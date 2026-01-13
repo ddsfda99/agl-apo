@@ -1,0 +1,66 @@
+You are given a code repository in the current directory (/testbed).
+
+Bug description: {description}
+
+Goal
+Make the private GeoDataFrame._to_geo functionality publicly accessible via a new GeoDataFrame.to_geo method that returns a GeoJSON-like FeatureCollection dictionary, not just a JSON string. Keep backward compatibility and ensure internal consistency by refactoring internal callers to use the new public API.
+
+Key requirements and constraints
+- Add a public GeoDataFrame.to_geo(na="null", show_bbox=False, drop_id=False) that returns a dict. It should preserve existing semantics of _to_geo.
+- Keep the private _to_geo intact for backward compatibility (do not remove or change its behavior).
+- Refactor GeoDataFrame.to_json and __geo_interface__ to call the new to_geo instead of the private _to_geo (internal consistency).
+- Write targeted tests that do NOT rely on comparing outputs to the private method. Instead, assert structure and behavior (e.g., type, keys, lengths, bbox, id handling) and cross-check with json.loads(gdf.to_json()).
+- Run only the targeted tests you add to drive this change. Avoid or ignore unrelated tests that may require network access.
+- After verifying the fix with your tests, delete the temporary tests you added (as instructed). Do not commit any changes.
+
+Detailed steps
+1) Reproduce the issue with focused tests
+- Create a temporary test file, e.g., geopandas/tests/test_to_geo_public.py, that:
+  - Builds a small GeoDataFrame (e.g., two Point geometries with a simple attribute, including a None/NaN to reflect na handling).
+  - Asserts that:
+    - GeoDataFrame has a callable to_geo attribute.
+    - gdf.to_geo() returns a dict whose top-level "type" is "FeatureCollection".
+    - The number of features equals len(gdf).
+    - Each feature has at least "type", "geometry", and "properties" keys.
+  - Tests drop_id behavior:
+    - With drop_id=False (default), each feature should include an "id" key that corresponds to the GeoDataFrame index values.
+    - With drop_id=True, the "id" key should be absent from features.
+  - Tests show_bbox behavior:
+    - With show_bbox=False (default), the top-level dict does not contain a "bbox" key.
+    - With show_bbox=True, the top-level dict contains a "bbox" key.
+  - Cross-checks with to_json:
+    - json.loads(gdf.to_json()) should produce a dict that is deeply equal to gdf.to_geo() for the same arguments (na="null", show_bbox, drop_id). This verifies parity without relying on private methods.
+- Do NOT compare against _to_geo in tests (avoid coupling to private API).
+- Run only this test file to confirm it fails initially with AttributeError: no to_geo method.
+
+2) Explore and locate the relevant source
+- Search for _to_geo, to_json, and __geo_interface__ in geopandas/geodataframe.py (and related files if any).
+- Confirm _to_geo currently implements the FeatureCollection dict creation, and to_json uses _to_geo to serialize to a string. Confirm that __geo_interface__ uses _to_geo, returning a mapping.
+
+3) Implement the fix
+- Add a public method on GeoDataFrame:
+  - def to_geo(self, na="null", show_bbox=False, drop_id=False): return a dict.
+  - Implement it as a thin wrapper delegating to the existing _to_geo to preserve current behavior and defaults.
+  - Add a clear docstring stating it returns a GeoJSON-like FeatureCollection dictionary and describing parameters na, show_bbox, drop_id.
+- Refactor internal callers for consistency:
+  - Update GeoDataFrame.to_json to call self.to_geo(na=na, show_bbox=show_bbox, drop_id=drop_id) and then json.dumps the result (maintain existing dumps behavior).
+  - Update __geo_interface__ to call self.to_geo(...) instead of _to_geo, preserving any arguments it previously used (e.g., show_bbox settings). Ensure the returned object is still a mapping as before.
+- Do not remove or rename _to_geo; keep it functioning to avoid breaking any external code that may have relied on it, even though it is private.
+
+4) Validate the fix
+- Run only your new test file, e.g., pytest -q geopandas/tests/test_to_geo_public.py, and ensure all tests pass.
+- Optionally, run a small subset of the existing suite that doesn’t require network to increase confidence. If unrelated network or environment tests fail, you may skip them; they are not part of this change.
+
+5) Iterate if needed
+- If any of your tests fail, adjust the implementation while preserving backward compatibility and the intended behavior.
+
+6) Clean up
+- Delete the temporary test file you created once the fix is validated.
+- Do not commit your changes.
+
+Success criteria
+- GeoDataFrame.to_geo exists, is public, and returns a FeatureCollection dict.
+- GeoDataFrame.to_json continues to return a JSON string with identical content to json.dumps(gdf.to_geo(...)).
+- __geo_interface__ still returns a mapping and is internally implemented via to_geo.
+- Your temporary tests pass while present, and are removed at the end as requested.
+- No reliance on private methods in your tests.

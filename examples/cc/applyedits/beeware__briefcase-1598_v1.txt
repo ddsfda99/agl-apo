@@ -1,0 +1,89 @@
+You are working in the repository at /testbed.
+
+PR description: {description}
+
+Objective
+Fix RPM packaging on openSUSE/SLES by correcting the constructed RPM filename in LinuxSystemMostlyPassiveMixin so Briefcase can move the built RPM into dist. Add targeted tests that reproduce the bug, then implement a safe fix that maintains RHEL/Fedora behavior. Validate by running tests, taking into account a known unrelated test that can fail when running as root. Finally, remove the temporary tests and do not commit changes.
+
+Background and bug summary
+- The failure occurs when Briefcase tries to move the built RPM to dist on openSUSE because the expected filename contains a distro tag that openSUSE does not include.
+- The offending logic is in src/briefcase/platforms/linux/system.py within LinuxSystemMostlyPassiveMixin.distribution_filename(), specifically the branch for packaging_format == "rpm".
+- Current behavior unconditionally constructs {{name}}-{{version}}-{{revision}}.{{rpm_tag}}.{{rpm_abi}}.rpm, which is correct for RHEL/Fedora but wrong for SUSE/openSUSE/SLES where the distro tag is omitted by rpmbuild.
+- This leads to FileNotFoundError when moving the RPM because Briefcase looks for a filename that doesn’t exist on SUSE-like systems.
+
+Constraints to respect
+- Use getattr(app, "target_vendor_base", None) and getattr(app, "target_vendor", None) to avoid AttributeError in tests and in code (AppConfig in tests may not define these attributes).
+- Do not mutate global state; avoid invoking external tools (e.g., rpmbuild) in tests.
+- Follow the full 5-step process below and remove any temporary tests at the end.
+- Do not commit any changes.
+
+5-step process
+
+1) Write tests to reproduce the bug
+- Add unit tests under tests/platforms/linux/system/ that verify the constructed RPM filename for different vendors by calling LinuxSystemMostlyPassiveMixin.distribution_filename() (or distribution_path(), which uses distribution_filename()) when packaging_format == "rpm".
+- Cover at least:
+  - Red Hat-like case (e.g., vendor_base "redhat" or vendor "fedora/37"): filename MUST include both distro tag and ABI, i.e., {{name}}-{{version}}-{{revision}}.{{rpm_tag}}.{{rpm_abi}}.rpm (e.g., helloworld-0.0.1-1.fc37.x86_64.rpm).
+  - openSUSE case (e.g., vendor_base "suse" and/or vendor starting with "opensuse"): filename MUST omit the distro tag, i.e., {{name}}-{{version}}-{{revision}}.{{rpm_abi}}.rpm (e.g., helloworld-0.0.1-1.x86_64.rpm).
+  - Optionally, SLES case (vendor starting with "sles"): same as openSUSE (omit distro tag).
+- Use a minimal AppConfig-like object consistent with existing Briefcase tests. Do not rely on app.target_vendor_base/target_vendor being present; your code change will use getattr to guard these.
+- To keep tests deterministic and offline, prepopulate the mixin’s RPM ABI to a known value (e.g., mixin._rpm_abi = "x86_64") so tests don’t shell out.
+- Ensure your SUSE/openSUSE/SLES tests fail with the current code because the distro tag is wrongly expected. The Fedora/RHEL case should pass with current behavior.
+
+2) Explore the source to locate the bug
+- Inspect src/briefcase/platforms/linux/system.py, in LinuxSystemMostlyPassiveMixin.distribution_filename(), under packaging_format == "rpm".
+- Confirm it always includes a distro tag (rpm_tag) in the constructed filename, which is wrong for SUSE/openSUSE/SLES.
+
+3) Edit the source code to fix the bug
+- In distribution_filename() when packaging_format == "rpm":
+  - Detect SUSE-like targets safely:
+    - suse_like = (
+      (getattr(app, "target_vendor_base", None) == "suse")
+      or str(getattr(app, "target_vendor", "")).lower().startswith("opensuse")
+      or str(getattr(app, "target_vendor", "")).lower().startswith("sles")
+    )
+  - If suse_like is True, return {{name}}-{{version}}-{{revision}}.{{rpm_abi}}.rpm (omit distro tag).
+  - Otherwise (default for RHEL/Fedora-like), return {{name}}-{{version}}-{{revision}}.{{rpm_tag}}.{{rpm_abi}}.rpm (unchanged behavior).
+  - Add a concise comment explaining: On openSUSE/SLES, rpmbuild omits the distro tag ({{%{?dist}}}), so the built RPM filename does not include a distro tag segment.
+- Keep all other behavior unchanged.
+
+4) Rerun tests to validate the fix
+- First, run your new tests to ensure they pass with the fix:
+  - Fedora/RHEL case includes distro tag + ABI.
+  - openSUSE/SLES cases omit distro tag and still include ABI.
+- Then run a broader subset of the suite to check for regressions relevant to your change:
+  - Example: pytest -q -k "platforms and linux and system"
+- Important environment note: There is a known unrelated test that can fail when the suite runs as root:
+  - tests/commands/base/test_paths.py::test_data_path_creation_failure expects a permission error creating a directory under /etc, which won’t occur when running as root.
+  - Do not modify existing tests. If running the full suite, this test may fail due to environment (root) and is unrelated to your change. Call this out explicitly in your validation notes.
+- If you must run the full suite and see only this failure, document that it’s unrelated environmental flakiness and not a regression caused by your patch.
+
+5) Cleanup
+- Delete all tests you added in step (1) after validation.
+- Do not commit any changes.
+
+Additional implementation tips
+- Tests: Use a simple dummy app object with only the fields you need, such as:
+  - app.formal_name or app.app_name (match what distribution_filename() uses)
+  - app.version
+  - app.revision (often "1")
+  - app.packaging_format = "rpm"
+  - Optionally app.target_vendor_base and app.target_vendor (for vendor detection)
+- Ensure your code uses getattr for target_vendor_base and target_vendor so tests that omit these attributes won’t crash with AttributeError.
+- Prefer unit tests that assert only the constructed filename strings; avoid filesystem I/O and external command execution.
+- Optionally, add a test for distribution_path(app) that includes the directory parts plus your computed filename for extra confidence; it should still be deterministic without running rpmbuild.
+
+Acceptance criteria
+- On SUSE/openSUSE/SLES targets, the constructed RPM filename matches rpmbuild output: e.g., helloworld-0.0.1-1.x86_64.rpm (no distro tag).
+- On RHEL/Fedora-like targets, the constructed RPM filename is unchanged and includes both distro tag and ABI: e.g., helloworld-0.0.1-1.fc37.x86_64.rpm.
+- Your newly added tests fail before the fix and pass after the fix.
+- No AttributeError occurs due to missing target_vendor_base/target_vendor in tests.
+- All temporary tests are removed after validation, and no changes are committed.
+
+References for expected filenames
+- RHEL/Fedora: {{name}}-{{version}}-{{revision}}.{{rpm_tag}}.{{rpm_abi}}.rpm
+- openSUSE/SLES: {{name}}-{{version}}-{{revision}}.{{rpm_abi}}.rpm
+
+Remember
+- Use safe getattr checks to avoid crashing tests.
+- Do not modify unrelated tests (especially the /etc path creation test).
+- Remove your temporary tests at the end and do not commit changes.

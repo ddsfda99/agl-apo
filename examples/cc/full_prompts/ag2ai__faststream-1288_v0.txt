@@ -1,0 +1,90 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+Bug: `AttributeError: 'list' object has no attribute 'items' with "Discriminated Unions"
+**Describe the bug**
+
+When using an `Annotated` union with a pydantic `Field(discriminator=...)` AsyncDocs fail to generate due to a `AttributeError: 'list' object has no attribute 'items'`
+
+
+https://docs.pydantic.dev/latest/concepts/unions/#discriminated-unions
+
+```
+  File "/Users/kilo59/.local/share/virtualenvs/fs-unions-sN2W4Mxo/lib/python3.11/site-packages/faststream/asyncapi/generate.py", line 186, in _resolve_msg_payloads
+    for p_title, p in m.payload.get("oneOf", {}).items():
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+AttributeError: 'list' object has no attribute 'items'
+```
+
+**How to reproduce**
+
+```python
+# repro.py
+from typing import Annotated, Literal
+
+from pydantic import BaseModel
+from pydantic.fields import Field
+from faststream import FastStream
+from faststream.rabbit import RabbitBroker
+
+broker = RabbitBroker("amqp://guest:guest@localhost:5672/")
+
+app = FastStream(broker, version="0.1.0")
+
+class Hotdog(BaseModel):
+    type: Literal["hotdog"]
+    condiments: list[str]
+
+class Sub(BaseModel):
+    type: Literal["sub"]
+    condiments: list[str]
+    bread: Literal["white", "wheat"]
+
+MyTypeUnion = Annotated[ Hotdog | Sub, Field(discriminator="type")]
+
+@broker.subscriber("test_queue")
+async def handle_event(msg_body: MyTypeUnion) -> None:
+    print(msg_body)
+
+# Error is thrown when generating docs
+# faststream docs gen repro:app
+```
+
+**Expected behavior**
+
+I would expect to see docs generated with an appropriate `anyOf` or `oneOf` union.
+Note this works with other union types.
+
+```python
+# Removing the discriminator from `Field` causes things to work again.
+...
+
+MyTypeUnion = Annotated[ Hotdog | Sub, Field(union="smart")]
+
+@broker.subscriber("test_queue")
+async def handle_event(msg_body: MyTypeUnion) -> None:
+    print(msg_body)
+```
+
+**Observed behavior**
+Describe what is actually happening clearly and concisely.
+
+**Screenshots**
+~If applicable, attach screenshots to help illustrate the problem.~
+
+**Environment**
+```
+Running FastStream 0.4.4 with CPython 3.11.7 on Darwin
+```
+
+**Additional context**
+I suspect nesting this field in a higher-level model would also allow me to use the discriminated union but it should be possible without changing the structure of my payload. Especially considering it works for other union types.
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

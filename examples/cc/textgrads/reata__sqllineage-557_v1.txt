@@ -1,0 +1,108 @@
+Here is a detailed review of the agent’s attempt, what went wrong, and how to fix it cleanly so the feature behaves as desired and all tests pass.
+
+What the task requires
+- Add failing tests that demonstrate the bug: when parsing INSERT … SELECT without an explicit target column list, the lineage uses the SELECT column names instead of the target table’s actual column names, even when a MetaDataProvider is available and counts match.
+- Locate the correct place in the code to implement the fix: SourceHandlerMixin.end_of_query_cleanup in sqllineage/core/parser/__init__.py.
+- Implement fix: populate holder.write_columns from metadata when not explicitly provided, if counts match.
+- Run tests and iterate until passing. Then delete the temporary tests and do not commit any changes.
+
+What the agent did
+- Wrote a test tests/sql/column/test_metadata_target_columns.py that asserts:
+  - Given: metadata provider has source columns ["user_id", "user_name"] and target columns ["id", "name"].
+  - SQL: INSERT INTO db.target SELECT user_id, user_name FROM db.source
+  - Expect: Column lineage maps user_id -> id and user_name -> name.
+- The agent did not implement the code fix.
+- The agent did not run tests or clean up the temporary test.
+
+Why the agent failed
+- The task required both the failing test and the fix. The agent only added the test and omitted the code change in the parser, so tests will fail.
+- The agent also didn’t validate by running tests, nor remove the test files at the end as required.
+
+Root cause in the codebase
+- In sqllineage/core/parser/__init__.py, SourceHandlerMixin.end_of_query_cleanup currently sets target columns only if the write_columns are already populated (e.g., when INSERT specifies the target columns explicitly). If write_columns is empty, it defaults to using the names from the SELECT list as target column names.
+- There is no logic to populate holder.write_columns from the MetaDataProvider when the INSERT doesn’t specify a target column list, even if the provider can supply the target table’s columns and the counts match.
+- Existing behavior: If len(holder.write_columns) == len(col_grp), then the target column names in lineage are overwritten by holder.write_columns; otherwise, the target name from the SELECT alias is used.
+
+Where to fix
+- sqllineage/core/parser/__init__.py, in class SourceHandlerMixin, method end_of_query_cleanup.
+- This method already has the logic to use holder.write_columns to override mapping when lengths match. We need to set holder.write_columns from metadata when it’s empty and the counts match the current SELECT list segment (union barrier).
+- This mixin is shared across both parsing backends; fixing here benefits both sqlfluff and sqlparse runs.
+
+How to implement the fix
+- Inside SourceHandlerMixin.end_of_query_cleanup, after determining col_grp and tbl_grp for the current union segment and after retrieving the single target table (tgt_tbl), add the following logic:
+  - If holder.write_columns is empty and a metadata provider is available and tgt_tbl is a Table:
+    - Fetch target columns via metadata_provider.get_table_columns(tgt_tbl) (this returns a list of Column objects with their parent set).
+    - If len(target_columns) == len(col_grp) and > 0, call holder.add_write_column(*target_columns).
+  - This runs before the existing branch that checks len(holder.write_columns) == len(col_grp), so the subsequent logic will use the populated write_columns to set the target column names.
+
+Concrete code change (patch)
+In sqllineage/core/parser/__init__.py, method end_of_query_cleanup:
+
+- Find the block:
+
+    if holder.write:
+        if len(holder.write) > 1:
+            raise SQLLineageException
+        tgt_tbl = next(iter(holder.write))
+        lateral_column_aliases: Dict[str, List[Column]] = {}
+        for idx, tgt_col_from_query in enumerate(col_grp):
+
+- Insert the following right after tgt_tbl is computed and before lateral_column_aliases is defined (or immediately after defining col_grp/tbl_grp and tgt_tbl):
+
+    # Populate write_columns from metadata when not specified in SQL and counts match
+    if not holder.write_columns:
+        metadata_provider = getattr(self, "metadata_provider", None)
+        from sqllineage.core.models import Table as _Table  # already imported at top, so this line may be unnecessary
+        if metadata_provider and isinstance(tgt_tbl, Table):
+            target_columns = metadata_provider.get_table_columns(tgt_tbl)
+            if len(target_columns) == len(col_grp) and len(target_columns) > 0:
+                holder.add_write_column(*target_columns)
+
+- Leave the existing logic untouched:
+
+    if len(write_columns := holder.write_columns) == len(col_grp):
+        tgt_col_resolved = write_columns[idx]
+
+This ensures that when metadata supplies a matching list, target column names in lineage use the actual target table columns (id, name) instead of the SELECT list aliases (user_id, user_name).
+
+Why this fix is safe
+- It only runs when:
+  - There is a metadata provider on the parser instance.
+  - The write target is a Table (not a SubQuery).
+  - holder.write_columns is empty (i.e., no explicit target column list in the SQL).
+  - The count of target table columns matches the number of selected columns in this union segment.
+- It doesn’t change behavior when:
+  - No metadata is configured.
+  - The provider can’t resolve the target table or returns zero columns.
+  - Count mismatch: the code does not override and leaves current behavior.
+  - The SQL already explicitly specified target columns: holder.write_columns is populated elsewhere and we don’t override it.
+- Existing wildcard and lateral alias handling are unaffected.
+
+Validation steps the agent should have done
+1) Add the failing test (already done by the agent):
+   - tests/sql/column/test_metadata_target_columns.py
+   - This test will fail on current code because target columns are user_id, user_name instead of id, name.
+
+2) Implement the fix in sqllineage/core/parser/__init__.py as described above.
+
+3) Run the test suite:
+   - Use pytest from repo root.
+   - Validate that:
+     - The new test passes.
+     - All existing tests continue to pass.
+   - The existing tests around wildcard expansion and metadata will not be affected because target tables in those tests aren’t backed by metadata (e.g., test_v, db.tbl), or counts mismatch isn’t triggered.
+
+4) Clean up:
+   - Delete the temporary test file tests/sql/column/test_metadata_target_columns.py.
+   - Do not commit any changes per instructions.
+
+Additional insights and potential pitfalls
+- Union queries: end_of_query_cleanup splits into union segments via union_barriers; col_grp refers to the selected columns in a segment. The write_columns we populate are for the target table entity overall. The mapping logic compares len(write_columns) to len(col_grp) per segment; if mismatched, it falls back to default behavior. This is intended per current design. If future needs require per-segment target column resolution, more significant refactoring would be needed.
+- Ensure we don’t add write columns multiple times. SubQueryLineageHolder.add_write_column breaks out early if a column already exists to avoid duplicates.
+- MetaDataProvider.get_table_columns returns Column objects with parent set to the target Table; holder.add_write_column requires Column instances, so the API is consistent.
+- Existing lateral column alias resolution uses metadata for detecting if a column originates from a dataset; our change doesn’t interfere with that logic.
+
+Summary of why the agent failed and how to improve
+- The agent stopped after writing the test and didn’t implement the core fix.
+- The correct fix is small, localized, and safe: populate write_columns from metadata in SourceHandlerMixin.end_of_query_cleanup when counts match.
+- The agent should run tests to verify the fix and then remove the temporary tests per task requirements.

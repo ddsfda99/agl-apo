@@ -1,5 +1,6 @@
 import json
 from functools import partial
+from pathlib import Path
 from typing import Literal
 
 import dotenv
@@ -11,6 +12,7 @@ from utils.type import AgentResult
 
 class ClaudeController:
     system_prompt = """You are an expert software engineer solving swebench bug fixing tasks."""
+    _instructions_path = "/testbed/CLAUDE.md"
     _telemetry_error_markers = (
         "event logging",
         "failed to export",
@@ -29,6 +31,7 @@ class ClaudeController:
         self.disallowed_tools: str = ",".join([f'"{i}"' for i in (all_tools - tools)])
         assert "{description}" in user_prompt
         self.user_prompt: str = user_prompt
+        self._instructions_text = self._load_instructions_text()
         return
 
     def init_container(self, image: str, instance: dict) -> Runtime:
@@ -49,6 +52,14 @@ class ClaudeController:
         container.send_command(f"export ANTHROPIC_AUTH_TOKEN={self.api_key}")
         container.send_command("export IS_SANDBOX=1")
         return container
+
+    def _load_instructions_text(self) -> str | None:
+        repo_root = Path(__file__).resolve().parents[3]
+        for name in ("CLAUDE.md", "claude.md"):
+            candidate = repo_root / name
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8")
+        return None
 
     def _run_cli(self, instance: dict, max_step: int, timelimit: int) -> list[dict]:
         # prepare prompt safely: write it to a file inside the container using a single-quoted heredoc
@@ -76,6 +87,15 @@ class ClaudeController:
         setting_cmd = "cat > /testbed/.claude/settings.json <<'CC_SETTING'\n" + setting + "\nCC_SETTING\n"
         self.container.send_command(setting_cmd)
 
+        # Write CLAUDE.md to /testbed - Claude Code will auto-load it
+        if self._instructions_text:
+            instructions_cmd = (
+                f"cat > {self._instructions_path} <<'CC_INSTRUCTIONS'\n"
+                + self._instructions_text
+                + "\nCC_INSTRUCTIONS\n"
+            )
+            self.container.send_command(instructions_cmd)
+
         # with open("utils/handle_hook.template.sh") as f:
         #     handler = f.read()
         # handler_cmd = "cat > /tmp/handle_hook.sh <<'CC_HOOK'\n" + handler + "\nCC_HOOK\n"
@@ -83,7 +103,10 @@ class ClaudeController:
         # self.container.send_command("chmod +x /tmp/handle_hook.sh")
 
         # run claude reading the prompt from the file to avoid shell interpolation issues
-        claude_cmd = f'claude -p "$(cat /tmp/cc_prompt.txt)" --system-prompt "{self.system_prompt}" --max-turns {max_step}  --output-format json --verbose'
+        claude_cmd = (
+            f'claude -p "$(cat /tmp/cc_prompt.txt)"'
+            f' --system-prompt "{self.system_prompt}" --max-turns {max_step}  --output-format json --verbose'
+        )
         res = self.container.send_command(claude_cmd, timelimit * 60)
         output = res.output
         parsed = None

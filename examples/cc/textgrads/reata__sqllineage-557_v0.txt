@@ -1,0 +1,70 @@
+Summary of the bug and desired behavior
+- Problem: When parsing an INSERT … SELECT without specifying target columns, the column lineage uses the names from the SELECT list (e.g., user_id, user_name) as the target columns. However, the target table’s actual column names may differ and should be obtained from MetaDataProvider (e.g., id, name).
+- Desired: If the target table’s columns are available from a MetaDataProvider and the number of selected columns matches the number of target columns, use those target column names for the lineage mapping, as if the statement had explicitly specified them: INSERT INTO target(id, name) SELECT user_id, user_name FROM source.
+
+Root cause in the codebase
+- Target columns are only set when explicitly provided in DML (via add_write_column called from CreateInsertExtractor for bracketed column lists).
+- In the general SELECT handling, SourceHandlerMixin.end_of_query_cleanup resolves column lineage. It uses write_columns to override the target column names when present and matching the number of columns in the SELECT. However, write_columns is only populated if columns were explicitly specified in DML. There’s no logic to populate write_columns from MetaDataProvider when not explicitly specified.
+- The MetaDataProvider is used elsewhere (e.g., expanding wildcards and resolving ambiguous source columns), but not for setting target column names.
+
+Where the fix should go
+- Implement the target column population via MetaDataProvider in SourceHandlerMixin.end_of_query_cleanup (sqllineage/core/parser/__init__.py).
+- After determining the target table (tgt_tbl) and the column group (col_grp) for each union segment, if write_columns is empty and a metadata provider is available, fetch the target table’s columns from the metadata provider. If the count matches len(col_grp), call holder.add_write_column(*target_columns). This will make holder.write_columns available and used by the existing override logic.
+
+Proposed code change (conceptual patch)
+- File: sqllineage/core/parser/__init__.py
+- Method: SourceHandlerMixin.end_of_query_cleanup
+- Add the following inside the for-loop over union barriers, after obtaining tgt_tbl and computing col_grp:
+
+1) Determine the target table:
+   tgt_tbl = next(iter(holder.write))
+
+2) If no explicit write_columns:
+   if not holder.write_columns:
+       metadata_provider = getattr(self, "metadata_provider", None)
+       if metadata_provider:
+           target_columns = metadata_provider.get_table_columns(tgt_tbl)
+           # Only use metadata when the count matches the selected columns in this group
+           if len(target_columns) == len(col_grp) and len(target_columns) > 0:
+               holder.add_write_column(*target_columns)
+
+3) The existing logic that checks:
+   if len(write_columns := holder.write_columns) == len(col_grp):
+   will now become true, and the target column names from metadata will be used instead of aliases from the SELECT list.
+
+Why this works
+- The SourceHandlerMixin already supports overriding target columns via write_columns if their count matches the number of selected columns in the segment. By populating write_columns from MetaDataProvider, the logic seamlessly applies without invasive changes elsewhere. It also avoids affecting cases where the counts don’t match, and gracefully falls back to the current behavior.
+
+Test case to reproduce the bug (should have been added)
+- Create a new test asserting that with a metadata provider, when target columns aren’t specified in the INSERT, the lineage maps to the target table’s column names.
+
+Example test (conceptual):
+- File: tests/sql/column/test_metadata_target_columns.py
+- Use DummyMetaDataProvider or generate_metadata_providers to register:
+  - db.target has columns ["id", "name"]
+  - db.source has columns ["user_id", "user_name"]
+- SQL: "INSERT INTO db.target SELECT user_id, user_name FROM db.source"
+- Expect column lineage:
+  - ("user_id", "db.source") -> ("id", "db.target")
+  - ("user_name", "db.source") -> ("name", "db.target")
+
+This test should fail before the fix (target columns incorrectly set to user_id, user_name) and pass after applying the change.
+
+Notes on edge cases and correctness
+- If metadata provider returns 0 columns or an unknown schema, we do not override and the behavior remains unchanged.
+- If the SELECT involves a UNION, the end_of_query_cleanup processes segments by barriers; the override is applied per segment and only when counts match.
+- add_write_column breaks early if columns already exist to avoid duplicates; calling it once before the mapping is appropriate.
+
+Process issues with the coding agent
+- The agent did not follow the required steps:
+  - Did not write failing tests to reproduce the bug.
+  - Did not edit the source code to implement the fix.
+  - Did not run tests to validate the fix.
+  - Did not delete temporary tests afterward.
+- The agent only explored the codebase and updated a todo list, which does not satisfy the task requirements.
+
+Actionable plan to complete the task
+1) Add the failing test under tests/sql/column/ as described.
+2) Implement the code change in SourceHandlerMixin.end_of_query_cleanup to use MetaDataProvider to populate write_columns when missing and counts match.
+3) Run the test suite to confirm the test passes.
+4) If all tests pass, delete the newly added test file as per the instructions.
