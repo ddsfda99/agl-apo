@@ -1,0 +1,107 @@
+diff --git a/src/urllib3/connection.py b/src/urllib3/connection.py
+index 4195ee03..da0004d7 100644
+--- a/src/urllib3/connection.py
++++ b/src/urllib3/connection.py
+@@ -74,7 +74,7 @@ port_by_scheme = {"http": 80, "https": 443}
+ 
+ # When it comes time to update this value as a part of regular maintenance
+ # (ie test_recent_date is failing) update it to ~6 months before the current date.
+-RECENT_DATE = datetime.date(2023, 6, 1)
++RECENT_DATE = datetime.date(2025, 7, 1)
+ 
+ _CONTAINS_CONTROL_CHAR_RE = re.compile(r"[^-!#$%&'*+.^_`|~0-9a-zA-Z]")
+ 
+diff --git a/src/urllib3/response.py b/src/urllib3/response.py
+index 51dab248..3cd0f1d0 100644
+--- a/src/urllib3/response.py
++++ b/src/urllib3/response.py
+@@ -1067,12 +1067,15 @@ class HTTPResponse(BaseHTTPResponse):
+         return True
+ 
+     def close(self) -> None:
+-        if not self.closed and self._fp:
+-            self._fp.close()
+-
++        # Close the underlying connection first to ensure any concurrent
++        # blocking reads on another thread are interrupted by socket closure.
+         if self._connection:
+             self._connection.close()
+ 
++        # Now close the file-like object if present and not already closed.
++        if not self.closed and self._fp:
++            self._fp.close()
++
+         if not self.auto_close:
+             io.IOBase.close(self)
+ 
+diff --git a/test/with_dummyserver/test_socketlevel.py b/test/with_dummyserver/test_socketlevel.py
+index e268869a..adbce0db 100644
+--- a/test/with_dummyserver/test_socketlevel.py
++++ b/test/with_dummyserver/test_socketlevel.py
+@@ -391,6 +391,66 @@ class TestClientCerts(SocketDummyServerTestCase):
+ 
+ 
+ class TestSocketClosing(SocketDummyServerTestCase):
++    def test_close_response_interrupts_concurrent_read(self) -> None:
++        """
++        If one thread is blocked reading the response body, calling
++        HTTPResponse.close() from another thread should not hang and should
++        interrupt the blocking read.
++        """
++        reading_started = Event()
++        server_release = Event()
++
++        def socket_handler(listener: socket.socket) -> None:
++            sock = listener.accept()[0]
++
++            buf = b""
++            while not buf.endswith(b"\r\n\r\n"):
++                buf += sock.recv(65536)
++
++            # Send a chunked response with a single data chunk and then stall
++            sock.send(
++                b"HTTP/1.1 200 OK\r\n"
++                b"Content-Type: text/plain\r\n"
++                b"Transfer-Encoding: chunked\r\n\r\n"
++                b"A\r\n0123456789\r\n"
++            )
++
++            # Wait until the client finishes the test to close the socket
++            server_release.wait(LONG_TIMEOUT)
++            sock.close()
++
++        self._start_server(socket_handler)
++        with HTTPConnectionPool(self.host, self.port, retries=False) as pool:
++            response = pool.request("GET", "/", preload_content=False, timeout=LONG_TIMEOUT)
++
++            # Start a thread that tries to read the entire body (which will block)
++            exc: list[BaseException] = []
++
++            def reader() -> None:
++                reading_started.set()
++                try:
++                    # Read until EOF, should block waiting for more chunks
++                    response.read()
++                except BaseException as e:
++                    exc.append(e)
++
++            t = threading.Thread(target=reader)
++            t.start()
++
++            # Ensure the reader thread has started and likely is blocked in read()
++            assert reading_started.wait(LONG_TIMEOUT)
++
++            # Calling close() should not hang and should interrupt the read
++            response.close()
++
++            # Reader thread should terminate promptly with an exception
++            t.join(LONG_TIMEOUT)
++            assert not t.is_alive(), "Reader thread did not terminate after close()"
++            assert exc, "Reader thread did not raise after close()"
++
++            # Let the server complete and close its side
++            server_release.set()
++
+     def test_recovery_when_server_closes_connection(self) -> None:
+         # Does the pool work seamlessly if an open connection in the
+         # connection pool gets hung up on by the server, then reaches

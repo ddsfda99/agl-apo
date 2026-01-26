@@ -1,0 +1,43 @@
+diff --git a/mypy/checkexpr.py b/mypy/checkexpr.py
+index edc3ac70f..7e80200f0 100644
+--- a/mypy/checkexpr.py
++++ b/mypy/checkexpr.py
+@@ -4288,7 +4288,19 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
+         ):
+             self.msg.unreachable_right_operand(e.op, e.right)
+ 
+-        right_type = self.analyze_cond_branch(right_map, e.right, expanded_left_type)
++        # Avoid using boolean left operand type as context for the right operand.
++        # Passing a bool context can wrongly constrain generic calls (e.g., deepcopy)
++        # to return bool, leading to bogus argument type errors.
++        from mypy.types import Instance, LiteralType, get_proper_type
++        def _is_bool_like(t: Type) -> bool:
++            pt = get_proper_type(t)
++            if isinstance(pt, Instance):
++                return pt.type.fullname == "builtins.bool"
++            if isinstance(pt, LiteralType):
++                return pt.fallback.type.fullname == "builtins.bool"
++            return False
++        right_ctx = None if _is_bool_like(left_type) else expanded_left_type
++        right_type = self.analyze_cond_branch(right_map, e.right, right_ctx)
+ 
+         if left_map is None and right_map is None:
+             return UninhabitedType()
+@@ -5877,10 +5889,17 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
+         else:
+             # Analyze the right branch in the context of the left
+             # branch's type.
++            # Avoid using container type contexts from the 'if' branch when analyzing
++            # a literal container in the 'else' branch. This prevents over-constraining
++            # list/set/tuple/dict literals (e.g., ['a'] if b else [['a']]).
++            from mypy.nodes import ListExpr, SetExpr, TupleExpr, DictExpr
++            right_ctx = if_type_fallback
++            if isinstance(e.else_expr, (ListExpr, SetExpr, TupleExpr, DictExpr)):
++                right_ctx = ctx
+             else_type = self.analyze_cond_branch(
+                 else_map,
+                 e.else_expr,
+-                context=if_type_fallback,
++                context=right_ctx,
+                 allow_none_return=allow_none_return,
+             )

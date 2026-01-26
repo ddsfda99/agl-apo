@@ -199,7 +199,7 @@ def _default_pytest_parser(log: str) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for test, status in mapping.items():
         lowered = status.lower()
-        if "pass" in lowered:
+        if "pass" in lowered or "xfail" in lowered:
             normalized[test] = "pass"
         elif "skip" in lowered:
             normalized[test] = "skip"
@@ -246,6 +246,9 @@ def _evaluate_instance_live(
     overwrite: bool,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
+    patch_path = output_dir / "patch.diff"
+    if overwrite or not patch_path.exists():
+        patch_path.write_text(prediction.get(KEY_PREDICTION, "") or "")
     report_path = output_dir / "report.json"
     if report_path.exists() and not overwrite:
         try:

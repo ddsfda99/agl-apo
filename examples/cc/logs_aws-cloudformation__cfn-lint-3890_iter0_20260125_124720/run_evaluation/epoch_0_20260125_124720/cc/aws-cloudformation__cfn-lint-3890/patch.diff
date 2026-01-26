@@ -1,0 +1,46 @@
+diff --git a/src/cfnlint/rules/resources/lmbd/SnapStartSupported.py b/src/cfnlint/rules/resources/lmbd/SnapStartSupported.py
+index b55b662a4..5a9de0a96 100644
+--- a/src/cfnlint/rules/resources/lmbd/SnapStartSupported.py
++++ b/src/cfnlint/rules/resources/lmbd/SnapStartSupported.py
+@@ -18,7 +18,7 @@ class SnapStartSupported(CfnLintKeyword):
+     id = "E2530"
+     shortdesc = "SnapStart supports the configured runtime"
+     description = (
+-        "To properly leverage SnapStart, you must have a runtime of Java11 or greater"
++        "To properly leverage SnapStart, you must have a runtime of Java 11+ or Python 3.12"
+     )
+     source_url = "https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html"
+     tags = ["resources", "lambda"]
+@@ -97,7 +97,7 @@ class SnapStartSupported(CfnLintKeyword):
+             if (
+                 runtime
+                 and (not runtime.startswith("java"))
+-                and runtime not in ["java8.al2", "java8"]
++                and runtime not in ["java8.al2", "java8", "python3.12"]
+             ):
+                 yield ValidationError(
+                     f"{runtime!r} is not supported for 'SnapStart' enabled functions",
+diff --git a/test/unit/rules/resources/lmbd/test_snapstart_supported.py b/test/unit/rules/resources/lmbd/test_snapstart_supported.py
+index 8adb496c4..c3b718762 100644
+--- a/test/unit/rules/resources/lmbd/test_snapstart_supported.py
++++ b/test/unit/rules/resources/lmbd/test_snapstart_supported.py
+@@ -34,6 +34,19 @@ def rule():
+             False,
+             [],
+         ),
++        (
++            "SnapStart enabled on supported python version",
++            {
++                "Runtime": "python3.12",
++                "SnapStart": {
++                    "ApplyOn": "PublishedVersions",
++                },
++            },
++            ["us-east-1"],
++            True,
++            False,
++            [],
++        ),
+         (
+             "SnapStart enabled with ref for runtime",
+             {

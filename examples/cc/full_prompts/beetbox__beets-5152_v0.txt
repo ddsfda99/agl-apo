@@ -1,0 +1,55 @@
+You are given a code repository in the current directory.
+The task description is:
+bug[fetchart]: Only one of the resize operation is executed.
+Consider a case where a coverart is of PNG format with size 15 MB. (happens sometimes with itunes coverart on musicbrainz).
+
+Also consider the following fetchart config:
+```yaml
+plugins: fetchart
+fetchart:
+  sources:
+    - filesystem
+    - coverart: release
+    - itunes
+    - amazon
+    - albumart
+    - coverart: releasegroup
+    - "*"
+  max_filesize: 3500000
+  cover_format: JPEG
+```
+
+PIL is used as the image resizer
+
+### Problem
+
+```sh
+$ beet -vv fetchart
+```
+```py
+Candidate._validate(self, plugin)
+# returns only CANDIDATE_DOWNSIZE
+# and skips CANDIDATE_REFORMAT
+```
+
+the function can only perform one of the operations in the current scenario, and since downsizing is returned before reformatting, during `.resize()` only downsizing takes place. Which is its own separate bug since PIL can not downnsize PNG files.
+
+### Setup
+
+* OS: Windows
+* Python version: 3.11.0b1 
+* beets version: https://github.com/beetbox/beets/commit/b09806e0df8f01b9155017d3693764ae7beedcd5
+* Turning off plugins made problem go away (yes/no): N/A
+
+
+
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

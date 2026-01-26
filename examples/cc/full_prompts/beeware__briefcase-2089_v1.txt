@@ -1,0 +1,71 @@
+You are working in the current repository to implement and/or verify the feature: during “briefcase convert”, ask the user if the existing app is a console app and configure pyproject.toml appropriately.
+
+Follow these instructions precisely. Do not modify unrelated tests, and do not commit any changes.
+
+Goals
+- Ensure that “briefcase convert” prompts the user to confirm whether the app is a console app.
+- If the user selects “Yes”, inject console_app = true into the appropriate Briefcase app configuration in pyproject.toml.
+- If the existing pyproject.toml already contains a console_app setting for the app, skip the prompt and do not duplicate or override existing settings.
+- Validate behavior with targeted tests. If the full suite has unrelated failures due to environment, do not change tests to make them pass; investigate and report the environment issue.
+
+Strict constraints
+- Do not edit or remove any existing tests unless you are adding a new test specifically for the console-app prompt behavior. Do not change tests unrelated to this feature.
+- Do not claim to have implemented a behavior if the repository already implements it; instead, verify and, if needed, refine it.
+- Do not broadly catch exceptions unless you log or handle them appropriately; prefer narrow exception handling.
+- Do not commit your changes. Make edits locally only.
+
+Step-by-step plan
+1) Confirm the project root:
+   - Print the current working directory and list files to ensure you’re in the repository’s root.
+   - Verify presence of key paths: src/briefcase, tests, pyproject.toml.
+
+2) Understand the requirements and current implementation:
+   - Grep the repository for these keywords: input_console_app, console_app = true, build_gui_context, convert.
+   - Review src/briefcase/commands/convert.py (and related modules) to see if a prompt exists and how console_app is injected. Note any broad exception handling around the prompt logic.
+   - Identify how pyproject_table_briefcase_app_extra_content is used to inject settings.
+
+3) Write or identify reproduction tests:
+   - Check for existing tests covering the prompt (e.g., tests/commands/convert/test_console_app_prompt.py). If they already verify that selecting “Yes” injects console_app = true, reuse them.
+   - If the following scenarios are not covered, add small, isolated tests:
+     - When pyproject.toml already contains console_app (true or false), the prompt is skipped and no duplicate console_app is injected.
+     - When the user selects “No” or cancels, console_app is not injected.
+   - Place any new tests under tests/commands/convert/ with descriptive names. Because you must not commit, you may create temporary test files, run them, and then delete them during cleanup.
+
+4) Implement or refine the feature where appropriate:
+   - If the prompt and injection behavior already exist and are correct, do not re-implement; only refine behavior to skip prompting when console_app is already set in pyproject.toml.
+   - Implementation guidance:
+     - In the convert command flow (e.g., build_gui_context in src/briefcase/commands/convert.py), before prompting, parse pyproject.toml to determine if [tool.briefcase.app.{app_name}] contains console_app. If console_app is present, skip the prompt and do not add extra content.
+     - If console_app is absent, prompt the user (default to No). If the user answers Yes, set pyproject_table_briefcase_app_extra_content = "console_app = true\n" (ensure trailing newline and avoid duplicates).
+     - Use narrow exception handling (e.g., KeyError) for missing keys; avoid blanket except Exception unless you log and justify it.
+     - Ensure behavior only applies during convert for existing projects; do not affect unrelated commands.
+
+5) Run tests:
+   - First run targeted tests for the convert feature, e.g., tests/commands/convert/test_console_app_prompt.py and any new tests you added.
+   - Then run the full test suite.
+   - If you encounter failures unrelated to the console app feature (for example, tests/commands/base/test_paths.py::test_data_path_creation_failure failing due to an environment-specific pre-existing directory like /etc/mydatadir), do not modify those tests. Instead:
+     - Diagnose the environment condition (e.g., check whether /etc/mydatadir exists).
+     - Document the issue and proceed, confirming that your feature-specific tests pass.
+
+6) Debug and fix issues only within the scope of the console app prompt feature:
+   - If your new tests fail due to your changes, fix your implementation accordingly.
+   - Do not alter unrelated code or tests purely to make the suite pass.
+
+7) Cleanup:
+   - Remove any temporary test files you created for local verification.
+   - Leave the repository clean and ready for maintainers to review the focused changes.
+
+Deliverables in your final report
+- Current working directory and repository root confirmation.
+- Files and functions you inspected (paths and function names).
+- Summary of whether the feature was already implemented and any refinements you made.
+- Exact changes (file paths and function names) you implemented, with a brief rationale.
+- Test results:
+  - Output for targeted tests related to the convert console prompt.
+  - Output for full test suite, noting any unrelated environmental failures without modifying those tests.
+- Confirmation that you did not commit changes and that temporary test files were cleaned up.
+
+Implementation tips
+- For parsing pyproject.toml, prefer a minimal, robust approach. If the codebase already uses a configuration loader, reuse it. If not, you can safely use tomllib (Python 3.11+) or the project’s existing parser utilities.
+- When injecting extra content, ensure you don’t duplicate console_app if it’s already present.
+- Keep user interaction consistent with the project’s existing input/console conventions.
+- Provide informative logging when skipping the prompt due to an existing console_app setting, so behavior is traceable during conversion.

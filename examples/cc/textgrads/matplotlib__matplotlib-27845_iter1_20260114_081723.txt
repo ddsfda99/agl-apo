@@ -1,0 +1,49 @@
+Summary of what went wrong
+
+- The core code change in colors.to_rgba_array is on the right track: you added logic to preserve alpha==0 for entries that are literally the string "none" after applying an overall alpha override. This addresses the actual bug (alpha overrides turning "none" opaque).
+- The tests you wrote fail after the fix not because the fix is wrong, but because the test’s expectation is incompatible with Matplotlib’s existing semantics for "none" and the same_color helper. Specifically, same_color(coll.get_facecolor()[1], "none") will never be True under the current, documented behavior, because to_rgba_array("none") returns an array of shape (0, 4), while to_rgba_array(fc[1]) returns an array of shape (1, 4); same_color checks shape equality and thus returns False.
+
+Detailed analysis
+
+1) Reproducing the bug
+
+- Your initial test correctly reproduced the bug: with facecolors=["blue", "none"] and alpha=[1, 1] or alpha=1, the second facecolor was coming back with alpha=1 instead of 0. This is due to to_rgba_array indiscriminately overriding rgba[:, 3] = alpha for sequences, thereby clobbering the intended transparency for entries that were "none".
+
+2) The fix
+
+- You implemented the fix exactly where it needed to be: in to_rgba_array, after rgba is computed for a sequence and alpha is applied via broadcasting, you reset the alpha channel back to 0.0 for entries that were literally "none".
+- This adheres to the constraints: minimal change, preserves broadcasting semantics (rgba[:, 3] = alpha as before), and keeps the special-case that a single "none" returns an empty array of shape (0, 4).
+- After your change, the transparency check assert fc[1, 3] == 0.0 passes, confirming that the fix worked for the alpha override.
+
+3) Why the test still fails
+
+- The remaining test assertion assert same_color(fc[1], "none") fails because same_color uses to_rgba_array on both inputs and then requires shape equality and value equality.
+- to_rgba_array("none") is deliberately special-cased to return shape (0, 4). to_rgba_array(fc[1]) produces shape (1, 4). Even if the values match (0, 0, 0, 0), the shapes don’t, so same_color returns False by design.
+- This is consistent with Matplotlib’s documented and tested behavior: for a collection facecolor set to 'none', get_facecolor() returns an array with shape (0, 4), and tests typically compare arrays to 'none' only when both sides are arrays of colors or both are the "none" literal. For example, in the repo tests, they assert same_color(pc.get_facecolor(), 'none') in cases where get_facecolor() itself returns shape (0, 4). In your case, comparing a single color row to 'none' mismatches shapes.
+
+4) Potential regression in the fix with generators
+
+- There is a subtle regression risk: in the branch where c is not a Sequence, you now iterate c twice—once to build rgba and again to build none_mask. If c is a generator, the second iteration will be empty because the generator has already been exhausted, and the mask won’t be applied. Previously, the function only iterated once in that branch.
+- This could break cases where a non-Sequence iterable (e.g., a generator) contains "none" strings. It’s unlikely in typical usage of PathCollection facecolors, but it’s a change in behavior worth addressing to be robust.
+
+How to improve
+
+- Fix the tests to align with Matplotlib’s semantics for "none":
+  - Keep the meaningful assertion: fc[1, 3] == 0.0 (this verifies the bug fix).
+  - Replace assert same_color(fc[1], "none") with one of:
+    - assert same_color([fc[1]], ["none"])
+    - assert same_color(coll.get_facecolor(), ["blue", "none"])
+  - Both variants compare arrays of equal length and avoid the shape mismatch that arises from the single "none" special-case.
+- Address the generator-consumption regression in to_rgba_array:
+  - Ensure you don’t iterate c twice when it’s not a Sequence. A minimal way is to materialize c once if it’s not a Sequence:
+    - If not isinstance(c, Sequence), do c = list(c) before building rgba and none_mask. This keeps behavior predictable without altering public API or error messages, and avoids double iteration.
+  - Alternatively, build none_mask alongside rgba in a single loop by tracking whether each cc was "none" (using cbook._str_lower_equal(cc, "none")). This also avoids double iteration without introducing new shape checks or changing exception semantics.
+
+Other notes
+
+- You correctly preserved the single "none" special-case: to_rgba_array("none") returns an empty array of shape (0, 4).
+- Broadcasting behavior and error messages for incompatible alpha lengths remain unchanged because you left rgba[:, 3] = alpha exactly as before.
+- You didn’t run the broader test suite (colors, collections) to check for regressions; consider running at least the relevant subsets after making the generator-safe adjustment.
+- As per the original instructions, remember to delete any temporary tests once you validate the fix locally. The lingering failures are from the incorrect same_color usage rather than the core functionality.
+
+In short: the code change is essentially correct and fixes the bug; the failure you saw later is from a test that conflicted with Matplotlib’s established handling of "none" in same_color. Adjust the test as suggested and, to be thorough, make the fix robust against non-Sequence iterables to avoid any generator-related regressions.

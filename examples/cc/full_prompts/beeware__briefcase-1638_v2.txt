@@ -1,0 +1,65 @@
+You are working in /testbed. Your goal is to fix the Fedora/RHEL install prompt so that when rpm-build tools are missing, Briefcase suggests the correct package name “rpm-build” (not “rpmbuild”) and validates this with tests. Follow these instructions precisely and do not commit any changes.
+
+Context
+- Bug: On Fedora/RHEL, Briefcase currently prompts “sudo dnf install rpmbuild” when rpm-build is missing. The correct package name is “rpm-build”, so the prompt must be “sudo dnf install rpm-build”.
+- Root cause: In src/briefcase/platforms/linux/system.py, LinuxSystemPackageCommand._verify_packaging_tools uses a mapping where the RPM package_name is incorrectly set to “rpmbuild”. The tuple for "rpm" must be ("rpm-build", "rpmbuild", "rpm-build").
+- Existing test coverage: tests/platforms/linux/system/test_package__rpm.py contains test_verify_rpmbuild_missing, parameterized for vendor_base "rhel" and None. The rhel case should expect “sudo dnf install rpm-build”.
+
+Strict workflow to follow
+1) Update tests to reproduce the bug and verify the fix:
+- Do not add new tests; only update the existing test to reflect the corrected expected message. This satisfies the “write test cases” requirement without introducing new files.
+- Open tests/platforms/linux/system/test_package__rpm.py and locate test_verify_rpmbuild_missing.
+- Ensure the rhel vendor_base case expects exactly:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+- Confirm the non-rhel (vendor_base is None) case remains unchanged and correct for its package manager and message. Do not change unrelated expectations.
+
+2) Locate the bug in source:
+- Open src/briefcase/platforms/linux/system.py.
+- In LinuxSystemPackageCommand._verify_packaging_tools(), find the mapping keyed by app.packaging_format that looks like:
+  {
+      "deb": ("dpkg", "dpkg-deb", "dpkg-dev"),
+      "rpm": ("rpm-build", "rpmbuild", "<CURRENT_VALUE>"),
+      "pkg": ("makepkg", "makepkg", "pacman"),
+  }
+- The third element of the "rpm" tuple is the package_name used in the install prompt. It is currently incorrect.
+
+3) Fix the code:
+- Change only the third element of the "rpm" tuple so the tuple is exactly:
+  ("rpm-build", "rpmbuild", "rpm-build")
+- Do not alter the other mapping entries. The first element must remain "rpm-build"; the second must remain "rpmbuild"; only the third changes to "rpm-build".
+
+4) Validate with tests:
+- Run only the RPM-related tests first:
+  pytest -q tests/platforms/linux/system/test_package__rpm.py
+- Confirm they pass and that the error message for vendor_base "rhel" matches:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+- Then run the full test suite:
+  pytest -q
+- If tests/commands/base/test_paths.py::test_data_path_creation_failure fails, this failure is pre-existing and unrelated to the rpm prompt fix. Do not modify that test or any of its code. Explicitly note this in your final report.
+
+5) Cleanup:
+- You did not add any new test files; you only updated an existing test. There is nothing to delete. State explicitly that the deletion step is a no-op in your final report.
+- Do not commit your edits.
+
+Quality and consistency requirements
+- Make a single, deliberate update to the test expectation string; do not revert it back to the incorrect “rpmbuild” wording.
+- Ensure the source and test changes are consistent: source must prompt “rpm-build”, test must expect “rpm-build”.
+- Do not change unrelated code or tests.
+- Do not add new tests.
+- Do not commit any changes.
+
+Acceptance criteria
+- For app.packaging_format == "rpm" on RHEL/Fedora (vendor_base == "rhel"), when rpm-build tools are missing, Briefcase prompts:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+- tests/platforms/linux/system/test_package__rpm.py passes.
+- The change in src/briefcase/platforms/linux/system.py sets the RPM package_name mapping to "rpm-build".
+- No new test files are added; cleanup step is a no-op.
+
+What to include in your final report
+- A concise summary of the exact test change you made, including the updated expected string for the rhel case.
+- A concise summary of the exact source change you made, showing the "rpm" tuple before and after, and confirming only the third element changed to "rpm-build".
+- Results of running the RPM-specific tests.
+- Results of running the full test suite. If tests/commands/base/test_paths.py::test_data_path_creation_failure fails, explicitly note it as a pre-existing, unrelated failure and confirm you did not modify that test or its code.
+- Confirmation that the non-rhel expectation was not changed and remains correct.
+- Confirmation that no unrelated code or tests were changed, no new files were added, and that cleanup is a no-op.
+- Confirmation that you did not commit any changes.

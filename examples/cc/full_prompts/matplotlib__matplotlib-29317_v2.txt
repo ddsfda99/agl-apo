@@ -1,0 +1,101 @@
+You are working in a Matplotlib repository. Your goal is to fix a PS/EPS backend bug that produces a blank EPS file when a plot includes both a legend and an annotation. You must implement a targeted backend fix, add a regression test, and validate it by running tests. Do not commit your edits.
+
+Important constraints and environment requirements
+- Do not hack the environment by creating stub modules for compiled extensions (e.g., ft2font, _version). Ensure you are working in a proper Matplotlib dev environment where compiled extensions are available and importable. If you cannot run the full test suite due to environment issues, stop and fix the environment rather than stubbing modules.
+- Keep the fix fully scoped to the PS/EPS backend (lib/matplotlib/backends/backend_ps.py) and specifically to RendererPS._draw_ps. Do not modify MixedModeRenderer or global rcParams to “work around” the issue.
+- Preserve semantics:
+  - For fills: rgbFace=None must mean “no fill” (transparent). Do not change _is_transparent(None) globally and do not change any global transparency logic.
+  - For strokes: a None stroke color must not suppress stroking. For the PS backend only, treat None as a sensible default (opaque black) for the purpose of deciding whether to stroke and for setting the stroke color. This should only apply when the backend would otherwise have left the stroke color unset. Confirm that explicit “none” colors are represented as an RGBA with alpha 0 (not as None), so your coalescing does not re-enable strokes that artists explicitly disabled.
+
+Problem summary and reproduction
+- Bug: Saving a figure to EPS that includes both plt.legend and plt.annotate results in a blank EPS output. Removing either makes the EPS valid.
+- Repro example:
+  - plt.plot([1, 2, 3], label="Line")
+  - plt.legend(frameon=False)
+  - plt.annotate("a", xy=(1, 1))
+  - plt.savefig("test.eps")
+- Expected: Non-blank EPS with axes, line, text, and legend rendered.
+- Observed: EPS contains header and prolog but no drawing commands (“fill”, “stroke”, “glyphshow”, etc.).
+
+Your tasks
+1) Set up environment and reproduce the bug
+- Ensure you can import matplotlib and its compiled extensions (no stubs). If needed, build/install Matplotlib per the repository’s guidelines.
+- Run the reproduction script that saves “test.eps” including both a legend and an annotation.
+- Confirm the output EPS is effectively blank: after “%%EndProlog”, the body is tiny and contains no drawing tokens (“stroke”, “fill”, “glyphshow”, “colorimage”, etc.).
+- Enable debug tracing to aid diagnosis:
+  - In your script before savefig, set matplotlib.backends.backend_ps.debugPS = True.
+  - This will insert comments like “% draw_path”, “% draw_text” in the EPS so you can confirm whether draw calls happen at all.
+
+2) Locate the code to patch
+- Open lib/matplotlib/backends/backend_ps.py. If your tooling requires it, you must use a “read file” action before any write/edit.
+- Find RendererPS._draw_ps(self, ps, gc, rgbFace, *, fill=True, stroke=True).
+- Note how mightstroke is computed and how stroke color is set using gc.get_rgb()[:3]. Today, if gc.get_rgb() is None, mightstroke becomes False due to _is_transparent(None) and the stroke is suppressed.
+
+3) Root-cause verification before changing code
+- With debugPS=True, re-run the reproduction and inspect the EPS body:
+  - If you see no “% draw_path” or “% draw_text” lines at all, investigate whether the content is being rasterized by MixedModeRenderer and then cropped away due to a fully transparent alpha buffer. Check for rasterizer markers in the EPS. Do not fix MixedMode in this task; proceed only if _draw_ps and text drawing are actually reached.
+  - If you do see “% draw_path” or “% draw_text” but no actual drawing operations afterward, it likely means the renderer returns early due to misinterpreting gc.get_rgb()==None as transparent.
+- Confirm a key assumption: an explicitly disabled stroke (e.g., artist edgecolor='none') should come through as an RGBA with alpha 0, not as None. None should indicate “default color not set” in the PS backend’s GC path. You can test this quickly by inspecting gc.get_rgb() for a line/patch with edgecolor='none' vs. one with default edgecolor and linewidth>0.
+
+4) Implement the scoped fix in backend_ps only
+- In RendererPS._draw_ps, coalesce the stroke color locally:
+  - gc_rgb = gc.get_rgb()
+  - If gc_rgb is None, set gc_rgb = (0, 0, 0, 1)  # opaque black fallback for stroke
+- Compute mightstroke using this coalesced value:
+  - mightstroke = (gc.get_linewidth() > 0 and not self._is_transparent(gc_rgb))
+- If not mightstroke, set stroke = False.
+- Preserve fill semantics:
+  - If self._is_transparent(rgbFace), set fill = False.
+- When setting the stroke color, use the coalesced value:
+  - self.set_color(*gc_rgb[:3])
+- Ensure the fill color setting remains guarded by fill being True; only call self.set_color(*rgbFace[:3], store=False) when fill is True. Because fill=False when rgbFace is transparent, you will not subscript None.
+- Do not change _is_transparent behavior or any other methods. Keep this fix fully contained within RendererPS._draw_ps. Do not change draw_text, draw_tex, draw_mathtext, or MixedModeRenderer.
+
+5) Write a robust regression test for the PS/EPS backend
+- Create a new test file, e.g., lib/matplotlib/backends/tests/test_backend_ps_eps_legend_annotate.py.
+- Do not force a GUI or Agg backend. Let savefig('...eps') select the PS backend based on file extension.
+- Parametrize the test over legend frameon in [False, True] to cover both cases.
+- Test steps:
+  - Create a simple plot with plt.plot([1, 2, 3], label="Line").
+  - Add a legend with the parametrized frameon value.
+  - Add an annotation with plt.annotate("a", xy=(1, 1)).
+  - Save to tmp_path / “out.eps”.
+  - Read the EPS file content as text (latin-1 encoding is fine).
+  - Split the content on “%%EndProlog” and take the body after it.
+  - Assert that the EPS body length is greater than a small threshold (e.g., > 1000 characters) to rule out trivial blanks.
+  - Assert that the EPS body contains at least one drawing-related token such as “stroke”, “fill”, “glyphshow”, or “colorimage” (do not require leading spaces; a simple any(token in body for token in [...]) is sufficient).
+- Optional: Add a second small test that uses plt.text instead of annotate to confirm baseline behavior and guard against future regressions.
+- Do not modify rcParams globally in the test (e.g., do not force image.composite_image); the fix must work under default settings.
+
+6) Run the tests to validate your fix
+- Execute pytest for your new test file (and optionally existing PS backend tests).
+- If failures occur:
+  - Inspect the EPS output and the debugPS comments:
+    - If no draw calls are present in the EPS body, investigate if everything is being rasterized and then cropped due to a transparent alpha. Confirm this hypothesis, but do not change MixedModeRenderer as part of this task.
+    - If draw calls are present but no drawing tokens appear, ensure you correctly coalesced gc.get_rgb() to gc_rgb before:
+      - Computing mightstroke with self._is_transparent(gc_rgb).
+      - Setting the stroke color via self.set_color(*gc_rgb[:3]).
+    - Ensure you did not accidentally subscript None (e.g., rgbFace[:3] when rgbFace is None) by guarding fill color setting behind fill=True.
+  - Double-check that your test token search is robust (no assumptions about leading spaces or exact line breaks).
+
+7) Manually re-run the reproduction script
+- Turn off debugPS for the final run.
+- Confirm that the EPS output is now non-blank and visually includes the line, legend, and annotation.
+- Verify that removing the legend or annotation still yields valid, non-blank EPS as before (sanity check).
+
+8) Clean up
+- Remove or revert any temporary debug toggles or instrumentation.
+- Remove any exploration scripts or temporary files outside the formal tests.
+- Do not commit edits.
+
+Key pitfalls to avoid
+- Do not change _is_transparent(None) globally; this would break correct fill semantics.
+- Do not use gc.get_rgb()[:3] anywhere in _draw_ps without coalescing None first.
+- Do not force matplotlib.use("Agg") in the EPS test; saving to .eps must use the PS backend.
+- Do not stub compiled extensions; fix the environment instead.
+- Keep the fix narrowly scoped to RendererPS._draw_ps and maintain existing semantics for artists where edgecolor='none' suppresses strokes (these should come through as alpha==0, not as None).
+
+Acceptance criteria
+- Your new test file passes for both frameon=False and frameon=True.
+- The reproduction script produces a non-blank EPS with legend and annotate.
+- No regressions in PS/EPS rendering semantics: fills remain correctly skipped when rgbFace=None, and strokes default to opaque black in the specific case where the PS backend sees gc.get_rgb()==None, without re-enabling explicitly disabled strokes.

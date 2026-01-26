@@ -1,0 +1,57 @@
+Summary of what went wrong
+
+- You changed production code to add match-case handling without any evidence that existing tests were failing because of missing match-case support. There was no failing test to fix in the provided suite, and you could not run tests to confirm any failures. This is scope creep and introduces risk.
+
+- You modified the test file by adding a new test for match-case. In these tasks, you should not change tests; your job is to change the implementation so that the existing tests pass. Adding tests is explicitly outside the usual remit and can cause submission to fail, even if your change is harmless.
+
+- You attempted to run pytest but didn’t have it installed. That’s fine in the current environment, but since you couldn’t run tests, you needed to rely on static analysis of the code against the existing tests, not invent new requirements.
+
+- The match-case implementation itself is likely incorrect or incomplete:
+  - You added ast.match_case to _CONTROL_FLOW_BREAKERS. The control-flow breaker is the match statement (ast.Match), not individual case clauses. match_case represents each case arm; it doesn’t behave like a top-level control-flow construct by itself.
+  - If the goal were to support match-case properly, you would need to treat ast.Match as a control-flow breaker (like If/For/While), and then handle its children (cases) similarly to how Try’s except/finally are treated, adding complexity per case. Just adding match_case to _CONTROL_FLOW_BREAKERS skips counting the match statement itself and may over/under-count depending on the intended rules.
+
+- Style/maintenance concern: You mutated the tuple _CONTROL_FLOW_BREAKERS after definition with +=. It works at runtime, but it’s less clean than composing the full tuple at definition time under a feature guard. While not critical, it’s a smell in a codebase that emphasizes style.
+
+- You wrote a long narrative in the final message instead of focusing on the exact changes needed to pass tests. The task is to make tests pass, not to add features that aren’t exercised by tests or to document speculative changes.
+
+Why this likely fails the task
+- The repository’s cognitive complexity tests do not include match-case. Your change didn’t address any known failing test and was speculative. Adding a new test increases the chance of CI failure or reviewer rejection for modifying the test suite.
+
+- Without running tests, you didn’t validate whether the existing cognitive complexity logic matched the provided expected values. You missed potential logic mismatches and didn’t verify correctness.
+
+Technical analysis of cognitive complexity logic vs tests
+- The existing cognitive complexity implementation appears tailored to the provided tests. For example:
+  - If statements are counted as +1 via _CONTROL_FLOW_BREAKERS.
+  - Boolean operations are counted via bools.count_boolops(node) multiplied by max(increment_by, 1), and they intentionally do not recurse into BoolOp children (should_iter_children=False) to avoid double counting.
+  - Try blocks are handled specially: children other than the body receive an increment and a base complexity contribution, which aligns with tests that expect the except block to contribute and nested control structures to scale with nesting.
+  - FunctionDef/Lambda increment nesting but contribute 0 base complexity themselves; nested constructs inside them scale up with increment_by, which matches test expectations (e.g., nested lambdas causing higher contribution for BoolOp inside).
+- Given these tests, the logic appears crafted to match them, and altering it for match-case without corresponding tests is unnecessary. Adding match-case only adds complexity for code paths not covered by tests.
+
+Specific issues and recommended fixes
+
+- Do not modify tests. Revert the change to tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py to its original content.
+
+- Remove speculative match-case handling in production code unless there is a failing test that demands it. Your current addition is incomplete (counts match_case but not Match) and may not align with the intended cognitive complexity rules.
+
+- If match-case must be supported due to actual failing tests (not present here), implement it carefully:
+  - Detect availability with hasattr(ast, 'Match').
+  - Treat ast.Match as a control-flow breaker, similar to ast.If:
+    - Increment nesting: increment_by += 1.
+    - Add base complexity: max(1, increment_by).
+  - Then for each case (ast.match_case), add complexity per case arm akin to how Try’s except/finally are counted (one unit per arm, scaling with nesting).
+  - Avoid counting both the match node and case arms in a way that double-counts nested contributions (mirror the try/except handling pattern).
+  - Do not add new tests; ensure behavior matches any existing tests that reference match-case if present.
+
+Process improvements
+
+- When pytest isn’t available, rely on analyzing the code against the existing tests:
+  - Walk through the AST patterns used in tests and verify each contributes the expected amount according to the implemented rules.
+  - Make only targeted changes to address observed mismatches with test expectations.
+
+- Keep changes minimal and well-scoped to the problem stated by the tests. Avoid feature additions that aren’t covered.
+
+- Avoid mutating module-level tuples post-definition if not necessary; define them in a single place under guards for readability and maintainability.
+
+- Provide precise, concise change descriptions and justification tied to test failures, not speculative enhancements.
+
+In short, the failure was due to modifying tests and adding speculative feature support without any evidence of failing tests or validation. To pass all tests: revert test changes, undo the match-case addition unless required by failing tests, and focus on making production code match the provided test expectations only. If match-case support does become necessary, implement it by treating ast.Match as the control-flow breaker and handling ast.match_case children analogously to try/except handling, without adding or changing tests.

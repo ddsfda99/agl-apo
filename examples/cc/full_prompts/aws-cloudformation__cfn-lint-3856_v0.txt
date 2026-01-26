@@ -1,0 +1,58 @@
+You are given a code repository in the current directory.
+The task description is:
+cfn-lint incorrectly issues `E1011` (`FindInMap` validation of configuration) with `!Sub` referencing `AWS::AccountId`
+### CloudFormation Lint Version
+
+1.20.1
+
+### What operating system are you using?
+
+Mac
+
+### Describe the bug
+
+cfn-lint incorrectly issues `E1011` (`FindInMap` validation of configuration) with `!Sub` referencing `AWS::AccountId`.
+
+```
+$ cfn-lint --format pretty --regions us-east-2 --include-checks I --configure-rule E3012:strict=True I3042:region=True I3042:accountId=True -- template.yaml
+
+template.yaml
+16:11:              E1011     '123456789012AccountBucketName' is not one of ['234567890123AccountBucketName'] for mapping 'BucketMap' and key 'BucketGroup'
+
+Cfn-lint scanned 1 templates against 234 rules and found 1 errors, 0 warnings, and 0 informational violations
+```
+
+### Expected behavior
+
+`E1011` is not issued for the reproduction template
+
+### Reproduction template
+
+```yaml
+%YAML 1.2
+---
+AWSTemplateFormatVersion: 2010-09-09
+Mappings:
+  BucketMap:
+    BucketGroup:
+      234567890123AccountBucketName: Bucket
+Transform: AWS::LanguageExtensions
+Resources:
+  Resource:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !FindInMap
+        - BucketMap
+        - BucketGroup
+        - !Sub ${AWS::AccountId}AccountBucketName
+```
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

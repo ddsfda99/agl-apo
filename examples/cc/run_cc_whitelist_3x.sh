@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Rate limit retry settings for runner-level retries (0 = unlimited retries).
+: "${CC_RATE_LIMIT_MAX_RETRIES:=0}"
+: "${CC_RATE_LIMIT_BASE_WAIT:=15}"
+: "${CC_RATE_LIMIT_MAX_WAIT:=300}"
+export CC_RATE_LIMIT_MAX_RETRIES CC_RATE_LIMIT_BASE_WAIT CC_RATE_LIMIT_MAX_WAIT
+
 RUNS_PER_CASE="${RUNS_PER_CASE:-3}"
 SLEEP_SECONDS="${SLEEP_SECONDS:-10}"
 CASES_JSON="${CASES_JSON:-whitelist_cases.jsonl}"

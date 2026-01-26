@@ -1,0 +1,100 @@
+You are working in the cfn-lint repository in the current directory. Your objective is to make the entire test suite pass and to implement support for SnapStart on Python 3.12 in a way that is consistent and correct.
+
+Key context based on prior failures:
+- The earlier attempt added Python 3.12 support in the SnapStartSupported rule and added a unit test, but left 7 pre-existing failing tests untouched. This environment requires that all tests pass; you must fix the root causes.
+- The failing tests are dominated by:
+  - Integration exit code mismatches (expected 12, got 14; expected 0, got 2), likely due to extra error-level matches.
+  - Unit test failures related to rule E2533: Check if Lambda Function Runtimes are updatable. E2533 is firing in tests that expect no matches and seems not to honor provider schema overrides.
+- The SnapStartSupported rule’s logic is inconsistent: the description mentions “Java 11+” but the code doesn’t enforce that; it also should allow Python 3.12. Region support for Python SnapStart is more limited than Java, but tests likely don’t validate region gating.
+
+Deliverables:
+- Implement a correct update to SnapStartSupported to allow python3.12 and enforce Java 11+ consistently.
+- Fix E2533 so that it respects provider schema overrides and does not produce mismatches in unit and integration tests.
+- Ensure the integration exit code mismatches are resolved by identifying and addressing the extra error-level findings.
+- Make the full test suite pass.
+- Do not commit your edits. You may add temporary test files to reproduce behavior but must delete them before finishing.
+
+Follow these steps:
+
+1) Understand requirements and constraints
+- SnapStart for AWS Lambda supports Java 11+ widely and launched support for Python 3.12 in November 2024. cfn-lint should not flag python3.12 with SnapStart as unsupported.
+- Some regions may not support SnapStart for Python; if implementing region gating, keep it conservative and avoid adding fragile region lists unless the repository has an established mechanism (prefer deferring region gating unless the repo already implements it).
+- All tests in the repository must pass; do not dismiss failures as “unrelated.”
+
+2) Write a minimal reproduction to confirm the bug
+- Create a temporary template file based on the issue reproduction to validate that cfn-lint currently flags python3.12 with SnapStart as unsupported.
+- Example file: tmp_snapstart_python312.yaml with an AWS::Serverless::Function using Runtime: python3.12 and SnapStart ApplyOn: PublishedVersions.
+- Run cfn-lint against it:
+  - cfn-lint --include-checks I --include-experimental --format json tmp_snapstart_python312.yaml
+- Confirm the presence of E2530: SnapStart supports the configured runtime.
+- You will delete this file later during cleanup.
+
+3) Identify and reproduce the failing tests and mismatches
+- Run the full test suite and capture failures:
+  - pytest -q
+- Note failing tests and their specific messages. Expect:
+  - Integration exit code mismatches including test/fixtures/templates/quickstart/openshift/openshift.yaml.
+  - Unit failures referencing E2533 in test/unit/module/override (e.g., test_exclude.py).
+- Reproduce the integration mismatch locally to identify which extra error-level findings are present:
+  - cfn-lint --include-checks I --include-experimental --configure-rule E3012:strict=false --format json -- test/fixtures/templates/quickstart/openshift/openshift.yaml
+- Record which rule IDs produce the two extra errors (e.g., E2533 or others). This will guide the fix.
+
+4) Locate relevant code
+- SnapStartSupported rule:
+  - src/cfnlint/rules/resources/lmbd/SnapStartSupported.py
+- E2533 rule:
+  - Grep for “E2533” to locate its implementation:
+    - git grep -n "E2533" src
+  - The file is likely under src/cfnlint/rules/resources/lmbd/ (for Lambda). Open the rule and understand its logic and how it determines matches.
+- Provider schema manager and override integration:
+  - Grep for “ProviderSchemaManager” and inspect how other rules honor provider overrides:
+    - git grep -n "ProviderSchemaManager" src
+  - Also inspect test/unit/module/override/test_exclude.py to understand how the override is applied and what behavior is expected. Emulate the pattern used by rules that already respect overrides.
+
+5) Implement SnapStartSupported corrections
+- Ensure the rule’s logic aligns with the description:
+  - If SnapStart is enabled (Properties.SnapStart.ApplyOn == 'PublishedVersions'):
+    - Allow Java runtimes if version is 11 or higher (e.g., java11, java17).
+    - Allow python3.12.
+    - Reject other runtimes.
+  - Update the rule’s description and messages accordingly.
+- Remove or correct any unreachable or stale code paths (e.g., lists for java8/java8.al2).
+- Keep region gating minimal unless the codebase already implements it. If there is an existing region availability mechanism for SnapStart, integrate python3.12 into it; otherwise, defer region-specific checks to avoid destabilizing tests.
+- Validate against your temporary template to confirm E2530 no longer triggers for python3.12 with SnapStart.
+
+6) Fix E2533 behavior to satisfy unit and integration tests
+- Investigate E2533’s match logic and why it flags “good” templates in test/unit/module/override/test_exclude.py. Likely causes:
+  - It does not honor provider schema overrides used in that test harness.
+  - Its severity or triggering conditions are too broad for the test fixtures.
+- Implement changes so E2533 respects provider overrides:
+  - Mirror the approach used by other rules that consult the provider schema manager or runner configuration to suppress matches based on schema exclusions.
+  - Before emitting matches, check whether the provider override indicates that the runtime update check should be excluded for the resource/property under test. Use the same API and pattern found in other rules that correctly honor overrides.
+- If E2533 is one of the culprits for the integration exit code mismatches, ensure its corrected behavior reduces the error-level findings to match expected exit codes. Avoid changing the rule ID or global severity in a way that would break other tests.
+- Re-run the specific integration command for openshift.yaml and confirm the number of errors matches the expected count in tests (12 rather than 14).
+
+7) Validate the entire test suite
+- Run pytest -q again.
+- If there are still failures, inspect each remaining failure:
+  - Identify the contributing rule IDs from the error messages.
+  - Make targeted fixes, prioritizing rules that do not respect overrides or configuration used by tests (e.g., include-experimental, configure-rule).
+- Ensure no new regressions are introduced by your changes.
+
+8) Clean up temporary files
+- Delete tmp_snapstart_python312.yaml and any other temporary files you created for reproduction.
+- Do not commit any changes. Stop after validating all tests pass locally.
+
+Notes and guidance:
+- Do not add or modify repository unit tests unless strictly necessary. The goal is to fix code so the existing tests pass. If you add a temporary test for local reproduction, delete it before finishing.
+- Be cautious about changing rule IDs or severities; tests and tooling often rely on them. Prefer making rules respect provider overrides and configuration rather than altering IDs or severities.
+- For SnapStartSupported:
+  - Runtime parsing guidance: For Java, extract the numeric part from strings like "java11", "java17". Ensure version >= 11. For Python, explicitly allow "python3.12".
+  - Keep messages descriptive and consistent with the rule’s actual logic.
+- For E2533:
+  - Ensure it integrates with whatever mechanism the repository uses to toggle rule behavior via provider schema or configuration.
+  - Use patterns found in other rules that already honor overrides to ensure consistency.
+
+Acceptance criteria:
+- Running pytest -q results in all tests passing.
+- Running cfn-lint --include-checks I --include-experimental --format json on a template with SnapStart enabled and python3.12 does not produce E2530 errors.
+- Integration exit codes match expected values, specifically the openshift.yaml case no longer has extra error-level findings.
+- E2533 no longer causes unit tests such as test/unit/module/override/test_exclude.py to fail and respects provider schema overrides as expected.

@@ -1,0 +1,92 @@
+diff --git a/telegram/ext/_baseupdateprocessor.py b/telegram/ext/_baseupdateprocessor.py
+index 3d6ad374..74d29dd7 100644
+--- a/telegram/ext/_baseupdateprocessor.py
++++ b/telegram/ext/_baseupdateprocessor.py
+@@ -18,6 +18,7 @@
+ # along with this program.  If not, see [http://www.gnu.org/licenses/].
+ """This module contains the BaseProcessor class."""
+ from abc import ABC, abstractmethod
++import asyncio
+ from asyncio import BoundedSemaphore
+ from contextlib import AbstractAsyncContextManager
+ from types import TracebackType
+@@ -65,13 +66,16 @@ class BaseUpdateProcessor(AbstractAsyncContextManager["BaseUpdateProcessor"], AB
+         :exc:`ValueError`: If :paramref:`max_concurrent_updates` is a non-positive integer.
+     """
+ 
+-    __slots__ = ("_max_concurrent_updates", "_semaphore")
++    __slots__ = ("_max_concurrent_updates", "_semaphore", "_counter_lock")
++
+ 
+     def __init__(self, max_concurrent_updates: int):
+         self._max_concurrent_updates = max_concurrent_updates
+         if self.max_concurrent_updates < 1:
+             raise ValueError("`max_concurrent_updates` must be a positive integer!")
+         self._semaphore = BoundedSemaphore(self.max_concurrent_updates)
++        # A lock to safely inspect the semaphore value across tasks
++        self._counter_lock = asyncio.Lock()
+ 
+     async def __aenter__(self: _BUPT) -> _BUPT:  # noqa: PYI019
+         """|async_context_manager| :meth:`initializes <initialize>` the Processor.
+@@ -104,6 +108,18 @@ class BaseUpdateProcessor(AbstractAsyncContextManager["BaseUpdateProcessor"], AB
+         """:obj:`int`: The maximum number of updates that can be processed concurrently."""
+         return self._max_concurrent_updates
+ 
++    @property
++    def current_concurrent_updates(self) -> int:
++        """:obj:`int`: The number of updates currently being processed concurrently.
++        This is computed based on the internal semaphore's current value.
++
++        .. versionadded:: 21.x
++        """
++        # BoundedSemaphore initializes with "max_concurrent_updates" permits.
++        # Each ongoing update acquires one permit. So the number of currently
++        # processing updates is (max - current_value).
++        return self.max_concurrent_updates - self._semaphore._value  # type: ignore[attr-defined]
++
+     @abstractmethod
+     async def do_process_update(
+         self,
+diff --git a/tests/ext/test_baseupdateprocessor.py b/tests/ext/test_baseupdateprocessor.py
+index 0b8da257..c69d629a 100644
+--- a/tests/ext/test_baseupdateprocessor.py
++++ b/tests/ext/test_baseupdateprocessor.py
+@@ -47,6 +47,38 @@ class TestSimpleUpdateProcessor:
+             assert getattr(inst, attr, "err") != "err", f"got extra slot '{attr}'"
+         assert len(mro_slots(inst)) == len(set(mro_slots(inst))), "duplicate slot"
+ 
++    @pytest.mark.asyncio
++    async def test_current_concurrent_updates_property(self, mock_processor):
++        # Initially, there should be no updates being processed
++        assert mock_processor.current_concurrent_updates == 0
++
++        block_event = asyncio.Event()
++
++        async def callback():
++            await block_event.wait()
++
++        # Start more updates than allowed concurrently
++        count = mock_processor.max_concurrent_updates + 3
++        tasks = [
++            asyncio.create_task(mock_processor.process_update(update=_, coroutine=callback()))
++            for _ in range(count)
++        ]
++
++        # Give the event loop a moment so that the first batch acquires the semaphore
++        await asyncio.sleep(0.1)
++
++        # We should be saturated at max_concurrent_updates
++        assert (
++            mock_processor.current_concurrent_updates == mock_processor.max_concurrent_updates
++        )
++
++        # Release all tasks
++        block_event.set()
++        await asyncio.gather(*tasks)
++
++        # After completion, no updates should be processed
++        assert mock_processor.current_concurrent_updates == 0
++
+     @pytest.mark.parametrize("concurrent_updates", [0, -1])
+     def test_init(self, concurrent_updates):
+         processor = SimpleUpdateProcessor(3)

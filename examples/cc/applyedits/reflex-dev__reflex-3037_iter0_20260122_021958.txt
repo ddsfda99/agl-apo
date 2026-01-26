@@ -1,0 +1,109 @@
+You are working in a code repository where an issue has been reported: the error message for invalid Literal prop values is misleading when the wrong type is passed (e.g., an int 9 for a Heading size that expects string literals '1'..'9'). Your goal is to improve the error message without breaking existing behavior or tests.
+
+Follow this plan precisely and keep changes tight and backward compatible.
+
+High-level goal
+- Improve the diagnostic clarity of the ValueError raised when a Literal-typed prop receives an invalid value, by including the actual type of the received value, while preserving the existing message format as much as possible.
+- Add a minimal, dependency-light reproduction test that validates the new message formatting without importing heavy parts of the package or external dependencies.
+
+Constraints
+- Do not change the core message structure that other tests may assert. Keep the existing “should be one of the following: … Got 'value' instead” text intact.
+- Only append the actual type information to the “Got 'value'” part to minimize risk of breaking existing tests.
+- Avoid adding tests that import the entire reflex package or components (e.g., Heading) to prevent import-time failures due to missing dependencies like rich.
+- If pytest is unavailable, provide a fallback manual script to demonstrate the behavior.
+- Do not commit your edits.
+
+Steps
+
+1) Understand the problem
+- The reported confusing message is:
+  ValueError: prop value for size of the `Heading` component should be one of the following: '1','2','3','4','5','6','7','8','9'. Got '9' instead
+- When size=9 (int) is passed, it prints as '9' with quotes, making it look like the correct string value.
+- The fix: Keep the existing message wording and allowed values formatting, but append the actual type info to the “Got …” clause, e.g.:
+  ... Got '9' (type int) instead
+- Do NOT remove quotes around the value and do NOT change the allowed values list formatting or surrounding phrasing. We aim for backward compatibility.
+
+2) Write a reproduction test (minimal and dependency-light)
+- Do NOT import reflex or components like Heading in the test; that can pull in external dependencies (rich) and break in this environment.
+- Instead, import the validate_literal function directly from reflex/utils/types.py by loading the module by file path (to avoid executing reflex/__init__.py).
+- Create tests/components/utils/test_validate_literal_message.py with a test that:
+  - Loads reflex/utils/types.py via importlib.util.spec_from_file_location to obtain validate_literal.
+  - Calls validate_literal to trigger a ValueError with:
+    comp_name="Heading"
+    prop="size" (or the exact parameter name used in the function, verify by reading the function signature)
+    value=9
+    allowed_values=['1','2','3','4','5','6','7','8','9'] (whatever is expected by the function signature; read it first)
+  - Asserts the message still contains:
+    - “prop value for”
+    - “size”
+    - “`Heading`”
+    - “should be one of the following”
+    - the allowed values substring "'1','2','3','4','5','6','7','8','9'"
+    - and, crucially, “Got '9' (type int) instead”
+- Important: Before writing the test, open reflex/utils/types.py and confirm the exact signature of validate_literal (argument names/order). Match it exactly. If the function returns or raises via a wrapper, adapt accordingly.
+- Also search the repository for tests that assert the original message formatting to avoid breaking them:
+  - grep -R "should be one of the following" -n
+  - grep -R "prop value for" -n
+  Ensure our change preserves those substrings.
+
+3) Locate where to implement the fix
+- Search for the source of the message:
+  - grep -R "should be one of the following" -n
+- It should be in reflex/utils/types.py (validate_literal).
+- Open the function and find the ValueError construction.
+
+4) Implement the fix (backward compatible)
+- Only modify the “Got … instead” portion to append the actual type of the received value, keeping all prior text and quoting intact.
+- Example minimal change:
+  - Old:
+    ... f"... should be one of the following: {allowed_values_str}. Got '{value}' instead"
+  - New:
+    ... f"... should be one of the following: {allowed_values_str}. Got '{value}' (type {type(value).__name__}) instead"
+- Do NOT alter:
+  - The list of allowed values or its quoting/format
+  - The leading “prop value for {prop} of the `{comp_name}` component should be one of the following” phrasing
+  - The quotes around the got value
+- Avoid adding expected-type info after the allowed list; tests may rely on exact formatting of that segment. Only append the actual type after “Got 'value'”.
+
+5) Run the reproduction test
+- Preferred: run pytest to execute the new test.
+- If pytest is unavailable, add a lightweight manual script (scripts/manual_validate_literal_repro.py) that:
+  - Uses importlib.util.spec_from_file_location to load reflex/utils/types.py
+  - Calls validate_literal with the same args to raise the ValueError
+  - Catches and prints the exception string so you can visually confirm it contains the new “(type int)” while preserving the rest
+- Do not attempt to import reflex or components in this script; keep it isolated to types.py.
+
+6) Verify no regressions or fragile changes
+- Re-grep for tests or code that assert exact messages. Since we preserved the original wording and only appended “(type int)”, we should not break those.
+- Ensure all other uses of validate_literal still behave; we did not change the condition or the allowed list formatting.
+- Do not change other global functions or message formats.
+
+7) Clean up
+- Remove any temporary scripts created for manual testing that are not part of the committed test suite or keep them under a scripts/ folder if desired for reviewers, but follow the “Do not commit” instruction here.
+- Ensure your new pytest test (if added) is the only test file you created and is minimal.
+
+Implementation tips and safeguards
+- Avoid importing the reflex package in tests to prevent import-time failures due to external dependencies like rich. Loading by file path via importlib.util avoids executing reflex/__init__.py and other heavy imports.
+- If you must stub external dependencies to run any broader test, inspect reflex/utils/console.py to see exactly what is imported from rich and provide precise stubs in sys.modules before importing reflex. But the preferred path is to avoid this entirely by testing validate_literal in isolation.
+- Keep the message formatting conservative. Maintain:
+  - The exact prefix “prop value for {prop} of the `{comp_name}` component should be one of the following:”
+  - The allowed values shown as a quoted, comma-separated list
+  - The “Got 'value' instead” portion preserved, just with “ (type int)” appended after the quoted value
+- Do not change quoting behavior for the displayed “got” value. Always keep it quoted, even if it was an int, to preserve prior expectations.
+
+What to deliver (without committing)
+- Code change in reflex/utils/types.py implementing the appended type info as described.
+- A minimal pytest test at tests/components/utils/test_validate_literal_message.py that:
+  - Imports validate_literal via importlib by file path
+  - Triggers the error with size=9 vs allowed string literals
+  - Asserts the message contains the new type info and preserved substrings
+- If pytest is unavailable, a manual script scripts/manual_validate_literal_repro.py demonstrating the same behavior via try/except and printing the error.
+
+Verification checklist
+- [ ] grep confirms validate_literal is the source of the message.
+- [ ] New ValueError message includes “(type int)” appended after “Got '9'”.
+- [ ] Message still contains the original phrasing and allowed values formatting.
+- [ ] The test runs (pytest or manual script) without importing reflex or rich.
+- [ ] No other tests or assertions are likely to break due to global message changes.
+
+Do not commit; just prepare the changes and validate locally.

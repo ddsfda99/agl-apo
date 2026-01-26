@@ -1,0 +1,111 @@
+You are an expert in coding agent prompt optimization. Your task is to produce a robust, verifiable fix for the fetchart plugin bug where only one of multiple needed image operations is executed, causing PNG images over max_filesize with cover_format=JPEG to fail to be processed correctly.
+
+Context and observed bug
+- Environment: Windows, Python 3.11.0b1, beets at commit b09806e0df8f01b9155017d3693764ae7beedcd5
+- Config example:
+  plugins: fetchart
+  fetchart:
+    sources:
+      - filesystem
+      - coverart: release
+      - itunes
+      - amazon
+      - albumart
+      - coverart: releasegroup
+      - "*"
+    max_filesize: 3500000
+    cover_format: JPEG
+- Problem: A PNG cover larger than max_filesize should be both reformatted to JPEG and then downsized to fit the size budget. Currently, beetsplug/fetchart.py Candidate._validate returns only a single operation (first match) with early returns in priority order (downscale -> downsize -> deinterlace -> reformat -> exact). Candidate.resize then applies only that single operation, so when a PNG needs both reformatting and downsizing, only downsizing is attempted. PIL’s filesize reduction via quality works for JPEG but not PNG, so the downsizing attempt is ineffective and reformat never occurs.
+
+Goal
+- Ensure a candidate image can undergo multiple required operations in the correct order, specifically:
+  1) Reformat (e.g., PNG -> JPEG) when cover_format requires it.
+  2) Deinterlace if requested and not already handled by reformat.
+  3) Resize (downscale by dimensions and/or downsize by target filesize).
+- Add a reproduction test that verifies the correct sequence (reformat before resize) is performed when both are necessary.
+- Use the built-in unittest framework (not pytest), and use mocks to avoid reliance on external dependencies when possible.
+- Do not commit your edits.
+
+Tasks
+1) Understand the requirements and repository
+- The repository is in the current directory.
+- Focus files:
+  - beetsplug/fetchart.py: Contains Candidate class with _validate and resize methods, and the FetchArtPlugin.
+  - beets/util/artresizer.py: Contains ArtResizer and backend logic (PILBackend) used for reformatting and resizing.
+
+2) Write a reproduction test using unittest and mocks
+- Create a new test file, for example: tests/test_fetchart_resize_order.py
+- Use unittest and unittest.mock; avoid pytest.
+- Write at least the following test cases:
+  - Test both-ops scenario: PNG source, cover_format='JPEG', max_filesize set low enough to require downsizing after reformatting.
+    - Setup:
+      - Create a temporary file path to represent the candidate artwork (you can create an empty file; the content won’t be used because ArtResizer methods will be mocked).
+      - Patch beetsplug.fetchart.ArtResizer.shared.get_format to return 'PNG'.
+      - Patch beetsplug.fetchart.ArtResizer.shared.reformat and .resize with MagicMock so you can assert call order.
+      - Patch os.stat (or os.path.getsize) in beetsplug.fetchart to simulate file sizes:
+        - Initial size: larger than max_filesize (e.g., 5_000_000).
+        - After reformat: still larger than max_filesize (e.g., 4_000_000) so that resize is still needed.
+      - Configure the plugin so that cover_format='JPEG' and max_filesize is a threshold below the mocked sizes (e.g., 3_500_000).
+      - Instantiate a Candidate for that path; ensure it is accepted by validation.
+    - Exercise: Call candidate.resize(plugin).
+    - Assert:
+      - reformat is called before resize.
+      - Both reformat and resize are called exactly once in this scenario.
+      - The arguments passed are sensible: reformat called with target format JPEG and deinterlace flag if applicable; resize called with max_filesize and any maxwidth as determined by the candidate/plugin.
+  - Optional additional tests to improve robustness:
+    - Reformat-only scenario: PNG source, cover_format='JPEG', no max_filesize. Assert only reformat is called, not resize.
+    - Downsize-only scenario: JPEG source, cover_format not set or already JPEG, max_filesize small. Assert only resize is called, not reformat.
+- Use python -m unittest discover to run the tests.
+- If you need the plugin instance, either:
+  - Instantiate FetchArtPlugin with a minimal beets.config setup, or
+  - Create a minimal stub object with the attributes/methods accessed by Candidate.resize (e.g., cover_format, max_filesize, deinterlace option, artresizer availability). If Candidate.resize reads from beets.config, mock that access at beetsplug.fetchart module level instead.
+
+3) Locate the bug
+- Open beetsplug/fetchart.py and find:
+  - class Candidate with methods _validate(self, plugin) and resize(self, plugin).
+- Note that _validate returns only one check constant and resize acts based on self.check. This is the root cause preventing multiple operations.
+
+4) Implement the fix
+- Implement a robust sequence in Candidate.resize that does not rely solely on self.check. Instead, recompute needs and apply operations in the correct order:
+  - Determine current format via ArtResizer.shared.get_format(self.path) or similar helper already used in the module.
+  - If plugin/config specifies a desired cover_format and it differs from the current format, call ArtResizer.shared.reformat(...) first. Pass deinterlace flag if that is an option handled by reformat.
+    - Write the reformatted image to a temporary file, then replace the candidate path on success so subsequent steps operate on the new file.
+    - After reformat, recompute the current format and filesize if needed.
+  - If deinterlace is requested and not already done as part of reformatting, perform deinterlace (if the backend’s API is via reformat with deinterlace=True, call that appropriately).
+  - Perform resizing:
+    - If a dimension-based maxwidth is requested (downscale), pass maxwidth to ArtResizer.shared.resize.
+    - For filesize-based downsizing, pass max_filesize to ArtResizer.shared.resize. With PILBackend, this will adjust JPEG quality to reach the target size; it’s ineffective for PNG, which is why reformat must come first.
+  - Ensure temp files are cleaned up and candidate.path points to the final result.
+- Keep Candidate._validate logic as-is for acceptance/rejection, but do not use it to limit which operations are performed. Alternatively, if you prefer, refactor _validate to accumulate flags internally for logging, but it’s not required for correctness. The key is that resize should apply all needed operations in sequence.
+- Ensure the local imaging backend check remains consistent (if the backend is not available, behavior should remain as before).
+
+5) Run tests and iterate
+- Run the new unittest(s):
+  - python -m unittest discover -v
+- Make sure your tests pass.
+- If external dependencies are missing, use mocks as described. Do not switch to pytest; stay with unittest for compatibility.
+
+6) Clean up
+- Ensure any temporary files created by tests are removed (use tempfile and context managers).
+- Do not commit your edits.
+
+Implementation guidance and notes
+- Be cautious about call order and side effects:
+  - Reformat must happen before any filesize-based resize when the source is PNG and target is JPEG.
+  - If reformatting already applies deinterlace via its parameter, do not perform deinterlace again.
+- ArtResizer API:
+  - ArtResizer.shared.reformat should accept parameters to set the target format and possibly deinterlace.
+  - ArtResizer.shared.resize should accept parameters for maxwidth and/or max_filesize.
+  - Do not rely on PNG quality settings for filesize reduction; PIL’s quality param is for JPEG.
+- When mocking in tests, patch symbols in the beetsplug.fetchart import context (e.g., beetsplug.fetchart.ArtResizer.shared.reformat), not the class definition elsewhere, to ensure the code under test uses the mocks.
+- Assert call order using mock_calls or separate MagicMocks and compare their call indices.
+- Document in code comments the rationale for the operation order so future refactors don’t reintroduce the bug.
+
+Acceptance criteria
+- A unittest that reproduces the original bug scenario (PNG + cover_format=JPEG + max_filesize) and asserts:
+  - Candidate.resize calls reformat first and then resize.
+  - Both operations occur when both are needed.
+- The code fix in beetsplug/fetchart.py ensures multiple operations can be applied in sequence within resize, independent of the single-operation limitation in _validate.
+- All tests pass via python -m unittest discover.
+
+Reminder: Do not commit your edits.

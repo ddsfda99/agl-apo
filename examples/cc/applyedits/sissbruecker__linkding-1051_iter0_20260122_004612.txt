@@ -1,0 +1,68 @@
+You are given a code repository in the current directory.
+
+Task goal
+Enable automatic linkification of plain-text URLs in notes/description so that strings like https://github.com become clickable anchors without requiring Markdown link syntax.
+
+Important constraints
+- Do not modify, add, or commit any permanent changes to the existing test suite. If you need a reproduction test, create it temporarily for local validation and delete it before finishing.
+- Keep production code changes minimal, focused, and well-documented.
+- Prefer running targeted tests to avoid long execution times and timeouts.
+
+Steps to complete
+
+1) Carefully read and understand the requirements
+- We want plain URLs in user-entered notes/description to be clickable, even when the user does not write Markdown link syntax like [link](url).
+- This should be implemented in the markdown parser pipeline used for notes/description input, without compromising security or linkifying within code/pre sections.
+- The behavior should not require any changes to templates or tests already in the repository.
+
+2) Create a temporary reproduction test (do not commit it)
+- Create a temporary test file locally (for example bookmarks/tests/test_autolink_tmp.py) that verifies:
+  - Rendering a note containing “Visit https://example.com for docs” results in HTML containing an anchor: <a href="https://example.com">https://example.com</a>.
+  - A URL inside inline code (`https://example.com`) or inside a code block is not linkified.
+- Use repository utilities or existing template filters to render the note the same way production does. If needed, render the same template used by the bookmarks list/details that shows notes/description.
+
+3) Locate the markdown rendering code
+- Search for the markdown rendering function/filter used by notes/description.
+- Likely location: bookmarks/templatetags/shared.py (look for a function like render_markdown, markdown conversion, and bleach.clean usage).
+- Identify allowlists used for sanitization (variables similar to markdown_tags and markdown_attrs).
+
+4) Implement the feature with minimal changes
+- Apply automatic linkification after markdown conversion and before sanitization:
+  - Convert the input markdown to HTML as currently done.
+  - Call bleach.linkify on the resulting HTML to transform plain URLs into anchors.
+  - Then sanitize with bleach.clean using the existing allowlists.
+- Configure linkify to avoid linkifying inside code/pre and existing anchors:
+  - Use skip_tags=['a', 'code', 'pre'] when calling bleach.linkify.
+- Verify the sanitization allowlists include anchors:
+  - Ensure the allowed tags include 'a'.
+  - Ensure the allowed attributes include 'href' for 'a'.
+  - Do not broaden the allowlist unnecessarily; only add 'a' and 'href' if they are missing.
+- Security considerations:
+  - Linkify first, sanitize second ensures disallowed protocols and attributes are stripped.
+  - Do not set target attributes or additional rel attributes unless already part of existing policy; keep behavior consistent with current sanitization. If bleach.linkify adds rel by default and markdown_attrs excludes it, bleach.clean will strip it, which is fine.
+- Add a brief code comment explaining the ordering (markdown -> linkify -> sanitize) and why skip_tags includes code/pre.
+
+5) Validate with targeted test runs
+- Run only the relevant subset of tests to minimize time, e.g.:
+  - pytest -q -k bookmarks
+  - If you created a temporary test file, include it in the run, e.g., pytest -q -k autolink_tmp
+- Confirm your temporary test passes and that existing tests still pass without changes.
+
+6) Clean up temporary files
+- Delete the temporary test file you created (e.g., bookmarks/tests/test_autolink_tmp.py) so the repository’s test suite remains unchanged.
+
+7) Final checklist
+- Plain URLs in notes/description are clickable in rendered HTML.
+- Links are not created inside inline code or code blocks.
+- Sanitization still applies and security is preserved.
+- No permanent changes to tests; only production code updated.
+- Changes are minimal and documented with a short comment.
+
+Implementation guidance (for reference; adapt to actual code)
+- In the markdown rendering function (e.g., render_markdown in bookmarks/templatetags/shared.py):
+  - html = markdown_converter(text)  # existing markdown conversion
+  - html = bleach.linkify(html, skip_tags=['a', 'code', 'pre'])
+  - html = bleach.clean(html, tags=markdown_tags, attributes=markdown_attrs)
+- Ensure markdown_tags contains 'a' and markdown_attrs contains {'a': ['href']} or equivalent structure used in your code.
+
+Please do not commit your edits. We will do it later.

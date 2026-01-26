@@ -1,0 +1,93 @@
+Here’s a detailed review of the coding agent’s execution trace, identifying what went wrong, where the bug lives, how it should be fixed, and where the agent’s process can improve.
+
+Summary of the reported bug
+- On Fedora (RHEL-based), when rpm-build is missing, Briefcase prompts the user to install “rpmbuild” via “sudo dnf install rpmbuild”. This is incorrect; the package is named “rpm-build”.
+- Expected prompt: “sudo dnf install rpm-build”.
+
+Where the bug is in the code
+- The mapping that drives the install prompt is in src/briefcase/platforms/linux/system.py, in LinuxSystemPackageCommand._verify_packaging_tools():
+  tool_name, executable_name, package_name = {
+      "deb": ("dpkg", "dpkg-deb", "dpkg-dev"),
+      "rpm": ("rpm-build", "rpmbuild", "rpmbuild"),
+      "pkg": ("makepkg", "makepkg", "pacman"),
+  }[app.packaging_format]
+
+- For RPM, the third item in the tuple is the package name to install. That currently is "rpmbuild", which is incorrect on Fedora. It should be "rpm-build".
+- The install command uses that package_name along with the installer returned by _system_requirement_tools(app) for RHEL-based systems: ["dnf", "install"].
+- Therefore, the fix required in code is to change the mapping for "rpm" to ("rpm-build", "rpmbuild", "rpm-build").
+
+Tests related to the bug
+- There’s already test coverage for the error message when rpm tools are missing: tests/platforms/linux/system/test_package__rpm.py, test_verify_rpmbuild_missing.
+- That test is parameterized for vendor_base == "rhel" and None. The "rhel" case checks the specific install prompt. Originally, it expected:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpmbuild`."
+- Since the bug is that the message mentions rpmbuild instead of rpm-build, the test expectation must be updated to:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+- The agent initially made that change (correctly) and updated the source code mapping to use rpm-build.
+
+What the agent did well
+- Located the offending code quickly using grep.
+- Implemented the correct fix in src: changed ("rpm-build", "rpmbuild", "rpmbuild") to ("rpm-build", "rpmbuild", "rpm-build").
+- Updated the test to reflect the correct prompt and ran the scoped rpm test suite; it passed (10 tests).
+
+Where the agent failed or stumbled
+- Flipping test expectations back and forth:
+  - After fixing the test to expect rpm-build, the agent later reverted the test string back to the old (incorrect) rpmbuild expectation—twice. The final state of tests/platforms/linux/system/test_package__rpm.py shows the incorrect string:
+    "Can't find the rpm-build tools. Try running `sudo dnf install rpmbuild`."
+  - This leaves the repository in an inconsistent state: source code now prompts rpm-build, but the test expects rpmbuild. Running that test will fail. The earlier “10 passed” was from before the final revert; after the final change, those tests will fail.
+  - This oscillation indicates a lack of careful tracking of test changes; it should have been a single, deliberate update.
+
+- Full test suite failure unrelated to rpm:
+  - Both initial and final full pytest runs failed on tests/commands/base/test_paths.py::test_data_path_creation_failure.
+  - This failure existed before any rpm-related changes. It indicates either the environment isn’t simulating the error correctly (monkeypatching subprocess.run not being used by the code path), or there’s a mismatch between the test’s expectation and current code behavior.
+  - The agent didn’t investigate or fix this unrelated failing test. While not part of the rpm bug, leaving the repo with a failing test means “all tests” don’t pass, which undermines the overall task.
+
+- Not following the task’s workflow cleanly:
+  - The instructions asked to write tests to reproduce the bug, fix the bug, validate with tests, and delete any new tests at the end.
+  - The agent edited an existing test rather than adding a new one. That’s acceptable, but they ended up reverting the test to the incorrect expectation, breaking correctness.
+  - No cleanup step was performed (deleting newly added tests isn’t relevant here since they didn’t add new tests).
+
+- Insufficient scope of test execution:
+  - The agent ran the rpm-specific tests, which is fine for targeted validation, but to confirm overall repository health, running the full suite (and resolving failures) is necessary.
+
+Recommendations to fix correctly
+- Code fix:
+  - Keep the change in src/briefcase/platforms/linux/system.py:
+    "rpm": ("rpm-build", "rpmbuild", "rpm-build")
+  - This ensures the install prompt is “sudo dnf install rpm-build”.
+
+- Test fix:
+  - Update tests/platforms/linux/system/test_package__rpm.py, test_verify_rpmbuild_missing for the rhel case to expect the correct string:
+    "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+  - Avoid reverting this change back to the incorrect string.
+
+- Validate:
+  - Run the rpm tests after the above change to confirm they pass.
+  - Run the full test suite; if tests/commands/base/test_paths.py::test_data_path_creation_failure still fails, investigate that failing test separately (it appears unrelated to the rpm bug).
+
+Potential cause of the unrelated failing test
+- tests/commands/base/test_paths.py::test_data_path_creation_failure is expecting BriefcaseCommandError when creating the data directory fails. The test monkeypatches subprocess.run to raise CalledProcessError and sets data_path to /etc/mydatadir.
+- If the code path creating the directory doesn’t use subprocess.run or handles errors differently, the test won’t see the expected exception.
+- This failure was present before the agent’s changes, so it’s not caused by the rpm fix.
+
+Process improvements for the agent
+- Avoid flipping test changes. Make a single change to test expectations to match the corrected behavior.
+- After making a local fix, ensure tests remain consistent with the fix; don’t revert to old behavior.
+- Run the full test suite and address any failures (even if unrelated), or communicate clearly that the failure is outside the scope of the rpm bug fix.
+- Follow the requested workflow steps: write or adjust tests to reproduce/fail for the bug, fix, validate, and cleanup.
+- Be careful with test edits in shared files; ensure final content reflects the corrected behavior.
+
+Actionable steps to complete the task
+1. In src/briefcase/platforms/linux/system.py, keep:
+   "rpm": ("rpm-build", "rpmbuild", "rpm-build")
+
+2. In tests/platforms/linux/system/test_package__rpm.py, ensure the parameterized rhel case uses the correct expected message:
+   "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+
+3. Run:
+   - pytest tests/platforms/linux/system/test_package__rpm.py
+   - pytest -q
+   If the unrelated test still fails, document it and, if required by the broader task, fix or skip it appropriately (but that’s outside the rpm-build prompt issue).
+
+4. Cleanup test changes only if you added new test files. In this case, you edited an existing test and should leave it corrected.
+
+With these corrections, the rpm install prompt will be accurate on Fedora/RHEL, and the rpm-specific tests will validate the behavior.

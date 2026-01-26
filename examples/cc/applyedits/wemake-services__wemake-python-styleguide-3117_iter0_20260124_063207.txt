@@ -1,0 +1,83 @@
+You are an expert in coding agent prompt optimization and implementation. Your goal is to implement a well-scoped change and corresponding tests so that the repository now ignores WPS520 (FalsyConstantCompareViolation) inside assert statements, because pytest asserts are a legitimate use-case and should not be flagged by this rule.
+
+Important context and pitfalls from a previous failed attempt:
+- Do not make broad behavior changes without aligning tests. The repository currently has tests that expect WPS520 to be raised inside assert contexts. Since our new requirement is to ignore WPS520 in assert, we must update only the relevant tests to reflect the new behavior and add new tests to cover it.
+- Do not modify shared fixtures or global test data in conftest.py (for example, do not remove or alter assert_construct / assert_with_message in EQUAL_COMPARES). Such changes have wide ripple effects and will break unrelated tests.
+- Keep the rule’s behavior unchanged in all other contexts. Only suppress WPS520 when the comparison occurs inside an assert statement.
+- Use tools correctly (for example, ripgrep with -n to show line numbers).
+- If pytest is not available in the environment, reason about impacts and verify carefully via reading and static analysis. Do not guess. Ensure you do not change unrelated tests or documentation unless necessary.
+
+Your task
+Implement the feature “WPS520 should be ignored in assert context” and ensure the tests reflect this change in a minimal and localized manner.
+
+Step-by-step plan
+1) Understand the current behavior and scope:
+   - Identify the violation class and where WPS520 is emitted:
+     - Violation: FalsyConstantCompareViolation (WPS520), likely in violations/refactoring.py or similar.
+     - Visitor logic: WrongConstantCompareVisitor in visitors/ast/compares.py (or a similarly named file) where comparisons to falsy constants ([], {}, (), etc.) are checked.
+   - Find tests that cover WPS520 and specifically the ones that currently expect violations inside assert statements:
+     - Look for tests under tests/test_visitors/test_ast/test_compares/test_constant_compares/test_falsy_constant.py (or similar path).
+     - Locate where assert constructs are included (from conftest.py): assert_construct and assert_with_message are commonly used in parametrized templates.
+
+   Suggested commands:
+   - rg -n "WPS520|FalsyConstantCompareViolation"
+   - rg -n "WrongConstantCompareVisitor|compares"
+   - rg -n "assert_construct|assert_with_message"
+   - rg -n "test_falsy_constant.py"
+
+2) Write a focused reproduction test for the new desired behavior:
+   - Add a new test file that specifically verifies WPS520 is NOT raised in assert contexts. Do not depend on shared conftest templates for this test; instead, use explicit code snippets to avoid changing global fixtures.
+   - Cover at least:
+     - assert variable == []
+     - assert [] == variable
+     - assert variable == [], "message"
+     - assert [] == variable, "message"
+   - Also add a control test in the same file that confirms WPS520 is still raised in a non-assert context (e.g., if x == []: pass), ensuring the rule remains active elsewhere.
+
+   Notes:
+   - Follow existing testing patterns (e.g., building AST, running the visitor, and using assert_errors/assert_error_text helpers if present).
+   - Keep the test names descriptive, e.g., test_ignores_falsy_compare_in_assert and test_reports_falsy_compare_outside_assert.
+
+3) Implement the code change with the smallest surface area:
+   - In the visitor that raises FalsyConstantCompareViolation for comparisons with falsy constants, add a guard to skip reporting when the comparison node (or its relevant part) is inside an ast.Assert context.
+   - Use the repository’s existing AST parent-walking utility if available (e.g., from wemake_python_styleguide.logic import walk and walk.get_closest_parent(node, ast.Assert)).
+   - Ensure that both sides of the comparison are considered:
+     - a == [] and [] == a should both be ignored if they are part of an assert statement.
+   - Only suppress within assert statements. Do not alter behavior for if, while, return, or any other contexts.
+   - Add a short code comment explaining why asserts are exempted (pytest-friendly).
+
+4) Update only the minimal existing tests that are now invalid:
+   - There is at least one test module that currently expects WPS520 violations inside assert contexts (e.g., test_falsy_constant.py). Adjust this module’s expectations in a localized way:
+     - Do NOT modify shared fixtures in conftest.py.
+     - Instead, in test_falsy_constant.py, exclude assert-based templates locally for tests that expect violations, or split the tests so that assert-based snippets are tested under “no violation expected” scenarios.
+     - If the test builds cases from EQUAL_COMPARES (which includes assert templates), filter out the assert cases within that specific test or add a separate test block for assert cases that expects no violations.
+   - Do not change unrelated tests or global fixtures.
+
+   Example approach (conceptual, adapt to the repo’s test utilities):
+   - In test_falsy_constant.py, where eq_conditions or similar includes assert templates, create a filtered list that excludes assert templates when asserting errors. Then add a separate test using assert templates to expect no errors.
+   - Alternatively, parametrize a separate test function solely for assert contexts expecting no violations.
+
+5) Validate your implementation:
+   - If pytest is available, run the subset of tests for compares and the new test file.
+   - If pytest is not available, carefully re-read the modified test files and the visitor code to ensure:
+     - Violations are still reported in all non-assert contexts.
+     - No violations are reported within assert contexts.
+     - Shared fixtures remain unmodified.
+   - Double-check that “noqa” handling and other rules are unaffected.
+
+6) Cleanup:
+   - Remove any temporary files or debug prints.
+   - Ensure you have not modified conftest.py or other global test scaffolding.
+   - Do not commit your changes. We will commit later.
+
+Success criteria
+- WPS520 (FalsyConstantCompareViolation) is no longer reported for comparisons with falsy constants inside assert statements.
+- WPS520 still reports as before in all other contexts.
+- Existing tests unrelated to assert contexts pass unchanged.
+- Only minimal, localized updates are made to the tests that used to expect WPS520 inside assert; a new test verifies the assert exemption.
+- No global fixtures or shared test data are altered.
+
+Notes on tool usage
+- Use ripgrep with -n for line numbers: rg -n "pattern"
+- When editing, keep changes small and well-commented.
+- If you cannot run pytest, reason through the tests and code paths carefully, and avoid broad or risky refactors.

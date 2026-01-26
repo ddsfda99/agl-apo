@@ -1,0 +1,113 @@
+Here’s a detailed review of where the coding agent went wrong, what was missed, and how to fix and improve the implementation to satisfy the task “OIDC: Option for Username instead of Email” and pass tests.
+
+What the task requires
+- The feature request is to make OIDC-based login use a “username” claim (e.g., preferred_username) instead of the email claim, configurable via a setting. The main motivation is privacy: avoid exposing users’ email addresses when sharing bookmarks.
+- This implies:
+  - We need a setting to choose which claim becomes the Django username for OIDC users (default to email for backwards compatibility).
+  - The username generation logic must use that claim if configured and fall back to email otherwise.
+  - Tests should cover the new setting and behavior.
+  - Docs should be updated to explain the option.
+
+Key places in the codebase
+- siteroot/settings/base.py: OIDC support is wired here. Critically, it sets OIDC_USERNAME_ALGO = "bookmarks.utils.generate_username" if LD_ENABLE_OIDC is true.
+- bookmarks/utils.py: contains generate_username, currently:
+  def generate_username(email): return unicodedata.normalize("NFKC", email)[:150]
+- bookmarks/tests/test_oidc_support.py: tests basic OIDC enablement, authentication backends, URLs, etc.
+
+Critical issues the agent missed
+1) No implementation or tests were written.
+- The agent read a few files and docs, but didn’t follow the task steps:
+  - No reproduction test was written (Step 2).
+  - No code changes were made (Step 4).
+  - No tests were run (Step 5).
+
+2) The current generate_username signature is wrong for mozilla-django-oidc usage.
+- In settings, OIDC_USERNAME_ALGO is set to bookmarks.utils.generate_username.
+- mozilla-django-oidc (4.x) expects the algo function to accept both email and claims (signature is effectively algo(email, claims)), per their settings docs (“custom method to generate the django username from the user’s email and OIDC claims”).
+- Our generate_username currently only accepts a single argument (email). When OIDC login actually runs, this will likely raise a TypeError. This is a functional bug independent of the new feature request and should be fixed as part of the change.
+- The agent did not identify this mismatch nor propose a fix.
+
+3) No new setting to choose a claim was introduced.
+- To meet the feature request, we should add a setting like OIDC_USERNAME_CLAIM (default “email”). This lets users switch to e.g., “preferred_username”.
+- The agent didn’t add or propose any setting.
+
+4) No documentation updates.
+- The docs (docs/src/content/docs/options.md) currently state “Users are associated by the email address provided from the OIDC provider, which is used as the username in linkding.” That needs to be updated to mention the new option to use preferred_username.
+
+5) Some tooling missteps wasted time.
+- The agent first tried to read a file with a wrong path (“File does not exist”), then checked pwd and ls to correct. This indicates a lack of initial workspace awareness, which can be improved by checking pwd and tree early.
+- WebFetch attempts didn’t immediately retrieve the relevant OIDC_USERNAME_ALGO signature details, but the agent didn’t persist; only later did they fetch a snippet stating the purpose but not the signature. This contributed to missing the signature bug.
+
+What should be implemented to fulfill the request and pass tests
+A. Add a configurable setting for the OIDC username claim:
+- In siteroot/settings/base.py, inside the LD_ENABLE_OIDC block, define:
+  OIDC_USERNAME_CLAIM = os.getenv("OIDC_USERNAME_CLAIM", "email")
+- Keep OIDC_USERNAME_ALGO = "bookmarks.utils.generate_username" as is.
+
+B. Fix and enhance the username algorithm to honor the configured claim and accept claims parameter:
+- In bookmarks/utils.py, change the function signature and logic:
+  - Accept (email, claims=None).
+  - Pick the candidate username from claims[OIDC_USERNAME_CLAIM] if present and truthy; otherwise fall back to email param.
+  - Normalize and slice to 150 chars as currently done.
+  - Handle None/empty gracefully.
+  - Retrieve the setting via django.conf.settings; if setting not present (e.g., OIDC disabled), default to “email”.
+
+Example implementation outline:
+- from django.conf import settings
+- def generate_username(email, claims=None):
+    if claims is None:
+        claims = {}
+    claim_name = getattr(settings, "OIDC_USERNAME_CLAIM", "email")
+    candidate = claims.get(claim_name) or email
+    return unicodedata.normalize("NFKC", str(candidate))[:150]
+
+C. Tests to reproduce/validate:
+- Create a new test file, e.g., bookmarks/tests/test_oidc_username_algo.py:
+  - Test default behavior (no OIDC_USERNAME_CLAIM set): generate_username("user@example.com", {"preferred_username": "john"}) returns "user@example.com"
+  - Test with override_settings(OIDC_USERNAME_CLAIM="preferred_username"): generate_username("user@example.com", {"preferred_username": "john"}) returns "john"
+  - Test fallback when claim missing/empty: with OIDC_USERNAME_CLAIM="preferred_username" and claims missing/empty, returns email param.
+  - Test normalization and length trimming still happen.
+  - Optionally ensure function accepts the claims parameter without TypeError (guard against regression).
+
+- Optionally, add a test under bookmarks/tests/test_oidc_support.py to assert that with LD_ENABLE_OIDC=True, the OIDC_USERNAME_ALGO is set in settings to bookmarks.utils.generate_username (to ensure the wiring is correct), and that OIDC_USERNAME_CLAIM defaults to "email" and can be overridden via override_settings or environment. But the core behavior can be validated by unit testing the function as above.
+
+D. Docs
+- Update docs/src/content/docs/options.md under the OIDC section:
+  - Add OIDC_USERNAME_CLAIM.
+  - Values: “email” (default), “preferred_username”.
+  - Purpose: choose which claim to use as the Django username for OIDC users; useful to avoid exposing email addresses when sharing bookmarks.
+  - Note: Will fall back to email if the configured claim is missing.
+
+E. Run tests
+- Run pytest to verify all tests pass. If any test depends on environment variables, use override_settings in tests to keep isolation.
+
+Potential pitfalls and considerations
+- Backwards compatibility: default must remain using email so existing setups don’t change behavior.
+- Claims availability: preferred_username might not be present for all providers or scopes; the fallback to email preserves functionality.
+- The existing tests for OIDC only check URLs/backends/settings; they won’t catch the signature bug in generate_username. Your new tests should explicitly exercise the function with both parameters.
+- The algorithm function will only be called during OIDC login flows; the tests should invoke it directly to avoid needing an external OIDC provider.
+
+What the agent should have done (how to improve process)
+- Follow the 6-step process explicitly:
+  - Step 1: Restate the requirement and identify where in code to implement.
+  - Step 2: Write a failing test for the desired behavior (username claim used when configured).
+  - Step 3: Identify OIDC_USERNAME_ALGO usage and its expected signature; spot the bug in generate_username signature early.
+  - Step 4: Implement the fix (new setting, update function signature/logic).
+  - Step 5: Run tests; fix any failures; ensure no regressions.
+  - Step 6: Clean up temporary files.
+- Verify the current function signature against upstream library expectations before changing behavior; use library docs or reading code.
+- Avoid spending time on unproductive WebFetch attempts. If docs queries are not immediately successful, search within the installed library or rely on known patterns.
+- Validate paths before attempting to read files to avoid “file not found” errors in the trace.
+
+Summary of concrete changes to make
+- siteroot/settings/base.py (inside LD_ENABLE_OIDC):
+  - Add: OIDC_USERNAME_CLAIM = os.getenv("OIDC_USERNAME_CLAIM", "email")
+- bookmarks/utils.py:
+  - Change signature to def generate_username(email, claims=None)
+  - Implement claim-based selection with fallback and normalization.
+- bookmarks/tests/test_oidc_username_algo.py (new):
+  - Add tests as described to validate default, configured claim, fallback, normalization.
+- docs/src/content/docs/options.md:
+  - Document OIDC_USERNAME_CLAIM and update wording about association (email vs username).
+
+By making the above changes and adding tests, you’ll meet the feature request, fix the lurking signature bug, and ensure behavior is covered by automated tests.

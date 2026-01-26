@@ -1,0 +1,77 @@
+You are fixing a bug in the repository at /testbed.
+
+Bug description
+- The tag cloud groups tags alphabetically by first character, which causes undesirable one-tag-per-line behavior for languages like Chinese.
+- Add an option to disable alphabetical grouping so all tags render in a single line (no line breaks between groups).
+
+Repository context you will need
+- Tag cloud template: bookmarks/templates/bookmarks/tag_cloud.html
+- Tag cloud context logic: bookmarks/views/partials/contexts.py
+- Styles: bookmarks/styles/bookmark-page.scss
+- User preferences model: bookmarks/models.py uses a JSONField search_preferences for per-user preferences.
+- Existing tests related to the tag cloud: bookmarks/tests/test_tag_cloud_template.py (contains a helper method assertTagGroups).
+
+Your task
+Follow these steps precisely. Do not commit your changes.
+
+1) Write a failing test to reproduce the bug
+- Create a new test file bookmarks/tests/test_tag_cloud_grouping_preference.py.
+- Reuse the approach in bookmarks/tests/test_tag_cloud_template.py for setting up the tag cloud context and asserting groups.
+- Important: Copy the assertTagGroups helper from bookmarks/tests/test_tag_cloud_template.py into your new test file so it’s available in the new test. Do not try to import it from the other test module.
+- In the new test:
+  - Create a user and attach a profile with search_preferences set to {"group_tag_cloud": False}.
+  - Prepare a set of tags that include Chinese characters and Roman alphabet tags.
+  - Build a request/context the same way the existing tag cloud tests do, and construct TagCloudContext.
+  - Assert that when group_tag_cloud is False, the tag cloud produces a single group containing all unselected tags sorted alphabetically; use your copied assertTagGroups helper to assert the structure as list of lists of tag names. The expected group should be one list containing all the tag names in sorted order.
+- Run the full test suite to verify the new test fails initially.
+
+2) Explore the source to locate and understand the bug
+- Open bookmarks/views/partials/contexts.py and inspect TagCloudContext.
+- Find where unselected tags are collected and where groups are created. Currently it calls TagGroup.create_tag_groups(unselected_tags) unconditionally.
+- Identify the attribute on TagCloudContext that the template uses to render groups (e.g., self.tag_groups or self.groups). Confirm the exact name from code and template.
+
+3) Implement the fix to respect the preference and disable grouping
+- Read the preference from request.user_profile.search_preferences, defaulting to grouping enabled when the preference is absent.
+- Suggested logic inside TagCloudContext after you have unselected_tags:
+  - Safely fetch the grouping preference:
+    - If request has user_profile with search_preferences, read group_tag_cloud using .get("group_tag_cloud", True).
+    - Otherwise default to True.
+  - If grouping is enabled (True): keep the current behavior: TagGroup.create_tag_groups(unselected_tags).
+  - If grouping is disabled (False):
+    - Sort all unselected_tags alphabetically by tag name in a case-insensitive manner (prefer t.name.casefold()).
+    - Create a single TagGroup instance (e.g., TagGroup("")).
+    - Assign the entire sorted tag list to single_group.tags.
+    - Set the TagCloudContext’s groups attribute (whatever the class uses) to [single_group].
+- Preserve backward compatibility: when the preference is missing, grouping should remain enabled and all existing tests must keep passing.
+- Do not change the template unless absolutely necessary. With grouping disabled, a single group will render and line breaks between groups disappear. This matches the request.
+
+4) Rerun the tests to validate the fix
+- Run pytest. The newly added test should now pass.
+- Ensure all existing tests pass as well. If something fails, revisit contexts.py and adjust the implementation accordingly.
+
+5) Clean up the temporary test
+- As required, delete the newly created test file bookmarks/tests/test_tag_cloud_grouping_preference.py.
+- Rerun pytest to confirm the repository’s original tests still pass after the test deletion.
+
+Additional guidance and pitfalls to avoid
+- Do not commit any changes.
+- Be careful to set the correct attribute on TagCloudContext that the template uses (e.g., self.tag_groups vs. self.groups). Verify by reading the template bookmarks/templates/bookmarks/tag_cloud.html to see what it iterates over.
+- Use a safe preference read to avoid KeyError or AttributeError:
+  - Handle missing user_profile or missing search_preferences by defaulting to grouping enabled.
+- Sorting: use t.name.casefold() to sort tags in a case-insensitive, locale-agnostic way. If casefold is unavailable for some reason, t.name.lower() is acceptable.
+- Maintain existing behavior when grouping is enabled so you don’t break current tests in bookmarks/tests/test_tag_cloud_template.py.
+
+Example code sketch for the fix in TagCloudContext (adapt variable names to match the actual code):
+- After computing unselected_tags:
+  - prefs = getattr(getattr(request, "user_profile", None), "search_preferences", {}) or {}
+  - grouping_enabled = bool(prefs.get("group_tag_cloud", True))
+  - if grouping_enabled:
+      groups = TagGroup.create_tag_groups(unselected_tags)
+    else:
+      sorted_unselected = sorted(unselected_tags, key=lambda t: t.name.casefold())
+      single_group = TagGroup("")
+      single_group.tags = list(sorted_unselected)
+      groups = [single_group]
+  - Assign groups to the attribute used by the template, e.g., self.tag_groups = groups
+
+Remember: run tests after adding the test (expect failure), run tests again after the fix (expect success), and then delete your test file and run tests one last time. Do not commit any changes.

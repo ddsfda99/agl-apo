@@ -1,0 +1,137 @@
+You are working in the current repository. Your goal is to fix a false-positive in Checkov for CKV_AZURE_136 and ensure the change is robust and consistent across related checks, while strictly following the repository’s existing testing patterns and APIs.
+
+Context and requirement summary
+- Issue: CKV_AZURE_136 is failing on Azure Database for PostgreSQL Flexible Server read replicas. Per Microsoft docs, replicas do not support geo-redundant backups. Therefore, the check should not fail on flexible server replicas.
+- Similar semantics likely apply to Azure MySQL flexible servers. Apply the same behavior for azurerm_mysql_flexible_server if that resource type is already supported by the MySQL check in this repo.
+- For MariaDB, do not introduce unsupported resource types. Only modify MariaDB if the existing check already supports azurerm_mariadb_flexible_server in this codebase. If it does not, do not add it.
+- Version noted in the report: Checkov 3.2.22.
+
+High-level acceptance criteria
+- PostgreSQL flexible servers: For azurerm_postgresql_flexible_server, when create_mode indicates a replica, CKV_AZURE_136 should not fail. Return CheckResult.UNKNOWN to reflect “not applicable” rather than PASSED.
+- MySQL flexible servers: Apply the same behavior in CKV_AZURE_94 for azurerm_mysql_flexible_server if that resource type is supported by the check in this repo.
+- MariaDB: Only apply the same behavior in CKV_AZURE_95 if the check already supports azurerm_mariadb_flexible_server in this repo. Do not add new supported resource types.
+- Be robust in handling the create_mode value:
+  - Support str or list-of-str values.
+  - Case-insensitive comparison for "replica".
+  - If create_mode is variable/unknown/interpolated, return UNKNOWN (do not treat as failed or passed).
+- Update evaluated keys so that outputs indicate both create_mode and the geo_redundant_backup_enabled key were considered.
+- Add targeted tests that follow the repository’s established test patterns:
+  - Do NOT modify Runner-level assertions to track unknown. The Report API here does not expose unknown_checks or summary entries for unknown.
+  - Add new unit tests that directly call check.scan_resource_conf(conf) and assert CheckResult.UNKNOWN for replica and unknown create_mode cases.
+  - Keep existing Runner-based tests unchanged and passing.
+- Ensure existing tests for these checks still pass and no regressions are introduced.
+- Do not commit your changes; we will commit them later.
+
+Critical guardrails based on prior failure analysis
+- Do not attempt to collect or assert unknown checks via Runner/Report. The Report object here does not have unknown_checks or summary['unknown'].
+- Do not change existing Runner-based tests to include unknown counts.
+- Do not introduce unsupported resource types (for example, do not add azurerm_mariadb_flexible_server if it is not already present in the codebase).
+- Follow the repo’s pattern for UNKNOWN: assert it by calling check.scan_resource_conf directly in unit tests, not through Runner.
+
+Detailed plan
+1) Verify the working directory
+- Run pwd to ensure you are at the repository root. Use relative paths from here.
+
+2) Discover current tests and checks
+- Locate existing tests:
+  - tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+  - tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+  - tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+- Locate relevant checks in code:
+  - checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py (CKV_AZURE_136)
+  - checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py (CKV_AZURE_94)
+  - checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py (CKV_AZURE_95)
+- Confirm supported resource types in each check. Specifically:
+  - Verify that PostgreSQL check handles azurerm_postgresql_flexible_server.
+  - Verify whether MySQL check includes azurerm_mysql_flexible_server.
+  - Verify whether MariaDB check includes azurerm_mariadb_flexible_server. If not, do not add it.
+
+3) Reproduce current behavior
+- Run the existing tests without changing them to establish a baseline:
+  - pytest -q tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+  - pytest -q tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+  - pytest -q tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+- Note: Do not add assertions for unknown in these tests. They should continue to assert only passed/failed/skipped/parsing_errors if they use Runner.
+
+4) Implement the fix in the checks
+- In PostgreSQLFlexiServerGeoBackupEnabled.py:
+  - Override scan_resource_conf to add special handling for flexible server replicas and unresolved create_mode.
+  - Extract create_mode from conf, tolerating list-or-str. Normalize to lowercase string when possible.
+  - If mode == "replica", return CheckResult.UNKNOWN.
+  - If create_mode exists but cannot be resolved cleanly (e.g., contains Terraform interpolation like "${", or looks like a reference such as starting with "var.", "local.", or "module."), return CheckResult.UNKNOWN.
+  - Otherwise, fall back to super().scan_resource_conf(conf) to evaluate geo_redundant_backup_enabled as usual.
+  - Update get_evaluated_keys to include "create_mode" in addition to the original evaluated key(s), e.g., "backup.0.geo_redundant_backup_enabled".
+- In MySQLGeoBackupEnabled.py:
+  - Only apply the same logic for azurerm_mysql_flexible_server if that resource type is already supported by this check. Do not change the behavior for other resource types.
+  - Use the same UNKNOWN rules and evaluated keys update.
+- In MariaDBGeoBackupEnabled.py:
+  - Only apply the create_mode handling if this check already supports azurerm_mariadb_flexible_server in the current codebase. If it does not, do not modify supported_resources and do not add flexible server handling.
+
+Implementation notes for scan_resource_conf
+- Use CheckResult from checkov.common.models.enums.
+- Helper approach for extracting a string:
+  - Given val = conf.get("create_mode"):
+    - If isinstance(val, list) and val: candidate = val[0]
+    - Else if isinstance(val, str): candidate = val
+    - Else candidate = None
+  - If candidate is a str:
+    - s = candidate.strip()
+    - If s contains Terraform references or interpolation (e.g., contains "${" or starts with "var.", "local.", or "module."), return UNKNOWN.
+    - If s.lower() == "replica", return UNKNOWN.
+  - If candidate is None but create_mode key exists with a non-string value, return UNKNOWN.
+  - Otherwise return super().scan_resource_conf(conf).
+- Only apply this special logic to the flexible server resource types relevant to the check (as constrained by supported_resources for that check).
+- Update get_evaluated_keys to return a list such as ["create_mode", "<existing_geo_backup_key_path>"]. Keep the parent’s evaluated keys if appropriate; ensure "create_mode" is included.
+
+5) Add targeted tests without modifying existing ones
+- Do not change the current Runner-based tests. Do not attempt to assert unknown counts via Runner/Report.
+- Add new unit tests that directly call check.scan_resource_conf(conf) and assert CheckResult.UNKNOWN. Follow existing repository patterns for UNKNOWN tests (for example, some tests parse HCL with hcl2 or build the conf dict manually).
+- Add new tests for:
+  - PostgreSQL flexible server replica:
+    - Minimal conf for azurerm_postgresql_flexible_server with create_mode = "Replica" returns CheckResult.UNKNOWN via check.scan_resource_conf.
+  - PostgreSQL flexible server with unresolved/variable create_mode:
+    - Example conf where create_mode = "${var.create_mode}" or "var.create_mode" returns CheckResult.UNKNOWN.
+  - MySQL flexible server replica and unresolved create_mode:
+    - Only add these if MySQL check supports azurerm_mysql_flexible_server. Otherwise skip these additions.
+  - MariaDB flexible server cases:
+    - Only add these if the MariaDB check supports azurerm_mariadb_flexible_server in this repo. Do not introduce unsupported resource types or tests for them.
+- For building conf dictionaries:
+  - Mirror the structure produced by hcl2 parser used in this repo. Strings are often wrapped as single-element lists, e.g., {"create_mode": ["Replica"]}.
+  - Include minimally required fields for the check to run, including backup-related keys if needed by the base implementation.
+- Optionally, add a small assertion that "create_mode" appears in get_evaluated_keys for the modified checks, alongside the geo backup key path.
+
+6) Run tests
+- Run the existing tests again to ensure no regressions:
+  - pytest -q tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+  - pytest -q tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+  - pytest -q tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+- Run your newly added unit tests that assert UNKNOWN via scan_resource_conf.
+- If everything passes, run a broader subset or the full suite:
+  - pytest -q
+
+7) Clean up
+- Ensure no temporary files remain. Keep only the code changes and the newly added unit tests.
+- Do not commit your changes.
+
+Additional notes and constraints
+- Returning UNKNOWN for replicas aligns with “not applicable” and avoids inflating PASS counts.
+- Keep changes minimal and localized to the relevant checks. Do not refactor unrelated parts.
+- Be careful with case-insensitivity and list vs. string values in the conf.
+- If you consider handling other create modes beyond "Replica", only do so if you can verify applicability in official docs. Otherwise, keep scope to "Replica".
+- Do not rely on Report attributes that are not present in this codebase. UNKNOWN must be tested via direct check invocation.
+
+Deliverables
+- Updated check implementations for:
+  - PostgreSQL CKV_AZURE_136 with replica/unknown create_mode handling and evaluated keys including "create_mode".
+  - MySQL CKV_AZURE_94 with identical handling for azurerm_mysql_flexible_server if supported by the check in this repo.
+  - MariaDB CKV_AZURE_95 only if azurerm_mariadb_flexible_server is already supported in this repo; otherwise, leave as-is.
+- New unit tests covering:
+  - Flexible server replica returning UNKNOWN for PostgreSQL and for MySQL if supported by the check.
+  - Variable/unknown create_mode returning UNKNOWN for the same.
+  - Do not add MariaDB flexible tests unless the resource type is already supported in the repo.
+- Test run outputs showing:
+  - Existing Runner-based tests still pass unchanged.
+  - The new unit tests that directly call scan_resource_conf pass.
+  - No regressions in related areas.
+
+Remember: do not commit your edits.

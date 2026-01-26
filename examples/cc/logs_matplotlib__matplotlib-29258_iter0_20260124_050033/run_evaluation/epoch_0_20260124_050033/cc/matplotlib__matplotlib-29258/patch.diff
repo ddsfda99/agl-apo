@@ -1,0 +1,34 @@
+diff --git a/lib/matplotlib/table.py b/lib/matplotlib/table.py
+index 21518c4c67..1b201e3ea8 100644
+--- a/lib/matplotlib/table.py
++++ b/lib/matplotlib/table.py
+@@ -838,5 +838,6 @@ def table(ax,
+         if rowLabelWidth == 0:
+             table.auto_set_column_width(-1)
+ 
++    table._internal_update(kwargs)
+     ax.add_table(table)
+     return table
+diff --git a/lib/matplotlib/tests/test_table.py b/lib/matplotlib/tests/test_table.py
+index ee974f3cd8..ea90a9ce17 100644
+--- a/lib/matplotlib/tests/test_table.py
++++ b/lib/matplotlib/tests/test_table.py
+@@ -270,3 +270,18 @@ def test_table_dataframe(pd):
+     for r, (index, row) in enumerate(df.iterrows()):
+         for c, col in enumerate(df.columns if r == 0 else row.values):
+             assert table[r if r == 0 else r+1, c].get_text().get_text() == str(col)
++
++
++def test_table_fontsize_kwarg():
++    # Reproduction test for fontsize kwarg ignored in pyplot.table
++    tableData = [['a', 1], ['b', 1]]
++    fig, ax = plt.subplots()
++    t = ax.table(
++        cellText=tableData,
++        loc='top',
++        cellLoc='center',
++        fontsize=30,
++    )
++    # Without drawing, the fontsize should be set on all cells
++    for cell in t.get_celld().values():
++        assert cell.get_fontsize() == 30

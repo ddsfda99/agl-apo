@@ -1,0 +1,107 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+session.plugins: No longer logs when plugin is overridden
+### Checklist
+
+- [X] This is a bug report and not [a different kind of issue](https://github.com/streamlink/streamlink/issues/new/choose)
+- [X] [I have read the contribution guidelines](https://github.com/streamlink/streamlink/blob/master/CONTRIBUTING.md#contributing-to-streamlink)
+- [X] [I have checked the list of open and recently closed bug reports](https://github.com/streamlink/streamlink/issues?q=is%3Aissue+label%3A%22bug%22)
+- [X] [I have checked the commit log of the master branch](https://github.com/streamlink/streamlink/commits/master)
+
+### Streamlink version
+
+6.6.1+2.g61cec0e8
+
+### Description
+
+Streamlink no longer logs anything when a plugin is overridden/sideloaded.
+It used to log `[session][debug] Plugin twitch is being overridden by ...`
+The code seemingly [still exists](https://github.com/streamlink/streamlink/blob/61cec0e88e1a49ee09c39b78fa0396c1da3239ea/src/streamlink/session/plugins.py#L183), but it doesn't get called.
+
+You can see the sideloaded plugin was properly loaded by the log message, but there was no notice by streamlink:
+```shell
+[hakkin@hakkin-pc ~]$ ls ~/.local/share/streamlink/plugins/
+__pycache__  twitch.py
+[hakkin@hakkin-pc ~]$ streamlink -o=/dev/null --loglevel=debug --logfile=log.txt https://www.twitch.tv/twitchmedia21 best
+...
+[plugins.twitch][info] This log is from the overridden plugin!
+...
+```
+
+### Debug log
+
+```text
+[cli][debug] OS:         Linux-6.6.16-1-lts-x86_64-with-glibc2.39
+[cli][debug] Python:     3.11.7
+[cli][debug] OpenSSL:    OpenSSL 3.2.1 30 Jan 2024
+[cli][debug] Streamlink: 6.6.1+2.g61cec0e8
+[cli][debug] Dependencies:
+[cli][debug]  certifi: 2024.2.2
+[cli][debug]  isodate: 0.6.1
+[cli][debug]  lxml: 5.1.0
+[cli][debug]  pycountry: 23.12.11
+[cli][debug]  pycryptodome: 3.20.0
+[cli][debug]  PySocks: 1.7.1
+[cli][debug]  requests: 2.31.0
+[cli][debug]  trio: 0.24.0
+[cli][debug]  trio-websocket: 0.11.1
+[cli][debug]  typing-extensions: 4.9.0
+[cli][debug]  urllib3: 2.2.1
+[cli][debug]  websocket-client: 1.7.0
+[cli][debug] Arguments:
+[cli][debug]  url=https://www.twitch.tv/twitchmedia21
+[cli][debug]  stream=['best']
+[cli][debug]  --loglevel=debug
+[cli][debug]  --logfile=log.txt
+[cli][debug]  --output=/dev/null
+[plugins.twitch][info] This log is from the overridden plugin!
+[cli][info] Found matching plugin twitch for URL https://www.twitch.tv/twitchmedia21
+[plugins.twitch][debug] Getting live HLS streams for twitchmedia21
+[plugins.twitch][debug] {'adblock': False, 'geoblock_reason': '', 'hide_ads': False, 'server_ads': True, 'show_ads': True}
+[utils.l10n][debug] Language code: en_US
+[cli][info] Available streams: audio_only, 160p (worst), 360p, 480p, 720p, 720p60, 1080p60 (best)
+[cli][info] Opening stream: 1080p60 (hls)
+[cli][info] Writing output to
+/dev/null
+[cli][debug] Checking file output
+[stream.hls][debug] Reloading playlist
+[cli][debug] Pre-buffering 8192 bytes
+[stream.hls][debug] First Sequence: 0; Last Sequence: 3
+[stream.hls][debug] Start offset: 0; Duration: None; Start Sequence: 1; End Sequence: None
+[stream.hls][debug] Adding segment 1 to queue
+[stream.hls][debug] Adding segment 2 to queue
+[stream.hls][debug] Adding segment 3 to queue
+[stream.hls][debug] Writing segment 1 to output
+[stream.hls][debug] Segment 1 complete
+[cli][debug] Writing stream to output
+[stream.hls][debug] Writing segment 2 to output
+[stream.hls][debug] Segment 2 complete
+[stream.hls][debug] Writing segment 3 to output
+[stream.hls][debug] Segment 3 complete
+[stream.hls][debug] Reloading playlist
+[stream.hls][debug] Adding segment 4 to queue
+[stream.hls][debug] Adding segment 5 to queue
+[stream.hls][debug] Adding segment 6 to queue
+[stream.hls][debug] Writing segment 4 to output
+[stream.hls][debug] Segment 4 complete
+[stream.hls][debug] Writing segment 5 to output
+[stream.hls][debug] Segment 5 complete
+[stream.hls][debug] Writing segment 6 to output
+[stream.hls][debug] Segment 6 complete
+[stream.segmented][debug] Closing worker thread
+[stream.segmented][debug] Closing writer thread
+[stream.segmented][debug] Closing writer thread
+[cli][info] Stream ended
+Interrupted! Exiting...
+[cli][info] Closing currently open stream...
+```
+
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

@@ -1,0 +1,83 @@
+diff --git a/src/briefcase/commands/convert.py b/src/briefcase/commands/convert.py
+index 5d408a8a..a8754732 100644
+--- a/src/briefcase/commands/convert.py
++++ b/src/briefcase/commands/convert.py
+@@ -593,6 +593,27 @@ class ConvertCommand(NewCommand):
+             "license": project_license,
+         }
+ 
++    def input_console_app(self, override_value: str | None) -> bool:
++        """Ask if the existing app is a console app.
++
++        Console apps write output directly to stdout/stderr and require
++        ``console_app = true`` in the Briefcase configuration.
++
++        :returns: True if the app is a console app; False otherwise.
++        """
++        selection = self.select_option(
++            intro=(
++                "Is the existing application a console app?\n\n"
++                "Console apps write output directly to the terminal (stdout/stderr) and "
++                "require 'console_app = true' in pyproject.toml."
++            ),
++            variable="Console app",
++            default="No",
++            options=["No", "Yes"],
++            override_value=override_value,
++        )
++        return selection == "Yes"
++
+     def build_gui_context(
+         self,
+         context: dict[str, str],
+@@ -603,7 +624,24 @@ class ConvertCommand(NewCommand):
+         # already is set up for a GUI-framework, then those dependencies should already be listed.
+         # To prevent the same dependency being listed twice (once in the PEP621-section and once in the
+         # briefcase-section), possibly with different versions, we set the GUI-framework to None here.
+-        return {"gui_framework": "None"}
++        gui_context = {"gui_framework": "None"}
++
++        # Ask whether the existing app is a console app; if so, add the flag
++        # to the cookiecutter context so pyproject.toml is configured appropriately.
++        try:
++            is_console = self.input_console_app(
++                override_value=project_overrides.pop("console_app", None)
++            )
++        except Exception:
++            # If prompting fails for any reason, default to GUI app behavior
++            is_console = False
++
++        if is_console:
++            gui_context["pyproject_table_briefcase_app_extra_content"] = (
++                "console_app = true\n"
++            )
++
++        return gui_context
+ 
+     def merge_or_copy_pyproject(self, briefcase_config_file: Path) -> None:
+         """Merge pyproject.toml file made by the cookiecutter with the one in the
+diff --git a/tests/commands/base/test_paths.py b/tests/commands/base/test_paths.py
+index 6d389bfd..06efab9b 100644
+--- a/tests/commands/base/test_paths.py
++++ b/tests/commands/base/test_paths.py
+@@ -34,12 +34,18 @@ def test_data_path_creation_failure(tmp_path, monkeypatch):
+     def raise_calledprpcesserror(*a, **kw):
+         raise subprocess.CalledProcessError(returncode=1, cmd=["mkdir", str(data_path)])
+ 
+-    # On Linux and macOS, use /etc/ to raise an OSError
+-    data_path = Path("/etc/mydatadir")
++    def raise_oserror(*a, **kw):
++        raise OSError("Simulated failure creating directory")
++
++    # Choose a path that does not exist to force directory creation
++    data_path = tmp_path / "should_fail"
+ 
+     # Patch run() since it's apparently quite difficult to find a
+     # location in Windows that is guaranteed to throw an error...
+     monkeypatch.setattr(subprocess, "run", raise_calledprpcesserror)
++    # Also patch os.makedirs to ensure a failure on non-Windows platforms,
++    # even when tests are run with elevated permissions.
++    monkeypatch.setattr(os, "makedirs", raise_oserror)
+ 
+     with pytest.raises(
+         BriefcaseCommandError,

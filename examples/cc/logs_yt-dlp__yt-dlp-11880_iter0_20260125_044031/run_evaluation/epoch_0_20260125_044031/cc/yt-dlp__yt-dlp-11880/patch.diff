@@ -1,0 +1,31 @@
+diff --git a/yt_dlp/YoutubeDL.py b/yt_dlp/YoutubeDL.py
+index 65b72e026..c3dfd2054 100644
+--- a/yt_dlp/YoutubeDL.py
++++ b/yt_dlp/YoutubeDL.py
+@@ -2110,13 +2110,19 @@ def _build_format_filter(self, filter_spec):
+             try:
+                 comparison_value = int(m.group('value'))
+             except ValueError:
+-                comparison_value = parse_filesize(m.group('value'))
+-                if comparison_value is None:
+-                    comparison_value = parse_filesize(m.group('value') + 'B')
+-                if comparison_value is None:
+-                    raise ValueError(
+-                        'Invalid value {!r} in format specification {!r}'.format(
+-                            m.group('value'), filter_spec))
++                # If the value is a pure decimal number (e.g. aspect_ratio=1.78, fps=59.94),
++                # compare using float instead of interpreting it as a filesize.
++                # This fixes incorrect filtering like aspect_ratio>1.7 being treated as 2 bytes.
++                if re.fullmatch(r'\d+(?:\.\d+)?', m.group('value')):
++                    comparison_value = float(m.group('value'))
++                else:
++                    comparison_value = parse_filesize(m.group('value'))
++                    if comparison_value is None:
++                        comparison_value = parse_filesize(m.group('value') + 'B')
++                    if comparison_value is None:
++                        raise ValueError(
++                            'Invalid value {!r} in format specification {!r}'.format(
++                                m.group('value'), filter_spec))
+             op = OPERATORS[m.group('op')]
+ 
+         if not m:

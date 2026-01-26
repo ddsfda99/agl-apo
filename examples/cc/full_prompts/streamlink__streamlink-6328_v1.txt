@@ -1,0 +1,104 @@
+You are an expert in coding agent prompt optimization and your goal is to fix a real bug in the repository without breaking the existing test suite. Read this entire prompt carefully and follow it precisely.
+
+Context of the bug
+- Task: stream.dash: incorrect BaseURL joining
+- Symptom: Segment URLs are generated with an extra “manifest.mpd/” path component when the MPD URL ends with “manifest.mpd” and has no query string. This causes 404s, as the segments are actually under the directory of the MPD, not under “manifest.mpd/”.
+- Example from the debug log:
+  - Manifest URL: https://s25617.cdn.ngenix.net/mdrm/CH_TNTHD/manifest.mpd
+  - Generated segment URL (incorrect): https://a356...-s25617.cdn.ngenix.net/mdrm/CH_TNTHD/manifest.mpd/video_.../audio-...m4s?p=...
+  - Correct behavior: The “manifest.mpd” file name should be removed so segments are under https://a356...-s25617.cdn.ngenix.net/mdrm/CH_TNTHD/...
+
+Important constraints and lessons from prior failure
+- Do NOT modify or relax existing tests unless explicitly required. Tests are the spec. The previous agent improperly changed expected assertions to match a speculative code change, which is not acceptable.
+- Make minimal, targeted changes. Avoid broad heuristics (e.g., “dot means file”) unless backed by spec and tests.
+- Before changing code, add a reproduction test that demonstrates the current bug. Confirm that it fails on the current codebase, then implement a fix that makes the new test pass while keeping all existing tests passing.
+- Respect current, tested BaseURL.join behavior. The code currently treats a base URL without trailing slash and without a query as a directory by appending a slash before urljoin. Existing tests assert this and must remain unchanged.
+
+High-level plan
+- The incorrect segment URL stems from using the MPD document location (which ends with “manifest.mpd”) as the BaseURL for joining relative segment paths, while forcing directory semantics. However, for most DASH manifests, relative segment paths should resolve relative to the directory of the MPD, not to a synthetic directory named after the MPD file.
+- Fix this by adjusting how the MPDParser derives the root/base URL from the MPD document location:
+  - When building the BaseURL from the MPD document location (if no explicit BaseURL elements override it), use the MPD’s directory (strip the filename) as the base, rather than the full document URL.
+  - Do not change BaseURL.join semantics. Keep it intact for cases where providers intentionally host segments under a “manifest.mpd/” directory.
+- Add a new test that uses the MPD parser to validate that the base URL derived from the MPD location is the parent directory, and that joining relative segment paths does not insert “manifest.mpd/” in the path.
+
+Step-by-step instructions
+
+1) Preparation
+- Run the full test suite to establish a baseline and ensure the environment is correct:
+  - pytest -q
+- Confirm all tests pass before making any changes.
+
+2) Reproduction test
+- Add a new test file: tests/stream/dash/test_mpd_location_baseurl.py
+- Purpose: Verify that when parsing an MPD with no BaseURL element and a document URL that ends with a filename (e.g., “manifest.mpd”), the root/base URL used for resolving relative paths is the directory of the MPD (i.e., strip the filename).
+- The test should:
+  - Create a minimal MPD string with one Period, one AdaptationSet and one Representation that uses SegmentTemplate with “initialization” and “media” attributes pointing to nested relative paths like “video_1920x1080_avc1/init.mp4” and “video_1920x1080_avc1/video-v1-$Number$.m4s”.
+  - Parse it using the MPD parser, setting mpd_url to “https://example.com/mdrm/CH_TNTHD/manifest.mpd” (no query).
+  - Assert that the computed base URL for the MPD root (or for the Representation/AdaptationSet if this is how the parser stores it) resolves to “https://example.com/mdrm/CH_TNTHD/” and NOT contain “manifest.mpd/”.
+  - Additionally, join one of the relative paths via the parser’s BaseURL facilities to assert that the final URL becomes “https://example.com/mdrm/CH_TNTHD/video_1920x1080_avc1/video-v1-1.m4s” (for a chosen segment number), not “.../manifest.mpd/...”.
+
+Notes for writing the test:
+- Do not rely on network I/O. Embed the MPD XML as a string in the test.
+- Import and use the same classes used by existing DASH manifest tests: streamlink.stream.dash.manifest.MPDParser and BaseURL or other utilities that are already used in tests.
+- If the parser exposes base URLs on nodes (mpd.baseurls or similar), assert those. If not, retrieve the Representation’s BaseURL via whatever public API is used in existing tests, then perform the join operation with the relative resource path.
+- Keep the test self-contained and minimal.
+
+3) Locate the relevant code
+- Search for how the MPDParser (in src/streamlink/stream/dash/manifest.py) sets the base URL from the MPD’s document location:
+  - grep -n "class MPDParser" -R src/streamlink/stream/dash
+  - grep -n "BaseURL" -R src/streamlink/stream/dash
+  - grep -n "mpd_url" -R src/streamlink/stream/dash
+- Identify where the parser initializes the root/base URL when an MPD is parsed (likely in MPDParser.parse or similar).
+- Do not modify BaseURL.join. We will adjust only how the parser derives the base from the MPD location.
+
+4) Implement the fix
+- In the code where the MPD document location is turned into a BaseURL, change it to use the directory of the MPD:
+  - Parse mpd_url using urllib.parse.urlparse.
+  - If parsed.path exists and does not end with “/”, compute the directory by removing the last path segment and ensure it ends with a “/”.
+  - Reconstruct the URL using urllib.parse.urlunparse with the directory path. Discard query and fragment from the MPD document location for the derived base directory (segments won’t be under a query-bearing base).
+- Apply this only to the MPD document location derivation; do not change the behavior of BaseURL elements declared within the MPD. If there are explicit BaseURL elements, the existing logic should continue to apply them as before.
+
+5) Validate
+- Run only the new test first to see the failure prior to code changes:
+  - pytest -q tests/stream/dash/test_mpd_location_baseurl.py
+- Implement the fix, then re-run the new test to confirm it passes.
+- Run the full test suite to ensure no regressions:
+  - pytest -q
+- If any existing tests fail, carefully inspect and adjust the implementation to preserve their expectations. Do not change existing tests.
+
+6) Cleanup
+- If you created any temporary files/scripts, remove them.
+- Do not commit your changes. Leave the workspace with staged and working modifications only.
+
+Testing details: Suggested test content
+- tests/stream/dash/test_mpd_location_baseurl.py
+
+Example MPD string to embed:
+- Use a minimal static MPD:
+  - MPD header with xmlns="urn:mpeg:dash:schema:mpd:2011"
+  - One Period
+  - One AdaptationSet with mimeType="video/mp4"
+  - One Representation with SegmentTemplate:
+    - initialization="video_1920x1080_avc1/init.mp4"
+    - media="video_1920x1080_avc1/video-v1-$Number$.m4s"
+    - startNumber="1"
+    - duration="1"
+
+Assertions to add:
+- After parsing with mpd_url="https://example.com/mdrm/CH_TNTHD/manifest.mpd", the derived base URL for resolving relative paths equals "https://example.com/mdrm/CH_TNTHD/".
+- Joining "video_1920x1080_avc1/video-v1-1.m4s" on that base yields "https://example.com/mdrm/CH_TNTHD/video_1920x1080_avc1/video-v1-1.m4s".
+- Do not assert behavior of BaseURL.join input “https://example.com/.../manifest.mpd” directly; that behavior is covered by existing tests and must remain unchanged.
+
+Important reminders
+- Do not alter tests other than adding the new reproduction test file.
+- Do not change BaseURL.join semantics. Fix only the derivation of the base URL from the MPD document location.
+- Keep changes minimal and well-justified.
+- Ensure all tests pass after your fix, including the newly added one.
+
+Deliverables
+- A new test file at tests/stream/dash/test_mpd_location_baseurl.py that fails before your fix and passes after.
+- A minimal code change in src/streamlink/stream/dash/manifest.py (or the appropriate file where the MPD document location is turned into a BaseURL) to strip the manifest filename from the MPD URL when deriving the base for resolving relative segment paths.
+- No modifications to existing tests.
+- All tests passing in the final run.
+
+Now proceed with these steps to implement the fix.

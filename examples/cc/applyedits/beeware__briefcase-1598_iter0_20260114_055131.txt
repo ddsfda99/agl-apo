@@ -1,0 +1,74 @@
+You are working in /testbed. Your goal is to fix the OpenSUSE RPM packaging bug by adding focused tests, making a surgical code change, validating it with targeted tests, and then removing any ad-hoc tests you created.
+
+Bug summary to keep in mind
+- Packaging an RPM for OpenSUSE fails when Briefcase tries to move the package into dist because it expects a distro-tagged filename (e.g., .el20240109) that OpenSUSE does not include.
+- The expected OpenSUSE RPM filename is name-version-revision.abi.rpm (no distro tag), e.g., helloworld-0.0.1-1.x86_64.rpm.
+
+Where to focus in the code
+- The RPM filename is constructed by LinuxSystemMostlyPassiveMixin.distribution_filename(app) in src/briefcase/platforms/linux/system.py.
+- The packaging code that moves the file constructs the source path using rpmbuild_path/RPMS/<abi>/<distribution_filename(app)>; so a wrong distribution_filename causes the move to fail.
+- rpm_tag(app) influences the distro tag segment, but many tests and fixtures mock or rely on it. Avoid changing rpm_tag unless absolutely required.
+
+Critical testing guidance based on previous failures
+- Do NOT reuse any fixture that mocks rpm_tag (e.g., the package_command fixture in tests/platforms/linux/system/test_package__rpm.py). That fixture sets command.rpm_tag = "fcXX" for all tests using it, which will invalidate an OpenSUSE test that needs “no tag.”
+- Write a minimal, isolated unit test for distribution_filename(app) for OpenSUSE that does not import or use fixtures that mock rpm_tag.
+- Prefer testing distribution_filename directly rather than adding a full packaging test that depends on rpmbuild or move behavior.
+- While iterating, only run the linux/system RPM-related tests. Running the full suite early can surface unrelated environmental failures (e.g., a test that fails when run as root). You can do a full run after your focused tests pass.
+
+Step-by-step plan
+1) Explore the source to locate the bug
+- Open src/briefcase/platforms/linux/system.py.
+- Identify LinuxSystemMostlyPassiveMixin.distribution_filename(app).
+- Find where rpm_tag(app) is used to construct RPM filenames.
+- Also review the RPM packaging method (_package_rpm or equivalent) in the same file to confirm the move uses distribution_filename(app) to build the expected file path.
+- Determine how the code indicates the target vendor/distro. There is likely a vendor_base or similar property, or access to the target like opensuse/tumbleweed. If vendor_base or an equivalent indicator for SUSE exists, use that; otherwise, handle the omission in distribution_filename based on a reliable condition that denotes SUSE targets.
+
+2) Add focused tests to reproduce the bug at the unit level
+- Create a new test file dedicated to OpenSUSE filename construction, for example:
+  - tests/platforms/linux/system/test_distribution_filename_opensuse.py
+- In that file:
+  - Instantiate a command class that provides distribution_filename, e.g., LinuxSystemPackageCommand or LinuxSystemCreateCommand from briefcase.platforms.linux.system.
+  - Configure the command and a minimal app object so that:
+    - The packaging format is RPM.
+    - The target represents OpenSUSE (e.g., opensuse/tumbleweed). Use whatever attribute or configuration the existing code uses to select platform vendor; search existing tests for how they set Fedora/RHEL targets and mirror that pattern for OpenSUSE.
+    - The RPM ABI resolves to x86_64 (mock or set appropriately based on how other tests get the RPM ABI; many tests use a property or helper that gives the ABI string).
+  - Assert that distribution_filename(app) returns a filename WITHOUT any distro tag:
+    - Expected: "<formal_name>-<version>-<revision>.x86_64.rpm"
+    - Example: "first-app-0.0.1-1.x86_64.rpm"
+  - Ensure this test does not import or use any fixture that mocks rpm_tag. If needed, explicitly set command.rpm_tag = lambda app: None for this test only.
+- Do not modify or duplicate existing Fedora/RHEL tests; they should remain as-is and continue to expect distro-tagged RPM filenames.
+
+3) Implement the fix with minimal impact
+- In LinuxSystemMostlyPassiveMixin.distribution_filename(app):
+  - Build the base RPM name using the existing logic for name/version/revision.
+  - Detect OpenSUSE (preferably via vendor_base or the platform vendor/target settings). When the vendor is SUSE/OpenSUSE:
+    - Omit the distro tag entirely; produce "<base>.<abi>.rpm".
+  - For all other vendors (e.g., RHEL/EL, Fedora), preserve the existing behavior using rpm_tag(app) between base and abi; produce "<base>.<rpm_tag>.<abi>.rpm".
+- Do not change rpm_tag(app) semantics globally. Many tests rely on or mock this method; altering it can have wide repercussions. Handle OpenSUSE’s “no tag” behavior inside distribution_filename based on vendor detection, not by changing rpm_tag.
+
+4) Validate with targeted tests first
+- Run only the linux/system tests initially:
+  - pytest -q tests/platforms/linux/system -k rpm
+  - Also run any tests that assert distribution_path for RPM files:
+    - pytest -q tests/platforms/linux/system/test_mixin__properties.py -k distribution_path
+- Confirm:
+  - Your new OpenSUSE test passes.
+  - Existing Fedora/RHEL RPM tests still pass (their filenames should still include the distro tag).
+- If you see a failure like tests/paths/test_paths.py::test_data_path_creation_failure when running as root, understand it is unrelated to this change and caused by the environment. Do not try to fix that here. Focus on linux/system RPM-related tests.
+
+5) Full test sweep and cleanup
+- After the linux/system tests pass, run the full suite to ensure you didn’t introduce regressions:
+  - pytest -q
+- Expect that some unrelated environmental tests may fail in root environments (e.g., creating directories under /etc). These are not part of this bug fix.
+- As required by the task, remove any ad-hoc tests you added (e.g., delete tests/platforms/linux/system/test_distribution_filename_opensuse.py) before finishing. Do not commit test files you created for local validation.
+
+Concrete acceptance criteria
+- For OpenSUSE targets (e.g., opensuse/tumbleweed), distribution_filename(app) yields name-version-revision.abi.rpm with no distro tag.
+- For Fedora and RHEL/EL targets, distribution_filename(app) remains unchanged and still includes the distro tag between revision and abi, matching existing test expectations.
+- The packaging move step that uses distribution_filename(app) can now find the generated RPM for OpenSUSE and complete successfully.
+
+Notes and cautions
+- Do not modify shared fixtures or rpm_tag behavior globally.
+- Do not reuse the package_command fixture from tests/platforms/linux/system/test_package__rpm.py for your SUSE test, as it mocks rpm_tag to "fcXX".
+- Keep the change narrowly scoped to distribution_filename(app) to minimize side effects.
+- Do not commit any edits; we will commit later. After validating, delete the ad-hoc test file you added.

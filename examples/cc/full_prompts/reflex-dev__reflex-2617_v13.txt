@@ -1,0 +1,114 @@
+You are given a code repository in the current directory.
+The task description is:
+Reflex says that a variable of type int is of type str and throws a 'TypeError: Unsupported Operand type' error.
+**Describe the bug**
+When I do a comparison of a variable of type int with another int I get the following error:
+`TypeError: Unsupported Operand type(s) for <=: `word.at(2)` of type str and `state__state.clip_end_time` of type int`
+
+**To Reproduce**
+Steps to reproduce the behavior:
+Run this sample code that demonstrates the bug:
+
+```
+
+from rxconfig import config
+from typing import List, Tuple
+import reflex as rx
+
+class State(rx.State):
+    '''The app state.'''
+
+    first_click: bool = True
+    clip_start_time = -1
+    clip_end_time = -1
+
+    # Annotate sentences with a type that Reflex can understand
+    sentence1: List[Tuple[str, int, int]] = [("Amicitia ", 0, 500), ("vera ", 500, 800), ("est ", 800, 1000), ("pretiosior ", 1000, 1500), ("quam ", 1500, 1700), ("aurum", 1700, 2000)]
+    sentence2: List[Tuple[str, int, int]] = [("Scientia ", 2100, 2400), ("potentia ", 2400, 2700), ("est", 2700, 2900)]
+    sentence3: List[Tuple[str, int, int]] = [("Per ", 3000, 3200), ("aspera ", 3200, 3500), ("ad ", 3500, 3600), ("astra", 3600, 3900)]
+    sentences: List[List[Tuple[str, int, int]]] = [sentence1 , sentence2, sentence3]
+
+    def clip_times(self, start_time, end_time):
+         
+        # This is the first click
+        if self.first_click:
+            self.clip_start_time = start_time
+            self.clip_end_time = end_time
+            self.first_click = False
+
+        # This is the second click
+        else:
+            self.clip_start_time = min(self.clip_start_time, start_time)
+            self.clip_end_time = max(self.clip_end_time, end_time)
+            self.first_click = True
+
+def display_sentence(word_tuple):
+    return rx.box(
+        rx.foreach(
+            word_tuple,
+            lambda word: rx.fragment(
+                rx.span(
+                    word[0],
+                    # START OF BUGGY CODE
+                    background_color=rx.cond(
+                        State.clip_start_time != -1,
+                        rx.cond(
+                            # This is the bug
+                            # TypeError: Unsupported Operand type(s) for <=: `word.at(2)` of type str and `state__state.clip_end_time` of type int
+                            word[2] <= State.clip_end_time,
+                            rx.cond(
+                                word[1] >= State.clip_start_time,
+                                "yellow",
+                                "white"
+                            ),
+                            "white",
+                        ),
+                        "white",
+                    ),
+                    # END OF BUGGY CODE
+                    on_click=State.clip_times(word[1], word[2]),
+                    cursor="pointer",
+                    _hover={"background_color": "yellow"},
+                ),
+            ),
+        ),
+        width="100%",
+    )
+
+def index() -> rx.Component:
+    return rx.fragment(
+        rx.vstack(
+            rx.foreach(
+                State.sentences,
+                lambda sentence: display_sentence(
+                    sentence,
+                ),
+            ),
+            width="100%",
+            spacing="4",
+        ),
+    )
+
+# Create app instance and add index page.
+app = rx.App()
+app.add_page(index)
+
+```
+
+**Expected behavior**
+The comparison should be done without throwing an error error.
+
+**Specifics (please complete the following information):**
+ - Python Version: 3.11 & 3.12
+ - Reflex Version: 0.3.10
+ - OS: Ubuntu 23.10
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

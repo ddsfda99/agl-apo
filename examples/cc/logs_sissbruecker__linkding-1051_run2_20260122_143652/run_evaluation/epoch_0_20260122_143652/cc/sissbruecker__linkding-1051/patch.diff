@@ -1,0 +1,91 @@
+diff --git a/bookmarks/templatetags/shared.py b/bookmarks/templatetags/shared.py
+index 5da3c1c..22e7ab4 100644
+--- a/bookmarks/templatetags/shared.py
++++ b/bookmarks/templatetags/shared.py
+@@ -141,6 +141,24 @@ def render_markdown(context, markdown_text):
+         renderer = context["markdown_renderer"]
+ 
+     as_html = renderer.convert(markdown_text)
+-    sanitized_html = bleach.clean(as_html, markdown_tags, markdown_attrs)
++
++    # Linkify plain URLs in the rendered HTML while sanitizing
++    try:
++        from functools import partial
++        from bleach.linkifier import LinkifyFilter
++        filters = [partial(LinkifyFilter, callbacks=[])]
++    except Exception:
++        # If linkify is not available, fall back to standard cleaning
++        filters = None
++
++    if filters is not None:
++        cleaner = bleach.Cleaner(
++            tags=markdown_tags,
++            attributes=markdown_attrs,
++            filters=filters,
++        )
++        sanitized_html = cleaner.clean(as_html)
++    else:
++        sanitized_html = bleach.clean(as_html, markdown_tags, markdown_attrs)
+ 
+     return mark_safe(sanitized_html)
+diff --git a/bookmarks/tests/test_bookmark_details_modal.py b/bookmarks/tests/test_bookmark_details_modal.py
+index c99c58d..9f0a776 100644
+--- a/bookmarks/tests/test_bookmark_details_modal.py
++++ b/bookmarks/tests/test_bookmark_details_modal.py
+@@ -485,6 +485,15 @@ class BookmarkDetailsModalTestCase(TestCase, BookmarkFactoryMixin, HtmlTestMixin
+         section = self.get_section_content(soup, "Notes")
+         self.assertEqual(section.decode_contents(), "<p>Test notes</p>")
+ 
++    def test_notes_linkify_plain_urls(self):
++        bookmark = self.setup_bookmark(notes="https://github.com")
++        soup = self.get_index_details_modal(bookmark)
++        section = self.get_section_content(soup, "Notes")
++        link = section.select_one("a")
++        self.assertIsNotNone(link)
++        self.assertEqual(link.get("href"), "https://github.com")
++        self.assertEqual(link.text.strip(), "https://github.com")
++
+     def test_edit_link(self):
+         bookmark = self.setup_bookmark()
+ 
+diff --git a/bookmarks/tests/test_bookmarks_list_template.py b/bookmarks/tests/test_bookmarks_list_template.py
+index 46ed290..938c2f1 100644
+--- a/bookmarks/tests/test_bookmarks_list_template.py
++++ b/bookmarks/tests/test_bookmarks_list_template.py
+@@ -897,6 +897,17 @@ class BookmarkListTemplateTest(TestCase, BookmarkFactoryMixin, HtmlTestMixin):
+         note_html = "<b>bold text</b>"
+         self.assertIn(note_html, html, 1)
+ 
++    def test_note_linkifies_plain_urls(self):
++        self.setup_bookmark(notes="https://github.com")
++        html = self.render_template()
++        soup = self.make_soup(html)
++        notes_container = soup.select_one(".notes .markdown")
++        self.assertIsNotNone(notes_container)
++        link = notes_container.select_one("a")
++        self.assertIsNotNone(link)
++        self.assertEqual(link.get("href"), "https://github.com")
++        self.assertEqual(link.text.strip(), "https://github.com")
++
+     def test_notes_are_hidden_initially_by_default(self):
+         self.setup_bookmark(notes="Test note")
+         html = self.render_template()
+diff --git a/package-lock.json b/package-lock.json
+index ea5f9ee..fdb80ea 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "linkding",
+-  "version": "1.36.0",
++  "version": "1.39.1",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "linkding",
+-      "version": "1.36.0",
++      "version": "1.39.1",
+       "license": "MIT",
+       "dependencies": {
+         "@hotwired/turbo": "^8.0.6",

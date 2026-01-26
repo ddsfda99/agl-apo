@@ -1,0 +1,120 @@
+You are working in a cfn-lint repository. Your goal is to fix a false-positive E1011 finding for Fn::FindInMap when the map key is dynamically created via Fn::Sub using pseudo parameters like AWS::AccountId, and to make the test suite pass by also addressing unexpected E2533 findings that tests expect to be excluded.
+
+Follow these steps precisely and do not commit your edits.
+
+High-level objectives
+- Add a focused reproduction test for the reported FindInMap + Sub + AWS::AccountId case and make it pass.
+- Do not change core JSONSchema resolver behavior; fix the FindInMap rule/validation layer instead.
+- Investigate and fix E2533 rule behavior so that test overrides/exclusions suppress it as intended.
+- Make sure unit and integration tests pass with expected exit codes.
+
+Step 1: Triage and set up
+- Run the unit and integration tests to see the current failures and counts:
+  - pytest -q
+  - If there are many failures, run these targeted subsets first:
+    - pytest -q test/unit/rules/functions/test_find_in_map.py
+    - pytest -q test/unit/module/jsonschema/test_resolvers_cfn.py
+    - pytest -q test/unit/module/override/test_exclude.py
+    - pytest -q test/unit/module/test_rules_collections.py
+    - pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates -q
+    - pytest -q test/integration/test_good_templates.py::TestQuickStartTemplates::test_module_integration -q
+- Collect failing rule IDs and counts (especially E1011 and E2533). Verify whether E2533 is the primary cause of exit code mismatches in integration tests (e.g., 14 vs 12 on quickstart/openshift.yaml).
+
+Step 2: Add a reproduction test for this issue
+- Create a new unit test that uses the reproduction template from the issue and asserts that E1011 is not raised when the third FindInMap parameter is constructed via Fn::Sub with AWS::AccountId. Good locations:
+  - test/unit/rules/functions/test_find_in_map.py
+  - or, if the repository favors JSON schema resolver tests, in test/unit/module/jsonschema/test_resolvers_cfn.py
+- Use this YAML snippet as the test template:
+  %YAML 1.2
+  ---
+  AWSTemplateFormatVersion: 2010-09-09
+  Mappings:
+    BucketMap:
+      BucketGroup:
+        234567890123AccountBucketName: Bucket
+  Transform: AWS::LanguageExtensions
+  Resources:
+    Resource:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !FindInMap
+          - BucketMap
+          - BucketGroup
+          - !Sub ${AWS::AccountId}AccountBucketName
+- The assertion should expect zero E1011 findings for this case, even if the configured account ID does not match the mapping key (this is the reported bug).
+- Also add a negative control in the same test file showing that when the third parameter is a plain string that does not exist in the mapping keys, E1011 is raised (to ensure you don’t disable key validation entirely).
+
+Step 3: Locate the relevant code
+- Search for FindInMap rule and validation logic:
+  - grep -R "FindInMap" -n src/cfnlint
+  - Likely file: src/cfnlint/rules/functions/FindInMap.py
+  - Also inspect related tests: test/unit/rules/functions/test_find_in_map.py
+  - Examine JSONSchema resolver hooks but do not change them: src/cfnlint/jsonschema/_resolvers_cfn.py
+- Search for E1011 specifics:
+  - grep -R "E1011" -n
+- Search for AWS::LanguageExtensions handling around FindInMap:
+  - grep -R "LanguageExtensions" -n src/cfnlint
+
+Important: If you see any prior modifications to src/cfnlint/jsonschema/_resolvers_cfn.py that bypass key validation for Fn::Sub or pseudo parameters, revert those changes as part of your local edits. The fix should live in the FindInMap rule layer, not the core resolver.
+
+Step 4: Implement the FindInMap fix in the rule layer
+- In src/cfnlint/rules/functions/FindInMap.py (or equivalent), adjust the validation logic that currently enforces that the third argument (the map key) must be a member of the mapping’s keys.
+- Modify it so that:
+  - If the third argument is a literal/static string, keep the existing strict validation (raise E1011 when the key is not present).
+  - If the third argument is dynamic and cannot be deterministically resolved at static-analysis time, specifically when:
+    - It is an Fn::Sub whose string contains ${AWS::AccountId} or ${AWS::Region}, or
+    - It otherwise contains unresolved intrinsics that prevent computing a single concrete key,
+    then do not emit E1011. Treat this as "unknown at lint time" and allow it to pass without an error.
+- Be precise: do not broadly skip validation for all Fn::Sub; only skip when it references pseudo parameters or intrinsic expressions that make the key non-deterministic. You can detect this by:
+  - String-form Fn::Sub: look for the placeholders ${AWS::AccountId} or ${AWS::Region}.
+  - List-form Fn::Sub: check the variable mappings and whether they resolve to pseudo parameters or other unresolved intrinsics.
+- Do not rely on region/accountId configured features (e.g., I3042) to construct a specific key for this E1011 check. That informational rule can remain independent; E1011 should not fail on dynamic Sub-based keys with pseudo params.
+- Ensure any existing logic that respects AWS::LanguageExtensions default value semantics remains intact; however, the reproduction template does not use DefaultValue, so the fix must not require adding a default value to avoid E1011.
+
+Step 5: Address E2533 test failures and exclusion behavior
+- Search for E2533:
+  - grep -R "E2533" -n src/cfnlint tests
+- Inspect the rule implementation to see how it determines deprecated Lambda runtimes and whether it uses provider schema data and/or the current date.
+- Inspect how the tests apply overrides/exclusions:
+  - grep -R "PROVIDER_SCHEMA_MANAGER.patch" -n test
+  - Look at test/unit/module/override/test_exclude.py and test/unit/module/test_rules_collections.py to see how override_spec/exclude.json is applied.
+- Implement the fix so that E2533 honors provider overrides/exclusions used in tests. Follow patterns used by other rules that are properly excluded by override_spec/exclude.json. For example:
+  - If the rule checks data from a provider schema manager, confirm it queries exclusions before reporting. Add a check like "if this rule or this finding is excluded by the provider schema manager, return without adding a match".
+  - If the rule calculates deprecation based on the current date or hard-coded timelines, ensure those timelines are read from the provider schema manager or a data source that the tests can patch with PROVIDER_SCHEMA_MANAGER.patch(...). The goal is for the tests that patch override_spec/exclude.json to suppress E2533.
+- Do not change the rule ID, message codes, or global behavior beyond honoring exclusions; keep the rule functioning the same in normal runs.
+
+Step 6: Run focused tests and iterate
+- Re-run the new and existing FindInMap unit tests:
+  - pytest -q test/unit/rules/functions/test_find_in_map.py
+  - pytest -q test/unit/module/jsonschema/test_resolvers_cfn.py
+- Re-run the E2533-related unit tests:
+  - pytest -q test/unit/module/override/test_exclude.py
+  - pytest -q test/unit/module/test_rules_collections.py
+- Run the relevant integration tests and verify exit codes match expectations:
+  - pytest -q test/integration/test_good_templates.py::TestQuickStartTemplates::test_module_integration
+  - pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+- If integration exit codes are still off, print the findings to see which rule(s) are producing the extra messages. Typical quick diagnostic:
+  - Use cfn-lint directly on the failing quickstart file with the same flags from the test harness if available, or run pytest with -s to see output, then reduce additional messages by addressing the rules producing them.
+- Also validate the original CLI example no longer produces E1011 for the reproduction:
+  - cfn-lint --format pretty --regions us-east-2 --include-checks I --configure-rule E3012:strict=True I3042:region=True I3042:accountId=True -- template.yaml
+  - Confirm there is no E1011 for the sample template.
+
+Step 7: Safeguards and cleanup
+- Ensure you did not change src/cfnlint/jsonschema/_resolvers_cfn.py or other core resolver plumbing. Keep all changes in the rule(s) and provider schema handling.
+- Do not weaken FindInMap validation globally; only skip E1011 in the clearly dynamic key cases described above.
+- Remove any temporary files you added during debugging. Keep only the new unit test committed to your working tree (but do not actually commit as per instructions).
+
+Acceptance criteria
+- The new reproduction unit test passes and demonstrates that E1011 is not raised for Fn::Sub using AWS::AccountId in the FindInMap key position.
+- Existing FindInMap unit tests still pass, including those that expect E1011 for static non-existent keys.
+- test/unit/module/override/test_exclude.py and test/unit/module/test_rules_collections.py pass without unexpected E2533 findings.
+- Integration tests expecting specific exit codes (including the quickstart templates) pass; any prior 12 vs 14 mismatches are resolved.
+- No changes made to the core JSON schema resolver; FindInMap behavior is adjusted in the rule layer with transform-aware, intrinsic-aware logic.
+
+Hints
+- Look at how other rules consult provider overrides/exclusions. Mirror that pattern in E2533 so tests that patch PROVIDER_SCHEMA_MANAGER can properly suppress it.
+- In FindInMap, use predicate helpers to detect whether a value is:
+  - a plain string,
+  - an intrinsic function dict (Fn::Sub),
+  - a dynamic/unresolvable value that should short-circuit strict key membership checks.
+- Keep severities, rule IDs, and messages unchanged. Only reduce false positives.

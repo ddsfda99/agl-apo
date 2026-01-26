@@ -1,0 +1,62 @@
+Here’s a focused review of why the coding agent failed on this task and what needs to be improved, based on the repository and the bug description.
+
+Summary of the bug/feature request
+- Scenario: SQL is “insert into target select user_id, user_name from source”. The physical target table has columns (id, name).
+- Current behavior: The column lineage ends up with target columns named user_id, user_name (i.e., it treats the select output column names as the target-side column names).
+- Desired behavior: If the target column list is not specified in the SQL, infer target columns from MetaDataProvider (i.e., the target table’s schema) and use those names as target columns. That is, treat the statement as if it were “insert into target(id, name) select user_id, user_name from source”.
+
+Where the code currently stands
+- Column lineage wiring happens primarily in SourceHandlerMixin.end_of_query_cleanup (sqllineage/core/parser/__init__.py) for the sqlfluff path. It:
+  - Iterates over the selected columns (tgt_col_from_query) and sets parent to the target table.
+  - Computes tgt_col_resolved = tgt_col_from_query by default.
+  - If len(holder.write_columns) == len(col_grp), it substitutes tgt_col_resolved with write_columns[idx] (these write_columns are set when DML explicitly lists target columns, or via DDL definitions; see holders.add_write_column usage).
+  - Then it resolves source columns via to_source_columns and adds lineage edges.
+
+- For wildcard target columns expansion, there is logic in SubQueryLineageHolder.expand_wildcard using MetaDataProvider to expand '*' into the source table’s real columns. However, there is no analogous use of MetaDataProvider to determine the target table column names.
+
+- In the sqlparse analyzer path, the above SourceHandlerMixin is not used. The sqlparse analyzer uses token handlers and at the end calls next_handlers’ end_of_query_cleanup (which is a different hook). The mapping of columns to target in the select case is not explicitly handled there besides wildcard expansion and special cases like MERGE/UPDATE/INSERT VALUES. So sqlparse may also be affected by the same deficiency.
+
+- MetaDataProvider is passed through the analyzers and extractors; BaseExtractor in sqlfluff stores self.metadata_provider and the mixin already accesses self.metadata_provider in another feature (lateral column alias reference) via getattr(self, "metadata_provider", None). So the mixin can conditionally access a metadata provider if present.
+
+Root cause
+- There is no logic to map target column names from the target table’s schema (via MetaDataProvider) when the INSERT INTO does not specify a target column list. Therefore, the code falls back to using the names from the SELECT list as the target column names, which causes the lineage to show target-side columns as user_id, user_name instead of id, name.
+
+What needs to change (conceptually)
+- In SourceHandlerMixin.end_of_query_cleanup, when mapping the SELECTed columns to target columns, extend the existing conditional:
+  - First, use holder.write_columns if provided (existing behavior).
+  - Otherwise, if a metadata provider is available and the write target is a concrete Table, fetch the target table’s columns via metadata_provider.get_table_columns(target_table). If the number of columns matches the number of columns in the SELECT clause (len(col_grp)), then substitute tgt_col_resolved with the corresponding target table column at the same index.
+- This mirrors how an explicit “INSERT INTO target(col1, col2) SELECT ...” behaves, but uses metadata_provider to provide columns when the column list isn’t in the SQL.
+
+Key implementation details and pitfalls
+- SourceHandlerMixin already accesses metadata_provider for the lateral column alias feature by using getattr(self, "metadata_provider", None). Do the same for target-column inference.
+- Only map when lengths match, to avoid incorrect mappings for mismatched queries; fallback to existing behavior otherwise.
+- Ensure the target is a Table (not a SubQuery) before attempting metadata lookup.
+- The selected columns order (col_grp) is already preserved by the mixin; make index-based mapping consistent.
+
+Why the agent failed
+- The agent explored the code and saw where metadata is used (wildcard expansion, unresolved source column resolution) but missed that the target side can be inferred too.
+- It didn’t add a test to reproduce the bug: a simple INSERT SELECT without target column list and a target schema provided by MetaDataProvider to assert that target columns are mapped using metadata.
+- It didn’t implement the missing logic in SourceHandlerMixin.end_of_query_cleanup.
+- It didn’t consider the sqlparse path; however, tests in this repo often run both sqlfluff and sqlparse, and the sqlfluff path already uses the mixin, so fixing the mixin likely addresses at least the sqlfluff tests. If there are sqlparse tests for this case, parallel logic would be needed in sqlparse as well, but from the existing test structure, the sqlfluff path is the main one for metadata-related tests.
+
+Suggested testing approach
+- Create a MetaDataProvider (tests provide helpers to generate DummyMetaDataProvider variants with predefined schemas: see tests/helpers.py: generate_metadata_providers).
+- Write a test under tests/sql/column/ that:
+  - Defines a target table “target” with columns (“id”, “name”), and a source table “source” with columns (“user_id”, “user_name”).
+  - SQL: “insert into target select user_id, user_name from source”
+  - Assert that the lineage contains edges: source.user_id -> target.id and source.user_name -> target.name (i.e., target side uses metadata columns).
+- Run tests; after implementing the mixin change, they should pass.
+
+Locations to change
+- sqllineage/core/parser/__init__.py in SourceHandlerMixin.end_of_query_cleanup:
+  - Right after the check for len(holder.write_columns) == len(col_grp), add a branch like:
+    - If no write_columns mapping was used, attempt to fetch target columns from metadata provider when available:
+      - metadata_provider = getattr(self, "metadata_provider", None)
+      - target_columns = metadata_provider.get_table_columns(tgt_tbl) when tgt_tbl is a Table and metadata_provider is truthy.
+      - If len(target_columns) == len(col_grp), set tgt_col_resolved = target_columns[idx].
+
+Additional considerations
+- Do not forget to remove any newly added test files before finalizing, per the task instructions. However, during development, they are necessary to validate the fix.
+- This change will not affect cases where the user already specified target columns (holder.add_write_column), as that path is prioritized and uses write_columns when the lengths match.
+
+In short, the failure is due to missing logic to derive target column names from MetaDataProvider during INSERT INTO … SELECT … without a target column list, and the fix is to add that fallback in SourceHandlerMixin.end_of_query_cleanup, plus tests to cover it.

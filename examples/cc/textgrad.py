@@ -1,8 +1,8 @@
 import argparse
 import asyncio
 import json
+import logging
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +11,13 @@ from typing import Any, Dict, Optional
 from openai import AsyncAzureOpenAI
 
 from utils.cloudgpt_aoai import get_openai_token_provider
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 BASE_DIR = Path(__file__).resolve().parent
@@ -64,31 +71,33 @@ def load_instance(dataset_path: Path, instance_id: Optional[str]) -> Optional[Di
     return None
 
 
-def find_latest_raw_trace(instance_id: str) -> Optional[Path]:
-    base_dir = BASE_DIR
-    candidates = []
-    for path in base_dir.glob(f"data_*-{instance_id}/{instance_id}.json"):
-        if path.is_file():
-            candidates.append(path)
-    if candidates:
-        return max(candidates, key=lambda p: p.stat().st_mtime)
-    return None
+def find_latest_extracted_trace(instance_id: str) -> Optional[Path]:
+    """Find the latest trace file (prefers timestamp in filename)."""
+    if not TRACE_DIR.exists():
+        return None
 
+    patterns = [
+        f"{instance_id}_????????_??????.json",  # new JSONL traces
+    ]
+    matching_files: list[Path] = []
+    for pattern in patterns:
+        matching_files.extend(TRACE_DIR.glob(pattern))
 
-def next_trace_path(trace_dir: Path, instance_id: str) -> Path:
-    prefix = f"{instance_id}_extracted_v"
-    next_version = 0
-    if trace_dir.exists():
-        for path in trace_dir.iterdir():
-            if not path.is_file():
-                continue
-            name = path.name
-            if not name.startswith(prefix) or not name.endswith(".json"):
-                continue
-            suffix = name[len(prefix):-5]
-            if suffix.isdigit():
-                next_version = max(next_version, int(suffix) + 1)
-    return trace_dir / f"{instance_id}_extracted_v{next_version}.json"
+    matching_files = [p for p in matching_files if p.is_file()]
+    if not matching_files:
+        return None
+
+    def timestamp_key(path: Path) -> tuple[int, int]:
+        match = re.match(
+            rf"^{re.escape(instance_id)}_(\d{{8}})_(\d{{6}})\.json$",
+            path.name,
+        )
+        if match:
+            return (1, int(match.group(1) + match.group(2)))
+        return (0, int(path.stat().st_mtime))
+
+    latest_file = max(matching_files, key=timestamp_key)
+    return latest_file
 
 
 def next_textgrad_path(output_dir: Path, instance_id: str) -> Path:
@@ -109,43 +118,55 @@ def next_textgrad_path(output_dir: Path, instance_id: str) -> Path:
 
 
 def _load_agent_log_from_data_dir(instance_id: str) -> Optional[str]:
-    raw_path = find_latest_raw_trace(instance_id)
-    if raw_path is None:
+    """Load the latest trace file from trace/ directory as raw text."""
+    extracted_path = find_latest_extracted_trace(instance_id)
+    if extracted_path is None:
+        logger.warning(f"No trace found for {instance_id} in {TRACE_DIR}")
         return None
-
-    TRACE_DIR.mkdir(parents=True, exist_ok=True)
-    extracted_tmp = TRACE_DIR / f"{instance_id}_extracted.json"
-    if extracted_tmp.exists():
-        extracted_tmp.unlink()
-
-    subprocess.run(
-        [sys.executable, str(BASE_DIR / "extract_traces.py"), str(raw_path), str(TRACE_DIR)],
-        check=False,
-    )
-
-    if not extracted_tmp.exists():
-        return None
-
-    versioned_path = next_trace_path(TRACE_DIR, instance_id)
-    extracted_tmp.rename(versioned_path)
 
     try:
-        data = json.loads(versioned_path.read_text(encoding="utf-8"))
-        trace_items = data.get("trace", [])
-        if isinstance(trace_items, list):
-            lines = []
-            for msg in trace_items:
-                if not isinstance(msg, dict):
-                    continue
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")
-                lines.append(f"{role}: {content}")
-            rendered = "\n".join(lines)
-            if rendered:
-                return rendered
-    except Exception:
-        pass
+        raw = extracted_path.read_text(encoding="utf-8")
+        if raw.strip():
+            logger.info(f"Loaded trace from {extracted_path.name}")
+            return raw
+    except Exception as e:
+        logger.warning(f"Failed to load trace from {extracted_path}: {e}")
     return None
+
+
+async def call_llm_with_retry(client, messages: list) -> str:
+    """Call LLM with automatic retry on ALL API failures for maximum stability."""
+    max_retries = 10
+    base_delay = 2  # seconds
+    max_delay = 60  # seconds
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = await client.chat.completions.create(
+                model="gpt-5-20250807",
+                messages=messages,
+            )
+            return resp.choices[0].message.content or ""
+
+        except Exception as e:
+            # Retry on ALL errors to maximize stability
+            if attempt >= max_retries:
+                logger.error(f"Max retries ({max_retries}) reached. Final error: {type(e).__name__}: {str(e)[:200]}")
+                raise
+
+            # Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s, ...
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+
+            error_type = type(e).__name__
+            error_msg = str(e)[:150] if str(e) else "No error message"
+            logger.warning(
+                f"API call failed (attempt {attempt}/{max_retries}): {error_type} - {error_msg}. "
+                f"Retrying in {delay} seconds..."
+            )
+            await asyncio.sleep(delay)
+
+    # Should never reach here
+    raise RuntimeError("Unexpected state in retry logic")
 
 
 async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
@@ -183,13 +204,11 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
 
     print(f"\n=== Computing Task Optimization for {instance_id} ===")
 
-    # 4. Call LLM to optimize
-    resp = await client.chat.completions.create(
-        model="gpt-5-20250807",
-        messages=[{"role": "user", "content": optimization_payload}],
+    # 4. Call LLM to optimize (with automatic retry on rate limit)
+    optimized_task_description = await call_llm_with_retry(
+        client,
+        [{"role": "user", "content": optimization_payload}],
     )
-
-    optimized_task_description = resp.choices[0].message.content or ""
 
     print("\n\n>>> OPTIMIZED TASK DESCRIPTION PREVIEW (First 500 chars) >>>")
     print("-" * 60)

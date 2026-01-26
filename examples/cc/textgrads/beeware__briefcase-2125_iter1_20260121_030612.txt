@@ -1,0 +1,43 @@
+Here’s what I found when reviewing the coding agent’s execution and why it didn’t fully satisfy the task requirements, plus how it can be improved.
+
+What the agent did well
+- Identified the correct implementation point: src/briefcase/integrations/android_sdk.py, class ADB, method install_apk.
+- Implemented a narrowly scoped fix in ADB.install_apk, catching subprocess.CalledProcessError and printing the failing subprocess output to the console via self.tools.console.error before re-raising BriefcaseCommandError. The implementation defensively handles e.output and e.stderr being bytes or strings and gracefully concatenates them.
+- Verified local behavior by running the relevant tests. The updated tests passed for the subset run (-k install_apk), and the success path prints nothing extra.
+
+Where the agent failed to meet the instructions
+- Modified existing tests instead of adding a new one. The instructions explicitly say “Add a focused regression test” and “Keep existing tests intact.” The agent replaced tests/integrations/android_sdk/ADB/test_install_apk.py with new content, altering existing tests and removing important assertions.
+  - It removed the assertion that adb.run was called with the expected arguments ("install", "-r", "example.apk"), which weakens test coverage and breaks the original intent of the test.
+  - It changed test names and semantics rather than adding the requested new test function test_install_failure_shows_subprocess_output.
+- The agent used monkeypatch and lambdas to simulate adb.run behavior, which is fine for the new test, but it also eliminated MagicMock-based call assertions in the original tests. This unnecessarily reduces test quality.
+- The agent only ran a filtered subset of tests (pytest -q tests/integrations/android_sdk/ADB -k install_apk). While that’s good for fast iteration, the instruction to “Keep existing tests intact” implies that the full suite should still pass; altering a test file risks breaking unrelated coverage.
+
+Potential risks in the fix (minor)
+- The fix adds a header line “adb output from failed install:” before printing adb output. This seems acceptable and aids clarity, but the requirement was to show failing subprocess output; adding extra text is not explicitly prohibited. The test only asserts presence of the adb failure message, so it’s fine. If maintainers want minimal additional text, consider printing only the failing output lines without a preface.
+- The fix assumes that ADB.install_apk calls ADB.run which uses tools.subprocess.check_output; that means e.output will usually be available. This is consistent with current code. If future refactors call tools.subprocess.run() with streaming, e.output might not exist, but the code defensively also checks e.stderr.
+
+How to improve to fully meet the brief
+- Restore the original tests in tests/integrations/android_sdk/ADB/test_install_apk.py. Do not alter existing tests or remove assertions about call parameters. The original tests validate:
+  - Success path: ADB.install_apk calls run("install", "-r", path) and prints nothing.
+  - Failure path: BriefcaseCommandError is raised generically.
+  - Invalid device: InvalidDeviceError is raised as-is.
+- Add a new test function (as requested) that verifies adb failure output is printed on the console. The instructions provided a template and a preferred name: test_install_failure_shows_subprocess_output. It can be appended to the existing test_install_apk.py to avoid touching existing tests. The new test should:
+  - Simulate a subprocess.CalledProcessError from adb.run with a meaningful e.output string.
+  - Call adb.install_apk and assert BriefcaseCommandError is raised.
+  - Capture console output via capsys and assert that the adb failure text appears (combine captured.out + captured.err to be robust).
+- Keep the success-path behavior unchanged (no extra console output) and rely on the existing success test’s assertion that nothing is printed. Do not remove any assert_called_once_with validations in existing tests.
+- Run the full relevant test subset (tests/integrations/android_sdk/ADB) and preferably the full suite to ensure no unintended regressions.
+- Do not change any global Subprocess behavior. The fix in ADB.install_apk already adheres to this constraint.
+
+Concrete minimal changes that satisfy the brief
+- Keep the ADB.install_apk modification as implemented:
+  - Catch subprocess.CalledProcessError, extract e.output and e.stderr, decode if needed, print to console (self.tools.console.error), then raise BriefcaseCommandError unchanged.
+- In tests/integrations/android_sdk/ADB/test_install_apk.py:
+  - Revert the modified tests to their original content (including MagicMock-based run mocks and assert_called_once_with checks).
+  - Append the new test function exactly as requested (or equivalent content) with name test_install_failure_shows_subprocess_output, using monkeypatch to make adb.run raise a CalledProcessError with output text, and assert that the failure output appears in the console on error.
+  - Ensure success-path tests continue to assert that normal output is not printed.
+
+By following the above, you’ll satisfy:
+- Show failing subprocess output for adb install failures, without changing global subprocess behavior.
+- Preserve existing tests and success-path behavior.
+- Add the specific regression test required by the brief.

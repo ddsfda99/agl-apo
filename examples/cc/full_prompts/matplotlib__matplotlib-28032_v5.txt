@@ -1,0 +1,110 @@
+You are working in the /testbed repository. Your goal is to fix a bug in matplotlib.image.imsave where saving RGBA uint8 arrays with origin='lower' fails due to a non-C-contiguous view being passed to Pillow.
+
+This revised prompt includes an improved workflow and safeguards based on prior failures. It ensures you reproduce the bug, implement a robust fix, validate it, and clean up properly, while avoiding unrelated full-suite issues.
+
+Bug summary and root cause
+- imsave fails when:
+  - input is an MxNx4 numpy uint8 array (RGBA),
+  - origin='lower' is used.
+- imsave reverses the array to handle origin='lower' via arr = arr[::-1], which creates a non-C-contiguous view.
+- ScalarMappable.to_rgba leaves arrays that are already RGB(A) unchanged, so the non-contiguous view persists.
+- imsave then calls PIL.Image.frombuffer("RGBA", shape, rgba, "raw", "RGBA", 0, 1) on that view. Pillow’s frombuffer expects a contiguous buffer and raises ValueError: ndarray is not C-contiguous.
+- RGB works because to_rgba adds alpha, creating a new contiguous array and masking the issue.
+
+Your tasks
+1) Write tests to reproduce the bug and validate the fix.
+2) Explore the code to locate the issue.
+3) Edit the source to fix the bug.
+4) Rerun only the relevant tests to confirm the fix.
+5) Remove the tests you added once the fix is validated.
+Do not commit any changes.
+
+Detailed step-by-step plan
+
+- Add temporary tests (to be deleted after validation):
+  - Create a test file under lib/matplotlib/tests/, e.g., test_imsave_rgba_lower.py.
+  - Write tests that:
+    - Construct a simple C-contiguous RGBA array: arr = np.zeros((10, 12, 4), dtype=np.uint8).
+    - Call plt.imsave with origin='lower' for multiple formats:
+      - png, jpg, tiff, gif.
+      - Use tmp_path from pytest to avoid littering files.
+      - Assert no exception is raised and the output file exists and is non-empty (e.g., file size > 0).
+    - Include control tests:
+      - Same array with origin='upper' (should pass).
+      - RGB (MxNx3, dtype=uint8) with origin='lower' (should pass).
+    - If Pillow does not support a format (e.g., JPEG/GIF might be missing in some builds), skip that format:
+      - Prefer PIL.features.check("jpg"), PIL.features.check("tiff"), PIL.features.check("gif") where available.
+      - If features.check is unavailable or uncertain, conditionally skip based on Image.registered_extensions or by catching UnsupportedOperation and marking skip.
+  - The primary failure case to reproduce is RGBA uint8 with origin='lower' raising ValueError: ndarray is not C-contiguous.
+
+- Run only the new tests first:
+  - Use pytest to run lib/matplotlib/tests/test_imsave_rgba_lower.py to confirm the failure reproduces before making changes.
+  - Do not run the full test suite at this stage.
+
+- Locate the bug:
+  - Inspect lib/matplotlib/image.py, function imsave.
+  - Find the code path that reverses the array when origin == "lower" (arr = arr[::-1]).
+  - Identify where rgba is constructed (via ScalarMappable.to_rgba) and where the PIL Image is created, currently using:
+    - PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1).
+  - This is the call that fails when handed a non-C-contiguous numpy ndarray view.
+
+- Implement the fix:
+  - Use PIL.Image.fromarray for numpy ndarray inputs, and keep frombuffer for non-ndarray inputs (e.g., memoryview/bytes).
+  - Ensure C-contiguity for ndarray inputs as a safety measure, because origin='lower' slicing creates a non-contiguous view.
+  - Inside imsave, just before creating the PIL.Image:
+    - If isinstance(rgba, np.ndarray):
+      - If not rgba.flags.c_contiguous: rgba = np.ascontiguousarray(rgba).
+      - Create the image using PIL.Image.fromarray(rgba). For uint8 MxNx4 arrays, Pillow will correctly produce an RGBA image.
+    - Else:
+      - Keep the existing frombuffer path: PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1).
+  - Preserve existing handling for format == "png", metadata/pil_kwargs, and subsequent save logic.
+  - Add explanatory comments in the code:
+    - origin='lower' can create a non-contiguous ndarray view via slicing.
+    - frombuffer is brittle with numpy ndarray inputs and expects a contiguous buffer; fromarray is robust for ndarray inputs.
+    - Keep frombuffer for non-ndarray inputs to preserve potential zero-copy behavior.
+
+- Alternative minimal fix (do not choose unless absolutely necessary):
+  - After reversing for origin='lower', do arr = np.ascontiguousarray(arr[::-1]) immediately.
+  - This produces a contiguous ndarray and keeps the rest of the pipeline unchanged, but using fromarray for ndarray inputs is preferred for robustness with Pillow.
+
+- Rerun tests:
+  - Run only the temporary tests you added to ensure they now pass.
+  - Optionally run a small subset of existing image-related tests that exercise imsave to check for regressions.
+
+- Avoid unrelated full-suite pitfalls:
+  - A prior run showed a failure in lib/matplotlib/tests/test_pickle.py::test_pickle_load_from_subprocess[png] due to a UserWarning about version mismatch between saved and loaded figures across subprocesses.
+  - This is environmental and unrelated to your imsave change. If you need to run the full suite:
+    - Set a consistent SOURCE_DATE_EPOCH environment variable for both parent and subprocess runs (e.g., export SOURCE_DATE_EPOCH=1690848000) before invoking pytest, so version strings match and the warning does not trigger.
+    - Alternatively, document clearly that any such failure is unrelated to the imsave fix; do not change code or tests to address it.
+
+- Clean up:
+  - After confirming the fix, delete the temporary test file lib/matplotlib/tests/test_imsave_rgba_lower.py.
+  - Rerun a small subset (or none) of tests as needed to confirm no accidental changes remain.
+  - Do not commit any changes.
+
+Implementation guidance (concrete edit points)
+- File: lib/matplotlib/image.py.
+- Function: imsave.
+- Around the code that currently calls:
+  - image = PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1)
+- Replace with logic akin to:
+  - import numpy as np
+  - if isinstance(rgba, np.ndarray):
+    - if not rgba.flags.c_contiguous:
+      - rgba = np.ascontiguousarray(rgba)
+    - image = PIL.Image.fromarray(rgba)
+  - else:
+    - image = PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1)
+- Keep all subsequent handling (metadata, format-specific kwargs, and save) unchanged.
+
+Notes and considerations
+- Do not alter public APIs; keep imsave’s signature and behavior intact besides fixing the failure mode.
+- fromarray introduces a copy for ndarray inputs, but correctness is prioritized and this path is widely used.
+- For ndarray inputs with dtype=uint8 and shape MxNx4, Pillow’s fromarray will produce an RGBA image; this matches the downstream expectations.
+- Maintain the zero-copy behavior of frombuffer for non-ndarray inputs.
+- Add clear comments explaining the rationale and Pillow’s limitation for future maintainers.
+
+Once done
+- Ensure your added tests pass locally with the fix.
+- Remove the temporary test files you created.
+- Do not commit any changes.

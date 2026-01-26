@@ -1,0 +1,43 @@
+diff --git a/checkov/kubernetes/parser/k8_yaml.py b/checkov/kubernetes/parser/k8_yaml.py
+index 8831b8c5c..8ed590080 100644
+--- a/checkov/kubernetes/parser/k8_yaml.py
++++ b/checkov/kubernetes/parser/k8_yaml.py
+@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Tuple, TYPE_CHECKING
+ 
+ import yaml
+ from yaml.loader import SafeLoader
++from yaml import YAMLError
+ 
+ from checkov.common.resource_code_logger_filter import add_resource_code_filter_to_logger
+ from checkov.common.util.file_utils import read_file_with_any_encoding
+@@ -42,12 +43,14 @@ def load(filename: Path) -> Tuple[List[Dict[str, Any]], List[Tuple[int, str]]]:
+     if not all(key in content for key in ("apiVersion", "kind")):
+         return [{}], []
+ 
+-    if '{{' in content:
+-        return [{}], []
+ 
+     file_lines = [(idx + 1, line) for idx, line in enumerate(content.splitlines(keepends=True))]
+ 
+-    template = loads(content)
++    try:
++        template = loads(content)
++    except YAMLError:
++        # treat templated Helm-like files as non-K8s to avoid parser errors
++        return [{}], []
+ 
+     return (template, file_lines)
+ 
+diff --git a/setup.py b/setup.py
+index bc75fa2e8..323846f84 100644
+--- a/setup.py
++++ b/setup.py
+@@ -66,7 +66,7 @@ setup(
+     },
+     install_requires=[
+         "bc-python-hcl2==0.4.2",
+-        "bc-detect-secrets==1.5.41",
++        "bc-detect-secrets==1.5.33",
+         "bc-jsonpath-ng==1.6.1",
+         "pycep-parser==0.5.1",
+         "tabulate>=0.9.0,<0.10.0",

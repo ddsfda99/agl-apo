@@ -1,0 +1,57 @@
+diff --git a/reflex/vars.py b/reflex/vars.py
+index 98118b1d..43a190b2 100644
+--- a/reflex/vars.py
++++ b/reflex/vars.py
+@@ -584,8 +584,42 @@ class Var:
+                 )
+ 
+             # Get the type of the indexed var.
++            # Preserve existing semantics for lists and strings, and fix typed tuple indexing.
+             if types.is_generic_alias(self._var_type):
+-                type_ = types.get_args(self._var_type)[0]
++                origin = get_origin(self._var_type)
++                args = get_args(self._var_type)
++                if origin is list:
++                    # List[T] -> element type is T
++                    type_ = args[0] if args else Any
++                elif origin is tuple:
++                    # Tuple indexing type inference:
++                    # - Handle homogeneous-ellipsis tuples (Tuple[T, ...])
++                    # - Handle finite typed tuples (Tuple[T1, T2, ...])
++                    # - Support negative indices by translating like Python/JS .at
++                    # - For dynamic index (Var[int]) into heterogeneous tuples, use a safe fallback
++                    if len(args) == 2 and args[1] is Ellipsis:
++                        # Homogeneous-ellipsis tuple: element type is the repeated type T
++                        type_ = args[0]
++                    else:
++                        # Finite typed tuple
++                        if isinstance(i, int):
++                            n = len(args)
++                            # Negative index translation consistent with .at semantics
++                            idx = i if i >= 0 else n + i
++                            if 0 <= idx < n:
++                                type_ = args[idx]
++                            else:
++                                # Out-of-bounds index: fallback to a safe supertype
++                                # Use object instead of typing.Any to avoid AttributeError in validation
++                                type_ = object
++                        else:
++                            # Dynamic index (e.g., a Var[int])
++                            # If all element types are identical, assume that type. Otherwise, fallback to object
++                            unique_types = set(args)
++                            type_ = next(iter(unique_types)) if len(unique_types) == 1 else object
++                else:
++                    # Other generics should retain prior behavior
++                    type_ = args[0] if args else Any
+             elif types._issubclass(self._var_type, str):
+                 type_ = str
+ 
+@@ -793,7 +827,7 @@ class Var:
+                     int if operand1_type == bool else operand1_type,
+                     int if operand2_type == bool else operand2_type,
+                 ],
+-                key=lambda x: x.__name__,
++                key=lambda x: getattr(x, "__name__", str(x)),
+             )
+         )
+         return pair in OPERATION_MAPPING and operator in OPERATION_MAPPING[pair]

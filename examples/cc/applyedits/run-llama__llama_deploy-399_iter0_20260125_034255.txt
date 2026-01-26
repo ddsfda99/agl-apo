@@ -1,0 +1,106 @@
+You are working in a code repository in the current directory.
+
+Goal
+Implement per-service environment variables in the deployment definition and ensure the Control plane propagates these variables only to the spawned service process. The YAML should support an env mapping under each service, e.g.:
+services:
+  test-workflow:
+    name: Test Workflow
+    env:
+      OPENAI_API_KEY: "secret!"
+    source:
+      type: git
+      name: https://github.com/run-llama/llama_deploy.git
+    path: tests/apiserver/data/workflow:my_workflow
+
+Important constraints based on prior failures
+- Do not add or modify permanent tests in the repository. Use temporary tests or scripts for reproduction and validation, and clean them up after.
+- Make minimal changes aligned with existing code and tests. Do not change existing test behavior or assumptions.
+- Do not set environment variables globally via os.environ during service loading. Propagate env only to the specific service process when it is spawned, to avoid cross-service leakage.
+- Keep existing behavior intact, especially:
+  - SourceType must remain an Enum subclass of str such that wf_config.source.type == "git" comparisons remain valid.
+  - Dependency installation subprocess error handling and message formatting should not change.
+  - Control plane host and port assignment behavior must remain unchanged.
+
+Plan and steps
+1) Understand requirements and repository structure
+- The feature: Allow env variables per service via YAML and have the Control plane propagate them when spinning up the service.
+- Read and understand these files:
+  - apiserver/config_parser.py: pydantic models for config parsing.
+  - control_plane/config.py: control plane config or models.
+  - apiserver/deployment.py: deployment manager, service loading, dependency installation.
+  - control_plane/server.py: control plane management and service spawning logic.
+  - services/workflow.py: workflow service specifics.
+  - tests/apiserver/test_config_parser.py and tests/apiserver/test_deployment.py: understand what current tests assert and ensure your changes do not break them.
+
+2) Prepare a temporary reproduction check (do not commit this)
+- Create a minimal temporary YAML config in a temp directory that includes a service with an env mapping.
+- Create a temporary script or test that:
+  - Parses the YAML into Config.
+  - Calls the code path that spins up a service (mock or monkeypatch subprocess.Popen or subprocess.run used for service spawning).
+  - Asserts that the env passed to the child process includes the provided mapping merged with the current environment.
+- Alternatively, if the service is spawned via an internal API instead of subprocess, identify where the env can be applied specifically for the spawned service and assert via mocking that the env is provided at spawn time.
+- Delete these temporary files after validation.
+
+3) Locate the spawn point and implement the feature
+- Search for where services are spawned:
+  - Grep for subprocess usage: grep -R "subprocess" -n
+  - Grep for process start calls: grep -R "Popen\|run\|start" -n control_plane apiserver services
+  - Look for functions/methods in control_plane/server.py or apiserver/deployment.py that start service processes or containers.
+- Do not set env globally when loading services. Instead:
+  - Parse env in the service config and store it on the model.
+  - When spawning the service process, pass env to the subprocess via the env parameter.
+  - Use a merge with the current environment: env = {**os.environ, **service.env} if service.env else None
+
+4) Implement parsing support without breaking existing tests
+- In apiserver/config_parser.py, add an optional env field to the Service model:
+  - env: Optional[Dict[str, str]] = None
+  - Import Optional and Dict from typing.
+- Ensure that adding env does not change existing parsing behavior. Keep any current field definitions and defaults intact.
+- Do not change how SourceType works; it should continue to compare equal to a string like "git" in tests.
+
+5) Wire env through the control plane
+- Identify how the Control plane receives the service specification and starts the service.
+- If there is a schema or message type used to communicate service start parameters, add env as an optional field and ensure it is propagated.
+- At the point of spawning:
+  - If using subprocess.Popen or subprocess.run, pass the merged env mapping via the env parameter as described above.
+  - If using docker or another container runtime, add the environment mapping to the container definition accordingly, without touching global os.environ.
+- If services are run in-process (e.g., threads) and there is no subprocess, avoid setting os.environ globally. If necessary, set environment variables just before running the service code and restore afterward in a try/finally block. However, prefer subprocess-level env injection if the architecture supports it.
+
+6) Validate against existing tests
+- Run the existing test suite: pytest -q
+- If pytest is not available, reason through the tests carefully and ensure your changes do not alter:
+  - Source managers selection by string keys (e.g., "git").
+  - Default message queue client and address behavior.
+  - Dependency installer command construction and error message formatting.
+  - Control plane host and port assignment behavior.
+- Fix any regressions introduced.
+
+7) Clean up
+- Remove any temporary test files or scripts you created for reproduction.
+- If previous attempts added repository test files unrelated to existing suite, remove them:
+  - tests/apiserver/test_env_vars.py
+  - tests/apiserver/data/git_service_with_env.yaml
+- Do not commit your edits.
+
+Implementation hints
+- apiserver/config_parser.py:
+  - class Service(BaseModel):
+      name: str
+      source: Source
+      path: str
+      env: Optional[Dict[str, str]] = None
+- control_plane/server.py or wherever the service process is started:
+  - When building the subprocess call:
+      child_env = {**os.environ, **service.env} if service.env else None
+      subprocess.Popen(cmd, env=child_env, ...)
+  - Be careful not to modify global os.environ. Only pass env via the subprocess parameter.
+- apiserver/deployment.py:
+  - Do not set os.environ during _load_services. If _load_services currently constructs WorkflowService instances, pass env through the service object or config but apply env only at spawn time.
+
+Deliverables
+- Code changes that parse env per service and propagate them to the service process at spawn time, without introducing global environment pollution or breaking existing tests.
+- Temporary reproduction artifacts used only during development, deleted before finishing.
+- No committed tests or unrelated changes.
+
+Reminder
+Please do not commit your edits.

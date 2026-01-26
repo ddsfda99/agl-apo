@@ -1,0 +1,72 @@
+Summary of why the coding agent failed
+- No code changes were made. The agent only explored the repository and read files. It did not implement the required fallback logic in SourceHandlerMixin.end_of_query_cleanup to infer target-side column names from MetaDataProvider.
+- No tests were added to reproduce the bug or verify the fix. The instructions explicitly called for writing a failing test and then fixing the code; neither step was performed.
+- The sqlparse analyzer path was not considered. Even if the fix had been implemented for the sqlfluff path, without propagating the metadata provider to the sqlparse handlers SourceHandlerMixin would not have access to metadata in that path, and tests that run both analyzers would still fail.
+
+What needed to be changed (and where)
+1) Main fix in SourceHandlerMixin.end_of_query_cleanup (sqllineage/core/parser/__init__.py):
+   - Current behavior uses tgt_col_from_query as the target column name unless an explicit target column list was found (holder.write_columns length matches col_grp length).
+   - Required change: add a fallback when explicit target columns are not specified in SQL but a metadata provider is available and the write target is a Table:
+     - Fetch the target table’s columns via metadata_provider.get_table_columns(tgt_tbl).
+     - If and only if the number of returned columns equals len(col_grp) (the number of SELECT list expressions for this union group), use the corresponding target table column at index idx (where idx corresponds to the SELECT list position) as tgt_col_resolved.
+     - Only do this if len(holder.write_columns) != len(col_grp) (i.e., don’t override explicit target columns if they exist).
+     - Keep parent assignments consistent: metadata_provider.get_table_columns returns Column objects with parent already set to the target Table, which is correct. You still need to set the parent of tgt_col_from_query to tgt_tbl for consistency, but when substituting with a resolved target column (write_columns or metadata), use that resolved column for lineage.
+   - Safe access the provider with getattr(self, "metadata_provider", None), and only attempt if isinstance(tgt_tbl, Table).
+   - This fallback should be added in the same place you currently check write_columns length (inside the per-column loop), so that it mirrors the explicit target column mapping behavior.
+
+   Pseudocode of the added logic around existing lines 36-43:
+   - if len(holder.write_columns) == len(col_grp):
+       tgt_col_resolved = holder.write_columns[idx]
+     else:
+       metadata_provider = getattr(self, "metadata_provider", None)
+       if metadata_provider and isinstance(tgt_tbl, Table):
+           meta_cols = metadata_provider.get_table_columns(tgt_tbl)
+           if len(meta_cols) == len(col_grp):
+               tgt_col_resolved = meta_cols[idx]
+
+   Notes:
+   - Do not force a mapping if lengths don’t match.
+   - Do not change default behavior otherwise.
+
+2) Pass metadata into sqlparse handlers (so SourceHandlerMixin can see it):
+   - In the sqlparse analyzer (sqllineage/core/parser/sqlparse/analyzer.py), handlers are instantiated without any reference to metadata_provider. SourceHandlerMixin.end_of_query_cleanup is invoked on these handlers, but getattr(self, "metadata_provider", None) will return None, and the fallback won’t run.
+   - Minimal change: after instantiating handlers in _extract_from_dml, set the metadata provider attribute on them:
+     - After creating current_handlers and next_handlers, loop through them and set an attribute:
+       for h in current_handlers + next_handlers:
+           setattr(h, "metadata_provider", metadata_provider)
+     - This is safe and will allow SourceHandler (which inherits SourceHandlerMixin) to access metadata_provider via getattr.
+   - Without this, tests that run the sqlparse analyzer will still exhibit the incorrect behavior for INSERT INTO … SELECT without explicit target columns.
+
+Testing gaps
+- The agent did not write tests to reproduce the scenario:
+  - With a metadata provider defining:
+    - source: columns ["user_id", "user_name"]
+    - target: columns ["id", "name"]
+  - SQL: insert into target select user_id, user_name from source
+  - Expected column lineage edges:
+    - source.user_id -> target.id
+    - source.user_name -> target.name
+- They also didn’t consider adding a control test showing that without a metadata provider, the target-side columns remain user_id, user_name (existing behavior).
+- Many existing column-lineage tests disable sqlparse (test_sqlparse=False) because of sqlparse limitations, but the helpers default to testing both analyzers. If the new test runs both by default, sqlparse will fail unless metadata is passed to its handlers as described above.
+
+Further pitfalls to avoid
+- Only perform metadata-based mapping when the number of metadata columns equals the number of SELECT-list columns in the current union group. Do not attempt to map when the target table has more or fewer columns than the select list, as that would be ambiguous.
+- Ensure the write target is a Table. Do not attempt metadata lookups for SubQuery, CTE, or Path targets.
+- Preserve precedence for explicit target column lists (holder.write_columns). The new logic must not override that path.
+- Maintain correct parent assignment. Column equality in this codebase depends on both name and parent. Metadata provider returns Columns with parent set to the table; use those when substituting. Do not leave target columns with parent unset.
+- Do not interfere with wildcard expansion. Wildcard handling is done later via SubQueryLineageHolder.expand_wildcard(metadata_provider).
+- Consider union groups. The existing union_barriers logic splits columns by group. Use the correct col_grp index when mapping.
+
+Concrete steps the agent should have taken
+1) Add a failing test under tests/sql/column/ for the described INSERT INTO … SELECT … case with a metadata provider, asserting the target-side column names are inferred from the target table schema. Optionally add a control test where no metadata is supplied.
+2) Implement the fallback mapping in SourceHandlerMixin.end_of_query_cleanup as described.
+3) In the sqlparse analyzer (SqlParseLineageAnalyzer._extract_from_dml), set metadata_provider on the instantiated handlers so that SourceHandlerMixin can access it via getattr(self, "metadata_provider", None).
+4) Run the full test suite. If both analyzers are being tested by the new test, this will ensure both paths are fixed.
+5) Remove the new test files before finalizing if required, keeping only code changes.
+
+Where the agent spent time but did not help
+- They read many relevant files and found the key method (SourceHandlerMixin.end_of_query_cleanup), but they didn’t implement any change.
+- They did not examine propagation of metadata through sqlparse handlers or how end_of_query_cleanup is invoked on those handlers, missing a necessary change for the sqlparse path.
+- They did not plan or run tests, so no feedback loop existed to guide the implementation.
+
+In short, the failure was caused by not implementing the required fallback logic in SourceHandlerMixin, not propagating metadata to sqlparse handlers, and not writing tests to drive and verify the change. Implementing the specific mapping fallback and setting metadata_provider on sqlparse handlers will satisfy the acceptance criteria while preserving existing behavior when metadata is not available or lengths don’t match.

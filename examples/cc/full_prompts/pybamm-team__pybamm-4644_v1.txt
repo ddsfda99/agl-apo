@@ -1,0 +1,98 @@
+You are an expert coding agent tasked with fixing a bug in the current repository and adding safeguards to prevent regressions. Follow the plan carefully and be precise about what you change. If the repository already contains the fix, do not claim work you did not perform; instead, add missing regression tests and address the latent issues called out below.
+
+Context and goal
+- Issue: Post-processing variables added to a pre-built PyBaMM model can fail in pybamm.solvers.processed_variable.process_variable due to assuming all symbols have a mesh. The error seen was AttributeError: 'Power' object has no attribute 'mesh'.
+- We need to reproduce this, ensure it is covered by tests, and ensure processed_variable robustly handles meshless variables added post-build. Additionally, there are latent issues in the module that should be corrected to avoid subtle failures elsewhere.
+
+Constraints
+- Do not commit your edits.
+- Be honest about whether you actually changed code or whether the fix already exists.
+- Clean up any temporary test files you create.
+- Avoid relying on hardcoded paths like /workspace. Always use the repository root you are given.
+
+Execution plan
+1) Verify environment and locate the code
+- Run pwd to confirm the current working directory is the repository root.
+- List files with ls -la and ensure you see src/pybamm and tests/.
+- Open and read src/pybamm/solvers/processed_variable.py.
+- Grep for process_variable and specifically for mesh = base_variables[0].mesh or similar patterns that assume .mesh is present.
+
+2) Write or confirm a failing reproduction test
+- First, search for an existing test that covers adding variables post-build:
+  - Look in tests/unit/test_solvers/test_processed_variable_postbuild.py and related tests under tests/unit/test_solvers/.
+- If a test exists and passes, do not claim you wrote it; note that the scenario is already covered.
+- Regardless, add at least one new regression test that explicitly reproduces the reported user scenario:
+  - Create a test file tests/unit/test_solvers/test_processed_variable_meshless_postbuild_ext.py.
+  - In the test:
+    - Build a simple model, for example pybamm.lithium_ion.SPM() or an equivalent minimal model that solves quickly.
+    - After building but before solving, manually add a variable to model.variables such that it has no mesh. For example:
+      - model.variables.update({"t squared": pybamm.t**2})  where pybamm.t**2 produces a Power symbol with no mesh.
+      - Also add a couple of additional variants to broaden coverage:
+        - A scalar constant: model.variables.update({"const": pybamm.Scalar(3.14)})
+        - A meshless expression composed with parameters: model.variables.update({"expr": 2 * pybamm.t + pybamm.Scalar(1)})
+    - Solve the model.
+    - Access sol["t squared"].data, sol["const"].data, sol["expr"].data and assert they return arrays of expected shape and value without raising AttributeError, and that time interpolation behaves sensibly.
+- If you add test files, ensure names and imports match the project’s testing conventions.
+
+3) Locate and inspect the critical code paths
+- In src/pybamm/solvers/processed_variable.py, locate process_variable and the logic that:
+  - Determines base_variables and obtains mesh or secondary_mesh.
+  - Chooses which ProcessedVariable class to instantiate for 0D, 1D, 2D, etc.
+  - Ensure there is a safe path for meshless symbols: if no child or base variable has a mesh, it should treat the variable as 0D or time-only and construct an appropriate processed variable that does not require mesh access.
+- Confirm that the code does not blindly access base_variables[0].mesh when there are no mesh-carrying children.
+
+4) Implement fixes and cleanups as needed
+Make only the changes that are necessary and correct. Apply the following targeted fixes if they are present in the codebase:
+
+- Fix incorrect NumPy contiguous check:
+  - Find any function named _is_f_contiguous or equivalent code that does y.data.f_contiguous.
+  - Replace this with the correct NumPy API: y.flags.f_contiguous or y.flags["F_CONTIGUOUS"].
+  - Ensure this function works on standard NumPy arrays and returns a boolean.
+
+- Correct super call in ProcessedVariable2DSciKitFEM:
+  - In class ProcessedVariable2DSciKitFEM.__init__, verify the super call.
+  - If it is written as super(ProcessedVariable2D, self).__init__(...), this is wrong. Change it to super().__init__(...) or super(ProcessedVariable2DSciKitFEM, self).__init__(...) so that the correct MRO is followed.
+
+- Harden process_variable for meshless variables:
+  - In process_variable, when computing the mesh to use:
+    - Traverse children via pre_order() to collect any symbols that have mesh or secondary_mesh.
+    - If none is found, treat the variable as 0D or time-only and use the appropriate processed variable class that does not require mesh. Do not access .mesh on a meshless symbol.
+  - Ensure that common meshless symbols such as Scalar, Parameter, Time (pybamm.t), and operations like Power, Add, Mul are handled.
+  - Verify secondary mesh detection via children works as well.
+
+- Validate xarray interpolation fill_value usage:
+  - Search for uses of xarray.DataArray.interp with a kwargs={"fill_value": fill_value} argument.
+  - Confirm that the version of xarray in this project supports passing fill_value via kwargs to the interpolation backend in use. If not, adjust:
+    - One safe alternative: perform interpolation, then set values outside supported bounds to fill_value using where or clip with bounds_error=False and explicit fill_value if available.
+  - Add a small unit test if feasible to ensure no exceptions are raised when interpolating slightly outside the domain with a finite fill_value.
+
+- Optional but recommended: Python fallback for observation
+  - If there is a method _observe_raw_python raising NotImplementedError and the code path can be hit when pybamm.has_idaklu() is False, consider implementing a minimal Python fallback that evaluates the expression directly at the requested times and mesh points using NumPy, or guard tests to skip those paths when IDAKLU is unavailable.
+  - Only implement this if unit tests can reach this path in the project’s CI environment; otherwise, leave as is and document with a clear error message.
+
+5) Run tests
+- Start with the new regression test file you added to ensure it reproduces the scenario and passes after your changes.
+- Then run a broader subset of the suite to catch related issues:
+  - tests/unit/test_solvers/test_processed_variable_postbuild.py
+  - tests/unit/test_solvers/test_processed_variable.py
+  - tests/unit/test_solvers/test_processed_variable_computed.py
+  - tests/unit/test_solvers/test_solution.py
+  - Any 2D or scikit-FEM related tests, if present, to verify the fixed super call did not break anything.
+- If any failures appear, iterate: inspect the failing test and stack trace, patch the relevant code carefully, and rerun tests until they pass.
+
+6) Clean up
+- Remove any temporary files you created that are not part of the intended test suite.
+- Keep the repository tidy. Do not commit your edits.
+
+Acceptance criteria
+- Accessing Solution variables added post-build that are meshless, such as pybamm.t**2 or a Scalar, does not raise AttributeError and returns sensible data arrays when indexed as sol["name"].data.
+- process_variable does not assume that all symbols have a mesh and correctly handles time-only and 0D variables.
+- The contiguous memory check uses the correct NumPy API.
+- The super call in ProcessedVariable2DSciKitFEM.__init__ is corrected.
+- xarray interpolation usage does not rely on unsupported kwargs and does not error in the project’s environment.
+- The targeted unit tests pass, and the broader subset listed above also passes.
+
+Notes and tips
+- If a tool like a glob finder returns no files unexpectedly, immediately cross-check with plain shell listing. Always trust the actual filesystem view over a single tool’s output.
+- Use absolute or carefully constructed relative paths from the repository root. Avoid hardcoding non-existent paths.
+- Keep changes minimal, focused, and justified by failing tests or clear API misuse.

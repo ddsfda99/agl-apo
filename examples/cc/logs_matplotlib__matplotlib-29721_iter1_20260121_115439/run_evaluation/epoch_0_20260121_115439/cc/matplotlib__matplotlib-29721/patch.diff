@@ -1,0 +1,21 @@
+diff --git a/lib/matplotlib/pyplot.py b/lib/matplotlib/pyplot.py
+index ab33146d21..33874ebf91 100644
+--- a/lib/matplotlib/pyplot.py
++++ b/lib/matplotlib/pyplot.py
+@@ -2715,10 +2715,14 @@ def polar(*args, **kwargs) -> list[Line2D]:
+ # If rcParams['backend_fallback'] is true, and an interactive backend is
+ # requested, ignore rcParams['backend'] and force selection of a backend that
+ # is compatible with the current running interactive framework.
++backend_name = rcParams._get_backend_or_none()
++interactive_builtins = (
++    set(backend_registry.list_builtin(BackendFilter.INTERACTIVE)) -
++    {'webagg', 'nbagg'}
++)
+ if (rcParams["backend_fallback"]
+-        and rcParams._get_backend_or_none() in (  # type: ignore[attr-defined]
+-            set(backend_registry.list_builtin(BackendFilter.INTERACTIVE)) -
+-            {'webagg', 'nbagg'})
++        and backend_name
++        and backend_name.lower() in interactive_builtins
+         and cbook._get_running_interactive_framework()):
+     rcParams._set("backend", rcsetup._auto_backend_sentinel)

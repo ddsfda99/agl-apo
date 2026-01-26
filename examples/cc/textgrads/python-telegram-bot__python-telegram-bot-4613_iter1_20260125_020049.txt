@@ -1,0 +1,91 @@
+Summary of failure
+- The agent attempted to call an LLM and received a 429 error: “No deployments available for selected model, Try again in 5 seconds. Passed model=claude-sonnet-4-5-20250929. pre-call-checks=False.”
+- It aborted without retrying, falling back, or providing any output for the original task, causing the entire job to fail.
+- The model name appears invalid or undeployed in the current environment (the date-stamped alias looks wrong), and “pre-call-checks=False” indicates that availability checks were disabled.
+
+Root causes
+1. Invalid or undeployed model alias
+   - “claude-sonnet-4-5-20250929” is likely wrong. Commonly available Anthropic aliases follow names like “claude-3.5-sonnet-20241022” or “claude-3.5-sonnet-latest.”
+   - If your workspace/provider doesn’t have that deployment, any call will fail.
+
+2. No pre-call availability checks
+   - With pre-call checks off, the agent didn’t discover that the selected alias had no deployment and proceeded to call it anyway.
+
+3. No retry/backoff and no fallbacks
+   - The error explicitly says “Try again in 5 seconds,” but the agent did not retry.
+   - No fallback model or provider was attempted, and the agent didn’t degrade gracefully.
+
+4. Hardcoded model selection and weak routing logic
+   - The agent used a single, hardcoded model alias without looking up available deployments or consulting a rotation/cooldown list.
+   - The trace shows a cooldown_list, but it wasn’t used to avoid unavailable endpoints.
+
+5. Over-reliance on external API during testing
+   - For test runs, calling a remote LLM without mocking/stubbing is fragile.
+   - Tests can fail purely due to provider capacity or naming mismatches.
+
+What to fix and how
+1. Use a valid, deployed model alias
+   - Replace the hardcoded model with a known-good alias that’s actually deployed in your environment (e.g., “claude-3.5-sonnet-latest” or the exact alias configured in your project/provider).
+   - Maintain a config-driven mapping of model aliases per environment/region/provider and refresh/cache it at startup.
+
+2. Enable and implement pre-call checks
+   - Before each call, query the provider or your deployment registry for available deployments and quotas.
+   - Honor your cooldown list by avoiding endpoints recently rate-limited or failing.
+   - Verify the model alias resolves to at least one live deployment before sending a request.
+
+3. Add robust retry and backoff with jitter
+   - On 429 and 503, read Retry-After if present, else back off exponentially (e.g., 1s, 2s, 4s, capped at 30s) with jitter.
+   - Respect provider-specific messages (e.g., “Try again in 5 seconds”) and sleep appropriately.
+   - Limit total retries (e.g., 3–5). After that, switch to fallback models.
+
+4. Implement fallback routing
+   - Maintain a prioritized list of substitute models/providers (e.g., claude-3.5-sonnet → claude-3-opus → claude-3-haiku → gpt-4o-mini → local LLM).
+   - On deployment unavailability or repeated 429s, rotate to the next candidate.
+   - Cache and periodically refresh available deployments to avoid repeated failed attempts.
+
+5. Use a resilient LLM client wrapper
+   - Centralize model selection, pre-checks, retry/backoff, fallback, circuit breaker, and concurrency limiting.
+   - Log structured errors (code, message, alias, provider, region) and increment metrics for rate limits, fallbacks, and hard failures.
+   - Add a token/concurrency budget to avoid triggering rate limits under load.
+
+6. Avoid external dependency during unit/integration tests
+   - Mock/stub the LLM client so tests don’t depend on provider availability.
+   - Gate real calls behind an environment flag (e.g., USE_REAL_LLM=false for CI).
+   - Provide deterministic test fixtures for typical responses and errors.
+
+7. Degrade gracefully when tools fail
+   - If an LLM call fails and a response is needed, fall back to a simpler reasoning path, cached outputs, or a smaller local model, rather than returning the raw API error and stopping.
+   - Communicate a clear fallback message and continue the task with best-effort output.
+
+Reference implementation sketch
+- Model selection:
+  - Resolve alias → list of available deployments.
+  - Filter out entries in cooldown_list.
+  - Pick the best candidate (e.g., latest, lowest latency).
+
+- Call procedure:
+  - Try candidate with retry/backoff + jitter on 429/503; honor Retry-After.
+  - If max retries exceeded or “no deployments available,” rotate to next candidate.
+  - If all candidates fail, escalate to fallback model list; repeat.
+
+- Circuit breaker:
+  - If repeated failures happen for a deployment, trip a breaker and add to cooldown for a TTL (e.g., 5–15 minutes).
+
+- Testing:
+  - Provide a mock LLM that simulates success/error paths to verify retry/fallback logic.
+  - Include tests for:
+    - Invalid alias → fallback succeeds.
+    - 429 with Retry-After → waits and succeeds.
+    - All candidates unavailable → returns a graceful degraded response.
+
+Checklist to make the agent pass reliably
+- Replace the invalid model alias with a valid, deployed one.
+- Turn on pre-call checks and deployment discovery.
+- Implement retry/backoff with jitter and honor “Try again in N seconds.”
+- Add a fallback chain of models/providers; rotate on failures.
+- Respect the cooldown list; don’t hammer the same unavailable endpoints.
+- Mock the LLM in tests; avoid real provider calls in CI.
+- Add logging/metrics to observe rate limits and availability issues.
+- Ensure the agent continues the task with a fallback response rather than aborting on the first 429.
+
+With these fixes, the agent will no longer fail outright on capacity or configuration issues, and the original prompt can proceed even when the primary model is unavailable.

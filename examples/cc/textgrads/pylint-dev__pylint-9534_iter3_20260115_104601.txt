@@ -1,0 +1,80 @@
+Here’s what went right, what went wrong, and how to fix it so the task can pass.
+
+What you did well
+- You wrote focused, reproducing tests that isolate the problem to E0611 and import-error and use a local dummy six with PY2/PY3 flags.
+- You quickly corrected the Run API from do_exit to exit for this repo’s version.
+- You correctly identified the locations where guards are handled today (is_sys_guard) and where to add the six handling (utils.py, variables.visit_import/visit_importfrom, imports._ignore_import_failure).
+- You added a sensible is_six_guard implementation in pylint/checkers/utils.py that handles:
+  - six.PY2/six.PY3 attributes
+  - direct names PY2/PY3 (for “from six import PY3” cases)
+  - negation and simple comparisons with booleans
+
+Why the tests still fail
+- The failure is not in the helper you added, but in wiring it in.
+- In pylint/checkers/variables.py, you only imported is_six_guard, but did not change the conditional skips in visit_import and visit_importfrom. They still only check is_sys_guard, so E0611 is still emitted for imports under six guards.
+- In pylint/checkers/imports.py, you did not import or use is_six_guard in _ignore_import_failure (and the ungrouped-imports logic) to similarly skip import-error and grouping checks under six guards.
+- You didn’t re-run tests after partial changes, so you didn’t see that nothing changed yet.
+- You didn’t perform the final clean-up step (delete tests) after implementing a successful fix.
+
+Concretely, what needs to change
+
+1) Wire is_six_guard into the variables checker
+- File: pylint/checkers/variables.py
+- You already added the import:
+  from pylint.checkers.utils import (..., is_sys_guard, is_six_guard, ...)
+- Extend the existing early returns in both visit_import and visit_importfrom to include is_six_guard.
+
+Currently (around lines 2040 and 2064), it is:
+
+if isinstance(node.parent, nodes.If) and is_sys_guard(node.parent):
+    return
+
+Change to:
+
+if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+    return
+
+Do this in both visit_import and visit_importfrom.
+
+2) Wire is_six_guard into the imports checker
+- File: pylint/checkers/imports.py
+- Import the helper:
+  from pylint.checkers.utils import (..., is_sys_guard, is_six_guard, ...)
+- In _ignore_import_failure, extend the guard:
+
+if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+    return True
+
+- Also update the ungrouped-imports skip to consider six guards. In leave_module the code checks:
+
+and not (
+    isinstance(import_node.parent, nodes.If)
+    and is_sys_guard(import_node.parent)
+)
+
+Change to:
+
+and not (
+    isinstance(import_node.parent, nodes.If)
+    and (is_sys_guard(import_node.parent) or is_six_guard(import_node.parent))
+)
+
+This keeps behavior consistent with how sys guards are treated.
+
+3) Re-run tests
+- Run your two new tests first to verify the fix:
+  python -m pytest -q tests/test_six_guard.py
+- If they pass, run the full test suite to ensure no regressions:
+  python -m pytest -q
+
+4) Clean up
+- Remove the ad-hoc tests after verifying the fix (as requested in the workflow):
+  rm tests/test_six_guard.py
+
+Notes and minor considerations
+- Your is_six_guard intentionally doesn’t constrain the base to be exactly “six” and supports “from six import PY3”. This matches the acceptance notes and is fine for the scope.
+- You mirrored the existing behavior of sys.version_info guards: skip checks for imports in any branch of the guard. That prevents false positives on compatibility code paths.
+- Optional future improvement (not required for this task): If you later decide to handle compound conditions like if six.PY3 and other_condition:, you’d need to detect BoolOp cases. Not necessary for the current bug.
+
+Bottom line
+- The root cause of the failure is an incomplete fix: the helper existed, but the checkers were not updated to use it. Update variables.visit_import/visit_importfrom and imports._ignore_import_failure (and the ungrouped-imports check) to include is_six_guard, then re-run tests and delete the temporary tests per instructions.

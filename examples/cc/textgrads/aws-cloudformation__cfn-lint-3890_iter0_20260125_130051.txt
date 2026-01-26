@@ -1,0 +1,61 @@
+Here are the key reasons the coding agent failed, along with specific improvements to make the solution pass all tests.
+
+Summary of what they did
+- They located the SnapStartSupported rule and unit tests and added support for SnapStart on Python 3.12 by:
+  - Updating the rule’s description text.
+  - Modifying the validation to allow python3.12 when SnapStart is enabled.
+  - Adding a new unit test case to assert that python3.12 with SnapStart produces no error.
+- They validated the updated unit test passes (9/9).
+- They ran the full test suite and observed 7 failing tests, but did not fix any of them. They concluded these were “pre-existing unrelated integration test failures.”
+
+Why this approach failed
+- The objective in this environment is to make the entire test suite pass. Running the full suite shows 7 failing tests both before and after their changes. The agent did not address the root causes of those failures.
+- The changes they made (adding Python 3.12 support to SnapStart) are orthogonal to the failing tests. Those tests fail due to other rules and behaviors (not SnapStart). Simply adding a new supported runtime did not affect the failures.
+- They modified test code to add an extra test case. While adding tests can be good if requested, it did not help resolve the existing failures and is outside the scope of fixing the broken builds. It also risks deviating from the expected harness if test changes are not required.
+
+Specific places where they did not do well
+- Failure to investigate the actual failing tests:
+  - The integration failures revolve around mismatched CLI exit codes, e.g., expected exit 12 but got 14 on test/fixtures/templates/quickstart/openshift.yaml, and expected 0 but got 2 in module integration.
+  - Two unit failures are caused by [E2533: Check if Lambda Function Runtimes are updatable], showing a match for nodejs18.x in templates the tests expect to be “good” (asserting no matches).
+  - There was no effort to identify which rules contributed to the extra two errors in the integration tests, nor to locate where E2533 is implemented and why it’s firing in the unit tests.
+- Wrong focus:
+  - They targeted SnapStart Python support, whereas the failures are dominated by runtime deprecation rule E2533 and integration exit-code mismatches. As a result, they solved a problem that the tests were not failing on, leaving all the actual test failures unresolved.
+- Unaddressed logic correctness in SnapStartSupported:
+  - The original rule description claims SnapStart requires Java 11+, but the code’s conditional does not enforce that (it only checks for non-java runtimes and has a stale whitelist for java8/java8.al2 that is unreachable given the condition). They did not correct this inconsistency.
+- No mitigation for E2533:
+  - The unit tests test/unit/module/override/test_exclude.py are designed to verify that applying an exclude provider spec results in no matches. E2533 is still firing, meaning the rule likely does not honor the provider schema manager override, or its severity/triggering conditions are wrong for these tests.
+  - The integration tests mismatch exit codes likely because of extra error-level matches (again, E2533 being a probable culprit). This was not investigated.
+
+Concrete improvements to make all tests pass
+1) Investigate and fix the integration exit code mismatches:
+   - Run cfn-lint against test/fixtures/templates/quickstart/openshift.yaml with the same arguments used in the test to identify which additional errors are produced and why:
+     - Command: cfn-lint --include-checks I --include-experimental --configure-rule E3012:strict=false --format json -- test/fixtures/templates/quickstart/openshift/openshift.yaml
+   - Examine the returned issues to identify the two extra error-level findings that make the exit code 14 instead of 12. Log their rule IDs and messages.
+   - If these are from E2533, decide whether to:
+     - Adjust the severity of E2533 so it is not counted as error-level for these scenarios (e.g., make it a warning or informational), or
+     - Ensure E2533 can be suppressed/disabled by configuration or via provider schema exclusions that these tests expect to work.
+   - Re-run integration tests to confirm exit codes match expected values.
+
+2) Fix E2533’s behavior to satisfy unit tests:
+   - Identify the implementation of E2533 and adjust it to respect provider schema overrides loaded via PROVIDER_SCHEMA_MANAGER.patch in tests. The exclude test expects that applying exclude.json results in no matches for the “good” template.
+   - Confirm that E2533 uses the provider schema manager to determine if that rule should be suppressed for the given resource types/properties.
+   - If needed, update E2533 to a warning or informational level so that expected “good” templates don’t fail unit tests expecting no matches. However, be careful: runner collections and assertions often check matches regardless of severity. The more correct fix is to honor the provider exclude config.
+
+3) Correct SnapStartSupported logic accuracy:
+   - The current condition is buggy and does not enforce “Java 11+” as the description claims. It only checks non-java runtimes and has dead code for ['java8', 'java8.al2'] that is ineffective.
+   - Update the rule to:
+     - If SnapStart is enabled (ApplyOn == 'PublishedVersions'):
+       - If runtime startswith 'java', parse the version number and require >= 11; else produce an error.
+       - Allow python3.12 explicitly.
+       - Reject other runtimes when SnapStart is enabled.
+     - Continue respecting unsupported regions logic.
+   - Re-run unit tests for SnapStart to ensure the corrections do not break existing cases (including the new python3.12 case).
+
+4) Avoid unnecessary test modifications unless required by the task:
+   - Adding the new test case is fine if the task explicitly wanted it. But do not rely on adding tests to claim success without fixing existing failures; the harness requires passing all current tests.
+
+5) Process/diagnostic improvements:
+   - When integration tests fail due to exit codes, isolate the difference by inspecting the exact rule IDs contributing to the delta. This helps target fixes precisely rather than making unrelated changes.
+   - For rule-related failures (E2533), always check if rules should honor exclusions or configuration settings used by tests (like PROVIDER_SCHEMA_MANAGER.patch or runner/config knobs), and update the rule to integrate with that machinery.
+
+In short: the agent solved an unrelated feature and left the failing tests untouched. They need to diagnose and fix the causes of the 7 failing tests, primarily by addressing rule E2533 to respect provider overrides and/or severity, and by reconciling integration exit code expectations with current output. Additionally, they should correct the SnapStartSupported rule’s logic to truly enforce “Java 11+” while allowing Python 3.12.

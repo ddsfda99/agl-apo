@@ -1,0 +1,84 @@
+Below is a detailed review of the coding agent’s execution trace, why it failed, and how it should improve to meet the requirements and pass the intended tests.
+
+What the agent tried to do
+- Implement support for using “self.name” in tools.cmake.cmake_layout:build_folder_vars so CMake build folders and presets can be disambiguated across sibling recipes.
+- Modify conan/tools/cmake/layout.py to accept “self.name” in get_build_folder_custom_vars() and include it in the naming tokens (in lowercase), ignore it if conanfile.name is missing, and update the error message to mention “self.name”.
+- Update the help text for the configuration key in conans/model/conf.py to mention “Settings, Options, and ‘self.name’”.
+- Create new tests to validate preset names and folders include self.name according to accepted behavior.
+
+Where the agent went wrong
+1) Ran the entire pytest test suite
+   - The acceptance criteria explicitly said to test only the presets generation and avoid external tools. Running the full test suite triggered hundreds of unrelated tests requiring external tools (CMake, Ninja, Bazel, Meson, SCons, apt/sudo), producing massive noise:
+     - “cmake: not found”, “Required 'cmake' tool version 'Any' is not available”
+     - “sudo: not found”
+     - Other unrelated failures in read-only file tests and cache/profile tests
+   - This made it hard to see whether the feature implementation was correct. The environment doesn’t have external build tools, so those tests cannot pass.
+
+2) Initial tests incorrectly assumed build folder paths
+   - Single-config behavior depends on whether “settings.build_type” is included in build_folder_vars (user_defined_build):
+     - If settings.build_type is NOT in build_folder_vars (user_defined_build False), cmake_layout adds a “Release/Debug” subfolder under build. Generators are in build/<token>/Release/generators.
+     - If settings.build_type IS in build_folder_vars (user_defined_build True), no extra “Release/Debug” subfolder under build; generators are in build/<token>/generators.
+   - The initial test expected “Release/generators” in all single-config cases, which is only correct when settings.build_type is not included in build_folder_vars. The agent had to introduce a flag include_release_subdir to the test helper function and adjust calls accordingly.
+
+3) Tests for apple-clang and msvc missing necessary settings
+   - Tests parametrized for compiler=apple-clang and compiler=msvc initially omitted required settings (compiler.version, compiler.libcxx for apple-clang; compiler.runtime and compiler.runtime_type for msvc), causing InvalidConfiguration errors:
+     - “Invalid setting '12' is not a valid 'settings.compiler.version' value” (needs "12.0")
+     - “Invalid: 'settings.compiler.runtime' value not defined” for msvc
+   - The agent later fixed this by adding version and runtime settings in the test.
+
+4) Overly broad test scope and multi-config assumptions
+   - The added tests included Windows-only multi-config scenarios. That’s fine, but combining compilers in a test parameterization (gcc, apple-clang, msvc) without setting proper versions or runtime settings led to failures.
+   - The tests should be kept minimal and avoid platform-specific fragility unless strictly required.
+
+What worked
+- The code change in conan/tools/cmake/layout.py correctly:
+  - Parses “self.name” only when the token is exactly “self.name”
+  - Lowercases the value and includes it in the returned tokens
+  - Ignores it if conanfile.name is falsy
+  - Updates the error message to include “or be 'self.name'”
+  - Does not alter the existing behavior for settings.* and options.* tokens
+
+- The help text in conans/model/conf.py now mentions ‘self.name’ in the description of tools.cmake.cmake_layout:build_folder_vars.
+
+- The tests were ultimately made to pass when run alone:
+  - Adjusted path expectations for single-config layout with include_release_subdir flag
+  - Added sensible compiler settings for apple-clang and msvc
+  - Verified preset name prefix “conan-” remained consistent and displayName formatting unchanged
+
+How to improve and pass the intended tests
+- Do not run the whole pytest suite in this environment. Run only the new tests validating the feature:
+  - Use pytest -q conans/test/functional/toolchains/cmake/test_cmake_presets_self_name.py
+  - This file now passes: 6 passed, 1 skipped
+- Keep tests strictly scoped to presets generation:
+  - Tests should call “conan install” to generate CMakePresets.json and assert on its content.
+  - Do not call cmake, ninja, or other build tools. Avoid anything requiring compilers or toolchains to run.
+- Ensure path assertions match cmake_layout behavior:
+  - If settings.build_type is not in build_folder_vars (user_defined_build False), expect “build/<token>/Release/generators” (or Debug).
+  - If settings.build_type is in build_folder_vars (user_defined_build True), expect “build/<token>/generators”.
+  - The helper _generators_folder_with_name(client, name_token, include_release_subdir=False) should be used as:
+    - include_release_subdir=True for single-config without “settings.build_type” in build_folder_vars (e.g., build_folder_vars=[“self.name”]).
+    - include_release_subdir=False when “settings.build_type” is in build_folder_vars (e.g., build_folder_vars=[“self.name”, “settings.build_type”]).
+- Provide valid compiler settings where needed:
+  - For apple-clang: compiler.version=12.0 and compiler.libcxx=libc++
+  - For msvc: compiler.version=193 plus compiler.runtime=dynamic and compiler.runtime_type=Release (or whatever minimal valid combination is acceptable)
+- Confirm error message updates:
+  - Your change to the error message now includes “self.name”. Any test asserting the exact error string should be updated to accept this wording.
+  - Add a test that checks invalid tokens cause an error that mentions allowed prefixes and “self.name” (you already did this).
+- Avoid regressions:
+  - Only accept “self.name”, not generic “self.*”.
+  - Keep lowercasing the added token so it matches existing naming convention.
+  - Keep preset prefix “conan-” and displayName formatting unchanged.
+
+Optional additional improvements
+- Add unit-level test(s) for get_build_folder_custom_vars() to assert returned token strings and the user_defined_build flag for combinations of build_folder_vars, including “self.name”.
+- Check if any “config list” output tests rely on the exact wording of BUILT_IN_CONFS and adjust them if necessary (your change is consistent with the new behavior).
+
+Summary of concrete changes that were needed
+- conan/tools/cmake/layout.py: Accept “self.name” token and include it in build folder/preset naming, lowercase, ignore if missing; error message updated.
+- conans/model/conf.py: Documentation help text updated to include ‘self.name’.
+- Tests:
+  - New tests to assert naming behavior (single-config, multi-config, combined-order, missing self.name, invalid token message).
+  - Path helper function updated to conditionally include “Release/generators” subfolder based on user_defined_build.
+  - Compiler settings added for apple-clang and msvc to avoid InvalidConfiguration errors.
+
+By following the above corrections—especially limiting test execution to only the relevant new tests in this environment and ensuring valid settings—the agent’s changes meet the stated requirements, and the tests validating this feature pass.

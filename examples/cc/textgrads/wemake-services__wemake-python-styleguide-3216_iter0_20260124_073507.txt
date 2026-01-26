@@ -1,0 +1,43 @@
+Here is a detailed review of the coding agent’s execution trace, identifying why it failed and how it can improve:
+
+What the agent attempted
+- Explored the repository and found the cognitive complexity implementation in wemake_python_styleguide/logic/complexity/cognitive.py and its tests.
+- Identified that match-case wasn’t covered and decided to add support by counting ast.match_case as a control flow breaker.
+- Modified the tests to add new match-case scenarios and expectations.
+- Tried to run pytest (not installed) and instead wrote a small script to test the new behavior, shimming typing_extensions when it was missing.
+
+Issues and mistakes
+1) Changing the test suite is not acceptable
+- The agent added new test cases (match-case scenarios) to tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py. When working on a code change to pass tests, you should not modify the tests unless explicitly instructed to. Modifying tests can mask failures and violates the principle of fixing the implementation to meet the existing requirements. In general, passing CI requires keeping the test suite intact.
+- The test additions make it hard to tell if the agent’s changes actually fixed a test failure or simply changed the expectations.
+
+2) Unconditional use of ast.match_case can break on older Python versions
+- The agent added ast.match_case to _CONTROL_FLOW_BREAKERS in cognitive.py. In Python 3.10+, ast.match_case exists, but in earlier versions it does not. Unconditionally referencing ast.match_case at import time would raise an AttributeError in environments that don’t have match-case (e.g., Python < 3.10).
+- The repository includes tests referencing Python 3.12 features, but that doesn’t guarantee the test runtime uses Python ≥ 3.10. A robust change should guard against missing AST nodes by feature-detecting attributes or using a version check, so the code imports cleanly across supported Python versions.
+
+3) Lack of full test execution and validation
+- The agent couldn’t run pytest and didn’t try to run the full suite with a proper tool installation or equivalent harness. They validated only three artificial snippets. This does not guarantee the entire test suite passes.
+- They used a custom typing_extensions shim to run their local script. This is fine for local verification but doesn’t reflect the actual CI environment and could hide integration issues.
+
+4) Potential misunderstanding of cognitive complexity counting for match-case
+- The agent chose to count each case individually as a control-flow breaker rather than counting the Match node itself. While this might be reasonable, it should be aligned with the project’s intended metric semantics. Without existing tests to enforce this behavior, introducing a new counting rule is speculative and might conflict with project guidelines.
+- Any change to how complexity is computed should rely on existing tests or documented requirements. If the test suite didn’t include match-case, the correct course is to implement support conservatively and avoid changing tests unless there is a formal requirement or failing tests that demand it.
+
+5) Minor hygiene and environment assumptions
+- They attempted to run pytest and, upon failure, didn’t mention installing it or using project’s tooling. A better approach would be to rely on available CI or provide a fallback within the project’s plugin fixtures to ensure proper compilation/AST transformation.
+
+How to improve
+- Do not modify tests unless explicitly required by the task. Focus on fixing the implementation to pass the current tests.
+- Guard optional AST features:
+  - Instead of unconditionally referencing ast.match_case, detect its presence:
+    - Use hasattr(ast, 'match_case') or a Python version check to include match-case only when available.
+    - This avoids import-time errors on older versions.
+- Validate with the project’s existing fixtures:
+  - Use the tests/plugins/ast_tree.parse_ast_tree fixture to mimic actual transformations and compilation. If pytest is not available, write a small driver that imports and uses that fixture or mimics its behavior more closely instead of ad-hoc shims.
+- Ensure behavior matches project semantics:
+  - Confirm whether the project intends to count match-case per case or as a single control-flow breaker. If unclear and there are no tests, implement support in a backward-compatible way, and avoid changing test expectations.
+- Run the full test suite:
+  - If pytest isn’t available locally, note that limitation and avoid assuming that local snippets guarantee suite success. Provide changes that won’t break import across environments and keep tests untouched.
+
+Summary of the failure cause
+- The agent’s main failure was altering the test suite and introducing unguarded usage of ast.match_case, which could cause import errors on older Python versions. They also did not run the full test suite and relied on a narrow local check, which does not prove correctness across all tests.

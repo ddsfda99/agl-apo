@@ -1,0 +1,75 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index dc7f0c433f..0b9a11b106 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -5193,6 +5193,7 @@ class Axes(_AxesBase):
+ 
+         if xscale == 'log' or yscale == 'log':
+             polygons = np.expand_dims(polygon, 0) + np.expand_dims(offsets, 1)
++            # Exponentiate polygon vertices back to data coordinates on log axes.
+             if xscale == 'log':
+                 polygons[:, :, 0] = 10.0 ** polygons[:, :, 0]
+                 xmin = 10.0 ** xmin
+@@ -5203,11 +5204,31 @@ class Axes(_AxesBase):
+                 ymin = 10.0 ** ymin
+                 ymax = 10.0 ** ymax
+                 self.set_yscale(yscale)
+-            collection = mcoll.PolyCollection(
++            # Compute centers in data coordinates for retrieval via get_offsets.
++            centers = offsets.copy()
++            if xscale == 'log':
++                centers[:, 0] = 10.0 ** centers[:, 0]
++            if yscale == 'log':
++                centers[:, 1] = 10.0 ** centers[:, 1]
++            class _HexbinPolyCollection(mcoll.PolyCollection):
++                def __init__(self, verts, centers, **kwargs):
++                    super().__init__(verts, **kwargs)
++                    self._hexbin_centers = centers
++                def get_offsets(self):
++                    # Expose centers to users calling get_offsets.
++                    return self._hexbin_centers
++                def _prepare_points(self):
++                    # Ensure rendering remains unchanged by using a zero offset.
++                    transform = self.get_transform()
++                    offset_trf = self.get_offset_transform()
++                    paths = self.get_paths()
++                    return transform, offset_trf, np.zeros((1, 2)), paths
++            collection = _HexbinPolyCollection(
+                 polygons,
++                centers=centers,
+                 edgecolors=edgecolors,
+                 linewidths=linewidths,
+-                )
++            )
+         else:
+             collection = mcoll.PolyCollection(
+                 [polygon],
+diff --git a/lib/matplotlib/tests/test_axes.py b/lib/matplotlib/tests/test_axes.py
+index 3666b16e6d..b63c84e5d3 100644
+--- a/lib/matplotlib/tests/test_axes.py
++++ b/lib/matplotlib/tests/test_axes.py
+@@ -1038,6 +1038,24 @@ def test_hexbin_log_clim():
+     assert h.get_clim() == (2, 100)
+ 
+ 
++def test_hexbin_get_offsets_linear_and_loglog():
++    fig, ax = plt.subplots()
++    # Linear scale: offsets should be non-zero with data.
++    h_lin = ax.hexbin([1, 10, 100], [1, 10, 100], mincnt=1)
++    off_lin = h_lin.get_offsets()
++    assert off_lin.shape[1] == 2
++    assert not np.allclose(off_lin, np.zeros((1, 2)))
++    # Log-log scale: previously returned [[0., 0.]], ensure non-zero now.
++    fig, ax = plt.subplots()
++    h_log = ax.hexbin([1, 10, 100], [1, 10, 100], mincnt=1,
++                      xscale='log', yscale='log')
++    off_log = h_log.get_offsets()
++    assert off_log.shape[1] == 2
++    assert not np.allclose(off_log, np.zeros((1, 2)))
++    # The number of offsets should match the number of bin values.
++    assert len(off_log) == len(h_log.get_array())
++
++
+ @check_figures_equal(extensions=['png'])
+ def test_hexbin_mincnt_behavior_upon_C_parameter(fig_test, fig_ref):
+     # see: gh:12926

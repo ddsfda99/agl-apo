@@ -1,0 +1,99 @@
+You are given a code repository in the current directory.
+The task description is:
+[feature] Allow self.name in tools.cmake.cmake_layout:build_folder_vars
+In our org we have multiple recipes with a shared code basis. The directory structure is as following:
+```sh
+.
+├── CMakeLists.txt
+├── simple_example.cc
+├── sub1
+│   └── conanfile.py
+└── sub2
+    └── conanfile.py
+```
+The conan files look something like this:
+```python
+from conan import ConanFile
+from conan.tools.cmake import CMakeToolchain, CMake, cmake_layout
+
+class sub2Recipe(ConanFile):
+    name = "sub2"
+    version = "1.0"
+    def layout(self):
+        cmake_layout(self, generator="Ninja", src_folder="..")
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+```
+When I now run:
+```sh
+ conan install sub1/conanfile.py
+ conan install sub2/conanfile.py
+``` 
+
+I get a CMakeUserPresets.json that refers to both CMakePresets.json in their respective `subX/build/generators/CMakePresets.json` folder. The problem now is that for both CMakePresets the names are identical:
+```json
+    "configurePresets": [
+        {
+            "name": "release",
+            "displayName": "'release' config",
+            "description": "'release' configure using 'Unix Makefiles' generator",
+            ...
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "release",
+            "configurePreset": "release"
+        }
+    ],
+```
+
+VSCode will show both displayNames and it is impossible to tell which one is going to build what.
+
+So my idea of how to fix that would be the following, allow to run install like this:
+```sh
+conan install -ctools.cmake.cmake_layout:build_folder_vars="['self.name']" sub1/conanfile.py
+```
+
+Which results in:
+```json
+    "configurePresets": [
+        {
+            "name": "sub1-release",
+            "displayName": "'sub1-release' config",
+            "description": "'sub1-release' configure using 'Unix Makefiles' generator",
+            ...
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "sub1-release",
+            "configurePreset": "sub1-release"
+        }
+    ],
+```
+
+Another nice side-effect is that I can also have a common build folder at the "root":
+```
+cmake_layout(self, generator="Ninja", src_folder="..", build_folder="../build")
+```
+
+- [x] I've read the [CONTRIBUTING guide](https://github.com/conan-io/conan/blob/develop/.github/CONTRIBUTING.md).
+
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

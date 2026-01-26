@@ -1,0 +1,78 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+Composite script with multiple invocations triggers recursive script error
+- [x] I have searched the issue tracker and believe that this is not a duplicate.
+
+**Make sure you run commands with `-v` flag before pasting the output.**
+
+## Steps to reproduce
+
+- Script snippet for `pyproject.toml`:
+  ```
+  [tool.pdm.scripts]
+  foo.composite = ["bar hello", "bar world"]
+  bar.composite = ["baz {args}"]
+  baz.shell = "echo {args}"
+  ```
+- Run the "foo" script:
+  `pdm run -v foo`
+
+## Actual behavior
+
+```
+Running <task foo>: []
+Running <task bar>: ['hello']
+Running <task baz>: echo hello
+hello
+[PdmUsageError]: Script bar is recursive.
+```
+Exit code: 1
+
+## Expected behavior
+
+```
+Running <task foo>: []
+Running <task bar>: ['hello']
+Running <task baz>: echo hello
+hello
+Running <task bar>: ['world']
+Running <task baz>: echo world
+world
+```
+Exit code: 0
+
+## Environment Information
+
+```bash
+PDM version:
+  2.14.0
+Python Interpreter:
+  /redacted/.venv/bin/python (3.12)
+Project Root:
+  /redacted
+Local Packages:
+  
+{
+  "implementation_name": "cpython",
+  "implementation_version": "3.12.0",
+  "os_name": "posix",
+  "platform_machine": "x86_64",
+  "platform_release": "5.15.133.1-microsoft-standard-WSL2",
+  "platform_system": "Linux",
+  "platform_version": "#1 SMP Thu Oct 5 21:02:42 UTC 2023",
+  "python_full_version": "3.12.0",
+  "platform_python_implementation": "CPython",
+  "python_version": "3.12",
+  "sys_platform": "linux"
+}
+```
+
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

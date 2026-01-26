@@ -1,0 +1,127 @@
+You are given a code repository in the current directory.
+The task description is:
+Strange case with deepcopy() and Literal[True]
+The following code:
+```python3
+from copy import deepcopy
+from typing import Literal, Union
+
+def f(a: str, b: bool) -> Union[Literal[True], str]:
+    return b or deepcopy(a)
+
+print(f("abc", False))
+print(f("abc", True))
+```
+produces the following output:
+```bash
+$ python3 test.py
+abc
+True
+
+$ mypy test.py
+test.py: note: In function "f":
+test.py:5:12: error: Incompatible return value type (got "bool", expected "Union[Literal[True], str]")  [return-value]
+        return b or deepcopy(a)
+               ^
+test.py:5:26: error: Argument 1 to "deepcopy" has incompatible type "str"; expected "bool"  [arg-type]
+        return b or deepcopy(a)
+                             ^
+Found 2 errors in 1 file (checked 1 source file)
+
+$ python3 --version
+Python 3.8.10
+
+$ mypy --version
+mypy 0.931
+
+$ cat /etc/issue
+Ubuntu 20.04.3 LTS \n \l
+
+$ uname -a
+Linux ubuntu 5.4.0-94-generic #106-Ubuntu SMP Thu Jan 6 23:58:14 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+```
+If `deepcopy()` call is removed, warnings go away.
+
+In some similar cases only the second warning appears, which looks even weirder.
+
+Mypy incorrectly gives an error for a ternary return statement
+<!--
+If you're not sure whether what you're experiencing is a mypy bug, please see the "Question and Help" form instead.
+Please consider:
+
+- checking our common issues page: https://mypy.readthedocs.io/en/stable/common_issues.html
+- searching our issue tracker: https://github.com/python/mypy/issues to see if it's already been reported
+- asking on gitter chat: https://gitter.im/python/typing
+-->
+
+**Bug Report**
+
+<!--
+If you're reporting a problem with a specific library function, the typeshed tracker is better suited for this report: https://github.com/python/typeshed/issues
+
+If the project you encountered the issue in is open source, please provide a link to the project.
+-->
+
+Hi, I was using mypy and I think I've noticed a bug. For a function that returns either List[str] or List[List[str]], mypy gives an error if the return type is decided as a ternary. However, if the return type is decided with an 'if-else' instead, there are no problems. I also tested a similar function, except where the return type is either a float or str. In that case, mypy had no problems with the ternary usage.
+
+**To Reproduce**
+
+```python
+from typing import Union, List
+
+def get_str_float(b: bool) -> Union[str, float]:
+    return 8 if b else '8' # mypy correctly gives no error here
+
+def get_list(b: bool) -> Union[List[str], List[List[str]]]:
+    return ['a'] if b else [['a']] # mypy incorrectly gives an error
+    '''
+    Mypy gives no error if I replace the above line with the following:
+    if b:
+        return ['a']
+    else:
+        return [['a']]
+    '''
+
+def main():
+    print(get_list(True))
+    print(get_str_float(True))
+
+if __name__ == "__main__":
+    main()
+```
+
+**Expected Behavior**
+
+<!--
+How did you expect mypy to behave? It’s fine if you’re not sure your understanding is correct.
+Write down what you thought would happen. If you expected no errors, delete this section.
+-->
+No errors
+
+**Actual Behavior**
+
+`main.py:7: error: List item 0 has incompatible type "List[str]"; expected "str"  [list-item]`
+`Found 1 error in 1 file (checked 1 source file)`
+
+**Your Environment**
+
+<!-- Include as many relevant details about the environment you experienced the bug in -->
+
+- Mypy version used: mypy 1.3.0 (compiled: yes)
+- Mypy command-line flags: none - just ran `mypy main.py`
+- Mypy configuration options from `mypy.ini` (and other config files): none
+- Python version used: 3.11.0
+- OS: Windows 11
+
+<!-- You can freely edit this text, please remove all the lines you believe are unnecessary. -->
+
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

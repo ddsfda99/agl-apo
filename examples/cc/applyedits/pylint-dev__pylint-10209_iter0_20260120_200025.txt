@@ -1,0 +1,104 @@
+You are working in a local checkout of the Pylint repository. Your goal is to eliminate a false positive in the invalid-getnewargs-ex-returned message for valid implementations of __getnewargs_ex__ that return local variables holding a tuple and a dict.
+
+Context and bug description
+- The reported issue: Pylint emits invalid-getnewargs-ex-returned when __getnewargs_ex__ returns variables args and kwargs that were defined earlier in the method as a tuple and a dict.
+- Example:
+  class A:
+      def __init__(self, boo, far, *, hoo, haha):
+          self._foo = boo
+          self._bar = far
+          self._hoo = hoo
+          self._haha = haha
+
+      def __getnewargs_ex__(self):
+          args = (self._foo, self._bar)
+          kwargs = {'hoo': self._hoo, 'haha': self._haha}
+          return args, kwargs
+- Expected: No invalid-getnewargs-ex-returned error.
+- Current behavior: Pylint wrongly flags this as invalid.
+
+Root cause and fix overview
+- The checker in pylint/checkers/classes/special_methods_checker.py analyzes the return of __getnewargs_ex__ and inspects the two elements of the returned tuple.
+- It only attempts safe inference when the element is a Call node. In the valid example, the elements are Name nodes referring to local variables ("args" and "kwargs"), so they are not inferred to their assigned values and are misclassified.
+- Fix: In SpecialMethodsChecker._check_getnewargs_ex, attempt safe_infer on each element of the returned tuple regardless of its node type (Name, AssignName, Attribute, Call, etc.). If inference succeeds, check the inferred node is a tuple for the first element and a dict for the second element. If inference fails (Uninferable or None), do not flag an error to avoid false positives.
+
+Important constraints
+- Do not commit any changes.
+- Do not rely on running the repository’s functional tests via pytest; instead, validate by running Pylint directly against a temporary file.
+- Use the local repository code when running Pylint to ensure your fix is picked up (set PYTHONPATH to the repo root so Python imports the local pylint package).
+
+Step-by-step plan
+1) Understand the expected behavior and the bug
+- __getnewargs_ex__ must return a 2-tuple: first element is a tuple of positional args, second element is a dict of keyword args.
+- Pylint should accept returns that use local variables bound to the correct types.
+
+2) Create a reproduction file to confirm the bug
+- Create a temporary file /tmp/pylint_bug.py with the exact example:
+  class A:
+      def __init__(self, boo, far, *, hoo, haha):
+          self._foo = boo
+          self._bar = far
+          self._hoo = hoo
+          self._haha = haha
+
+      def __getnewargs_ex__(self):
+          args = (self._foo, self._bar)
+          kwargs = {'hoo': self._hoo, 'haha': self._haha}
+          return args, kwargs
+- Run Pylint from the local repo on this file before making changes to confirm the error appears:
+  PYTHONPATH="$(pwd)" python -c "from pylint.lint import Run; Run(['/tmp/pylint_bug.py'])"
+- Verify you see E0313: invalid-getnewargs-ex-returned among the outputs.
+
+3) Locate the relevant code to change
+- Search for the message definition and checker:
+  grep -R "invalid-getnewargs-ex-returned" -n
+- Open pylint/checkers/classes/special_methods_checker.py and find the method SpecialMethodsChecker._check_getnewargs_ex.
+- Review how it infers the return value and then iterates over the elements it expects to be a tuple and a dict.
+
+4) Implement the fix
+- In _check_getnewargs_ex:
+  - The method already infers the overall return node and confirms it is a Tuple with two elements. Keep that logic.
+  - For each element (the first should be a tuple, the second a dict), remove the restriction that only infers when the element is a Call. Instead:
+    - Always attempt to infer each element using astroid.util.safe_infer.
+    - If inference returns a node and not util.UninferableBase, apply the existing type checks _is_tuple for the first element and _is_dict for the second.
+    - If inference fails (returns None or Uninferable), do not set found_error. This avoids false positives when Pylint cannot reliably infer local names or attributes.
+- Pseudocode transformation within the loop inspecting the two elements:
+  for i, element in enumerate(returned_tuple.elts):
+      check = _is_tuple if i == 0 else _is_dict
+      inferred = safe_infer(element)
+      if inferred and not isinstance(inferred, util.UninferableBase):
+          if not check(inferred):
+              found_error = True
+              break
+      else:
+          # If we cannot infer the element, do not flag an error.
+          continue
+- Ensure you import or reference safe_infer and util.UninferableBase consistently with the existing file imports.
+
+5) Validate the fix
+- Re-run Pylint against the reproduction file using the local repo code:
+  PYTHONPATH="$(pwd)" python -c "from pylint.lint import Run; Run(['/tmp/pylint_bug.py'])"
+- Confirm that E0313: invalid-getnewargs-ex-returned is no longer emitted for the reproduction case.
+- You may still see other style messages (e.g., missing docstrings); those are unrelated and expected.
+
+6) Optional additional validation
+- Try a slightly varied reproduction where args and kwargs are attributes or names:
+  class B:
+      def __init__(self):
+          self.args = (1, 2)
+          self.kwargs = {'x': 1}
+      def __getnewargs_ex__(self):
+          return self.args, self.kwargs
+- Run Pylint on this snippet to ensure it remains accepted.
+
+7) Clean up
+- Remove /tmp/pylint_bug.py and any other temporary files you created.
+
+Notes on robustness
+- The philosophy in this checker is to avoid false positives when inference fails. Make sure you only flag an error when the inferred node is confidently not a tuple/dict.
+- Keep the existing helper checks (_is_tuple, _is_dict) intact. By inferring Name/Attribute nodes to their assigned values, these helpers should work correctly for valid code and continue to reject invalid returns.
+
+Deliverables to produce locally (without committing)
+- A modified pylint/checkers/classes/special_methods_checker.py implementing the unconditional per-element safe inference with “no error if uninferable”.
+- Terminal evidence before/after showing that invalid-getnewargs-ex-returned disappears for the reproduction file.
+- Removal of temporary files after validation.

@@ -1,0 +1,193 @@
+You are an expert in fixing Matplotlib issues. Your goal is to implement a robust fix so that PathCollection using alpha (scalar or per-element) does not fill entries whose facecolor is 'none'. Learn from the previous attempt’s pitfalls and address them explicitly.
+
+Context and goal
+- Issue: In Matplotlib 3.8.3, when creating a PathCollection with facecolors that include 'none' and also providing alpha (scalar or array-like), the 'none' entries get filled instead of staying fully transparent.
+- Expected behavior: Any facecolor that is 'none' should always remain fully transparent, regardless of alpha being supplied.
+- Root cause location: Collections compute facecolors via matplotlib.colors.to_rgba_array(c, alpha). The alpha override currently applies indiscriminately to all entries, causing 'none' to be ignored.
+- High-level fix: In colors.to_rgba_array, when overriding alpha, skip overriding entries whose original color was the literal string 'none' (case-insensitive). Preserve existing behavior for numeric Nx3/Nx4 inputs.
+
+Reproduction example to understand the bug
+Use this minimal script:
+import matplotlib.pyplot as plt
+from matplotlib.collections import PathCollection
+from matplotlib.path import Path
+
+paths = [
+    Path(
+        [(1, 1), (1, 2), (2, 2), (2, 1), (0, 0)],
+        [Path.MOVETO] + [Path.LINETO] * 3 + [Path.CLOSEPOLY]
+    ),
+    Path(
+        [(4, 4), (5, 5), (5, 4), (0, 0)],
+        [Path.MOVETO] + [Path.LINETO] * 2 + [Path.CLOSEPOLY]
+    ),
+]
+
+fig, ax = plt.subplots()
+collection = PathCollection(
+    paths,
+    edgecolors='black',
+    facecolors=['blue', 'none'],
+    alpha=[1, 1],  # also try alpha=1
+)
+collection.set_transform(ax.transData)
+ax.add_artist(collection)
+ax.set(xlim=(0, 5), ylim=(0, 5))
+plt.show()
+Expected rendering: one filled blue square and one unfilled polygon with black edge only. Buggy behavior fills the second polygon when alpha is provided.
+
+Plan of action
+1) Target the correct code path
+- Implement the fix in lib/matplotlib/colors.py, inside to_rgba_array(c, alpha=None).
+- Adjust the alpha-override logic so that entries originally specified as the literal string 'none' (case-insensitive) are not overridden and remain fully transparent.
+- Do not change the numeric fast paths (Nx3 or Nx4 numpy arrays), where 'none' strings are not present; behavior for those must remain unchanged.
+
+2) Important pitfalls to avoid based on prior failure
+- Do not iterate c twice if it may be a non-Sequence iterable (e.g., generator). The previous attempt risked re-iterating c to build a mask, which breaks for single-pass iterables. Fix: either
+  - Materialize c into a list exactly once (e.g., c_list = list(c)) before building rgba and the mask; or
+  - Build rgba_list and mask_none_list in a single pass, then convert to numpy arrays.
+- Do not use try/except fallbacks to silently handle mask-building errors. Make the logic correct and explicit for all iterable types.
+- Keep error messaging and broadcasting behavior for alpha consistent with existing semantics. If alpha is array-like, validate its length/broadcasting to match the number of colors and raise a clear ValueError on mismatch.
+- Preserve fast path behavior for numeric Nx3/Nx4 arrays. Alpha override still applies to all entries in those cases; do not introduce special-casing there.
+- Recognize only the string 'none' (case-insensitive) as the transparency sentinel for the mask. Use cbook._str_lower_equal(value, 'none'), which safely returns False for non-strings.
+
+3) Implementation guidance in to_rgba_array
+- Identify where the function currently applies the alpha override (typically after computing the RGBA array).
+- For non-numeric, per-entry conversion paths:
+  - Ensure you can build both the rgba array and a mask of which original entries are 'none'.
+  - Recommended approach:
+    - If c is not a numeric numpy array, first materialize c_list = list(c).
+    - Build mask_none = np.array([cbook._str_lower_equal(x, 'none') for x in c_list], dtype=bool).
+    - Convert c_list to an rgba array as currently done (per-entry to_rgba).
+    - If alpha is not None:
+      - If alpha is scalar: set rgba[~mask_none, 3] = float(alpha).
+      - If alpha is array-like: convert to a float array alpha_arr and broadcast/validate to length N = len(c_list). Then set rgba[~mask_none, 3] = alpha_arr[~mask_none].
+    - This ensures entries whose original facecolor is 'none' remain alpha 0.
+- Numeric fast paths (Nx3/Nx4 float arrays):
+  - Leave unchanged. When alpha is provided, override all alphas as today.
+- Single-color inputs:
+  - Existing behavior of to_rgba('none', alpha) yielding fully transparent should remain unchanged.
+- Mixed-type inputs are allowed; mask should only be True for literal 'none' strings; it must not crash on non-strings.
+
+4) Write targeted local tests to validate the fix
+Create a temporary file tests/test_alpha_none_facecolors_local.py with the following tests:
+
+- Test to_rgba_array with scalar alpha and a list with 'none':
+  - Input: c = ['blue', 'none'], alpha = 1
+  - Expect: alpha values [1, 0]
+Code:
+import numpy as np
+import matplotlib.colors as mcolors
+
+def test_rgba_array_scalar_alpha_with_none():
+    rgba = mcolors.to_rgba_array(['blue', 'none'], alpha=1)
+    assert np.isclose(rgba[0, 3], 1)
+    assert np.isclose(rgba[1, 3], 0)
+
+- Test to_rgba_array with per-element alpha and 'none':
+  - Input: c = ['blue', 'none'], alpha = [0.3, 0.9]
+  - Expect: alpha values [0.3, 0]
+Code:
+def test_rgba_array_per_element_alpha_with_none():
+    rgba = mcolors.to_rgba_array(['blue', 'none'], alpha=[0.3, 0.9])
+    assert np.isclose(rgba[0, 3], 0.3)
+    assert np.isclose(rgba[1, 3], 0)
+
+- Test to_rgba_array when c is a generator (non-Sequence iterable):
+  - Input: c = (x for x in ['blue', 'none']), alpha = 0.7
+  - Expect: alpha values [0.7, 0]
+Code:
+def test_rgba_array_generator_input_with_none():
+    rgba = mcolors.to_rgba_array((x for x in ['blue', 'none']), alpha=0.7)
+    assert np.isclose(rgba[0, 3], 0.7)
+    assert np.isclose(rgba[1, 3], 0)
+
+- Test to_rgba_array with mixed types and per-element alpha:
+  - Input: c = ['none', (1, 0, 0), 'blue'], alpha = [0.2, 0.4, 0.6]
+  - Expect: alpha values [0, 0.4, 0.6]
+Code:
+def test_rgba_array_mixed_types_with_none_and_alpha():
+    rgba = mcolors.to_rgba_array(['none', (1, 0, 0), 'blue'], alpha=[0.2, 0.4, 0.6])
+    assert np.allclose(rgba[:, 3], [0, 0.4, 0.6])
+
+- Test PathCollection with scalar alpha:
+  - Construct PathCollection with facecolors ['blue', 'none'], alpha=1
+  - Expect collection.get_facecolors() alphas [1, 0]
+Code:
+import matplotlib.pyplot as plt
+from matplotlib.collections import PathCollection
+from matplotlib.path import Path
+
+def test_pathcollection_scalar_alpha_none_transparent():
+    paths = [Path([(0,0),(1,0),(1,1),(0,0)], [1,2,2,79]),
+             Path([(0,0),(1,1),(1,0),(0,0)], [1,2,2,79])]
+    coll = PathCollection(paths, facecolors=['blue', 'none'], alpha=1)
+    alphas = coll.get_facecolors()[:, 3]
+    assert np.allclose(alphas, [1, 0])
+
+- Test PathCollection with per-element alpha:
+  - Construct PathCollection with facecolors ['blue', 'none'], alpha=[1, 1]
+  - Expect alphas [1, 0]
+Code:
+def test_pathcollection_per_element_alpha_none_transparent():
+    paths = [Path([(0,0),(1,0),(1,1),(0,0)], [1,2,2,79]),
+             Path([(0,0),(1,1),(1,0),(0,0)], [1,2,2,79])]
+    coll = PathCollection(paths, facecolors=['blue', 'none'], alpha=[1, 1])
+    alphas = coll.get_facecolors()[:, 3]
+    assert np.allclose(alphas, [1, 0])
+
+- Regression safety: Numeric RGBA array input should still be overridden by alpha (this corrects the prior mistaken test):
+  - Input: c = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], float), alpha=0.8
+  - Expect both alphas become 0.8 (fast path unchanged)
+Code:
+import numpy as np
+def test_numeric_rgba_array_alpha_still_overridden():
+    rgba = np.array([[1,0,0,0],[0,1,0,0]], float)
+    out = mcolors.to_rgba_array(rgba, alpha=0.8)
+    assert np.allclose(out[:, 3], [0.8, 0.8])
+
+5) Implement the fix
+- In lib/matplotlib/colors.py, in to_rgba_array(c, alpha=None), locate the code where rgba is computed and alpha is overridden.
+- For non-numeric iterable inputs, ensure you can build a mask of entries that were 'none' without iterating c twice:
+  - Either materialize c into a list before conversion:
+    - c_list = list(c)
+    - mask_none = np.array([cbook._str_lower_equal(x, 'none') for x in c_list], bool)
+    - rgba = np.array([to_rgba(x) for x in c_list], float)
+  - Or, in a single pass:
+    - Build rgba_list = []
+    - Build mask_none_list = []
+    - For each x in c: append to both lists appropriately
+    - rgba = np.array(rgba_list, float); mask_none = np.array(mask_none_list, bool)
+- When alpha is not None:
+  - If scalar: set rgba[~mask_none, 3] = float(alpha)
+  - If array-like:
+    - Convert to float array alpha_arr = np.asarray(alpha, float)
+    - Broadcast/validate to length N = rgba.shape[0]; if mismatch, raise a ValueError consistent with existing messages (e.g., "alpha must be a scalar or array-like of length N")
+    - Apply rgba[~mask_none, 3] = alpha_arr[~mask_none]
+- Do not change fast paths for numeric Nx3/Nx4 arrays; continue to override all alphas uniformly when alpha is provided.
+- Do not add try/except around mask building; handle iterables explicitly as above.
+
+6) Run only targeted tests
+- Do not run the full test suite to avoid unrelated flaky tests.
+- Run:
+  - pytest -q tests/test_alpha_none_facecolors_local.py
+- Optionally also run a couple of existing relevant tests:
+  - pytest -q lib/matplotlib/tests/test_colors.py -k "rgba_array or to_rgba_array"
+  - pytest -q lib/matplotlib/tests/test_collections.py -k "PathCollection"
+- If you accidentally run the entire suite and see a failure like test_pickle_load_from_subprocess[…], ignore it; it is unrelated.
+
+7) Manual visual validation
+- Run the provided reproduction script and visually confirm that the second polygon remains unfilled with only a black edge, regardless of whether alpha is scalar or per-element.
+
+8) Cleanup
+- After validating locally, remove the temporary tests/test_alpha_none_facecolors_local.py file. Do not commit this temporary test.
+- Do not commit any changes; just prepare the patch.
+
+Acceptance criteria
+- The fix is implemented centrally in matplotlib/colors.py: to_rgba_array, and it applies to all collections that rely on it.
+- Entries whose original facecolor is 'none' remain fully transparent even when alpha is supplied as scalar or array-like.
+- Numeric Nx3/Nx4 fast path behavior is unchanged; alpha override applies to all entries there.
+- Targeted local tests pass, including generator and mixed-type inputs, verifying correct masking and alpha application.
+- The reproduction script renders as expected: the second path remains unfilled.
+- No reliance on try/except fallbacks for mask building; non-Sequence iterables are handled correctly by materialization or single-pass construction.
+- Temporary test file is removed before finalizing the patch.

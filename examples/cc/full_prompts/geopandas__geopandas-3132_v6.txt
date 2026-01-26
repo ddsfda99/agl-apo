@@ -1,0 +1,84 @@
+You are working in the repository at /testbed.
+
+Goal
+Make GeoDataFrame._to_geo public by adding a new GeoDataFrame.to_geo method that returns a GeoJSON-like FeatureCollection dictionary. This enables users to get the dict representation directly, not just the JSON string via GeoDataFrame.to_json.
+
+Important constraints
+- Do not refactor or change existing behavior of _to_geo, to_json, __geo_interface__, or iterfeatures unless strictly necessary.
+- Implement to_geo as a thin wrapper around _to_geo with the same parameters and behavior.
+- Avoid brittle, large “exact string replacement” edits. Use small, targeted insertions near the relevant code (e.g., right next to _to_geo or to_json).
+- Write minimal, focused tests to capture the intended public API and behavior differences.
+- Run only the tests you add to validate this change; do not run the full repository test suite to avoid unrelated, flaky failures.
+- If your tests fail, fix and rerun those tests.
+- After validating the fix, delete the tests you added.
+- Do not commit any edits.
+
+What to do
+1) Write tests to reproduce the missing public API and specify the intended behavior:
+   - Create a new file tests/test_to_geo_public_api.py.
+   - Build a small GeoDataFrame with:
+     - A geometry column using shapely Point objects.
+     - One non-geometry property column.
+     - An id column or set a non-default index to exercise drop_id behavior.
+   - Tests to include:
+     - A GeoDataFrame instance has a callable method to_geo.
+     - to_geo returns a dict with type="FeatureCollection" and a features list whose length equals len(gdf).
+     - The features contain valid geometry dicts (e.g., type "Point" with coordinates) and properties that match the DataFrame columns.
+     - show_bbox=True causes the top-level dict to include bbox (list), and each feature includes a bbox where appropriate; show_bbox=False does not include bbox at either level.
+     - drop_id=True omits the 'id' key from each feature; drop_id=False includes 'id' when the GeoDataFrame has an index or id mapped to feature ids.
+     - CRS handling:
+       - Set gdf.crs to a non-WGS84 CRS (e.g., EPSG:3857). json.loads(gdf.to_json()) may include a "crs" entry; to_geo must not include "crs".
+       - For a GeoDataFrame with no CRS set, normalize and compare to_json vs to_geo:
+         - Compare json.loads(gdf.to_json()) to json.loads(json.dumps(gdf.to_geo())) to account for tuple/list differences. They should match except for any CRS-related differences (which should be absent in this case).
+     - Basic type checks: to_geo returns a dict, features is a list.
+   - Notes:
+     - Normalize structural differences by comparing json.loads(json.dumps(...)) rather than raw dicts, since bbox or coordinates may be tuples internally.
+     - Use small data and simple points to keep tests fast and deterministic.
+     - Do not rely on __geo_interface__ behavior; just test to_geo and to_json interplay.
+
+2) Explore the source to locate GeoDataFrame internals:
+   - Search for the GeoDataFrame class (commonly in geopandas/geodataframe.py or similar).
+   - Find existing methods: to_json, _to_geo, __geo_interface__, iterfeatures.
+   - Confirm that _to_geo produces a GeoJSON-like FeatureCollection dict and that to_json calls _to_geo and may inject CRS for non-WGS84.
+
+3) Implement the fix with a small, targeted edit:
+   - Add a new public method GeoDataFrame.to_geo(self, na="null", show_bbox=False, drop_id=False) that simply delegates to self._to_geo with the same parameters and returns the dict.
+   - Place the new method adjacent to _to_geo or near to_json for discoverability. Use an insertion anchored by finding “def _to_geo(” or the to_json method; do not replace or refactor existing blocks.
+   - Use this exact implementation pattern:
+     def to_geo(self, na="null", show_bbox=False, drop_id=False):
+         """
+         Return a GeoJSON-like FeatureCollection dictionary representation of this GeoDataFrame.
+
+         This is a public wrapper around the internal _to_geo method.
+         Parameters:
+             na: How to serialize missing values in properties, passed through to _to_geo.
+             show_bbox: Whether to include bbox in the top-level collection and features.
+             drop_id: If True, omit feature 'id' fields.
+         Returns:
+             dict: GeoJSON-like FeatureCollection.
+         """
+         return self._to_geo(na=na, show_bbox=show_bbox, drop_id=drop_id)
+   - Do not change to_json or _to_geo. The public method should not add CRS; leave CRS injection to to_json as currently implemented.
+
+4) Run your tests and validate only this change:
+   - Execute pytest -q tests/test_to_geo_public_api.py to run the new tests.
+   - If any tests fail, re-check the method placement, name, parameters, and ensure delegation to _to_geo is correct.
+   - Do not run the full test suite to avoid unrelated network-dependent failures.
+
+5) Clean up:
+   - After confirming the fix, delete tests/test_to_geo_public_api.py (and any other test files you added).
+   - Do not commit any changes.
+
+Additional guidance based on prior failures
+- Expect the first test run to fail before you add the new method; this validates your test coverage.
+- Prefer running only the newly added tests for this change. Running the entire suite can introduce unrelated failures (e.g., network-dependent tests) that are not caused by your edit.
+- Keep the wrapper’s signature and behavior identical in spirit to _to_geo: parameters na, show_bbox, drop_id; just return self._to_geo(...) with those args.
+- Place the method adjacent to _to_geo or near to_json to keep the edit surgical and avoid brittle replacements.
+- Do not refactor __geo_interface__ or iterfeatures for this task.
+
+Success criteria
+- GeoDataFrame.to_geo exists and is callable.
+- to_geo returns the expected FeatureCollection dict with correct features, optional bbox, and no CRS injection.
+- to_json continues to work unchanged and may include CRS for non-WGS84.
+- Your targeted tests pass, and then you remove them per instructions.
+- No commits are made.

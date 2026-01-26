@@ -1,0 +1,74 @@
+Here’s what went wrong and how the coding agent could have avoided failing the tests.
+
+Summary of failures observed
+- 7 tests failed, all clustered around:
+  - Integration tests expecting certain exit codes and match counts for “good” templates.
+  - Unit tests exercising schema override/patching behavior (exclude) which now unexpectedly produce a match.
+- The first failing scenario showed exit(0) expected vs actual exit(2).
+- Quickstart openshift template scenarios expected exit code 12 but got 14 (2 extra error bits).
+- Unit tests around exclude overrides expected no matches but saw an E2533 match for a Lambda runtime in a “good” template.
+- Another unit test for rules collection similarly expected zero matches but saw the same E2533 match.
+
+Root cause
+- The failures are caused by time-sensitive logic in the Lambda runtime deprecation rules using the current date at test time:
+  - DeprecatedRuntimeUpdate (rule E2533) determines whether to flag a runtime based on comparing its “update-block” date against datetime.today().
+  - The AdditionalSpecs/LmbdRuntimeLifecycle.json indicates that some runtimes (e.g., nodejs18.x) are past their update-block date as of 2026-01-24 (the runtime data shows nodejs18.x update-block = 2025-10-01).
+  - The “good” template test/fixtures/templates/good/generic.yaml uses Runtime: nodejs18.x. Under the current dynamic date, this gets flagged by E2533, producing unexpected matches and non-zero exit codes.
+  - The integration quickstart tests that calculate total exit codes also became larger because of the unexpected E2533 occurrences, hence 12 expected vs 14 actual.
+
+Why this is incorrect behavior for the test suite
+- The test suite expects deterministic behavior across time. Using datetime.today() without any form of time control makes behavior change as the calendar advances.
+- Historically, “good” fixtures were not supposed to be flagged by E2533; introducing dynamic date-based logic causes those to fail once the date moves past the update-block thresholds baked into LmbdRuntimeLifecycle.json.
+- The tests for exclude patches (e.g., test/unit/module/override/test_exclude.py) are aimed at verifying spec override behavior, not Lambda runtime lifecycle. The unexpected E2533 deprecation match is orthogonal noise introduced by date-dependent checks.
+
+Technical details from codebase
+- E2533: src/cfnlint/rules/resources/lmbd/DeprecatedRuntimeUpdate.py
+  - Uses self.current_date = datetime.today() and flags if update-block <= current_date.
+- AdditionalSpecs: src/cfnlint/data/AdditionalSpecs/LmbdRuntimeLifecycle.json
+  - nodejs18.x: deprecated 2025-07-31, create-block 2025-09-01, update-block 2025-10-01.
+- “Good” fixture: test/fixtures/templates/good/generic.yaml has AWS::Lambda::Function Runtime: nodejs18.x (line 174).
+- The failing unit tests that expected no matches (test_exclude.test_success_run and TestRulesCollection.test_success_run) now see E2533 on that file and line because we’re now past 2025-10-01.
+
+Breakdown by failing tests
+1) TestQuickStartTemplates::test_module_integration
+2) TestQuickStartTemplates::test_templates
+3) TestQuickStartTemplates in quickstart (strict and non-strict variants)
+- Exit code drift due to unexpected E2533 matches.
+
+4) TestExclude.test_success_run
+5) TestRulesCollection.test_success_run
+- Both expected no matches on a “good” template but got a match:
+  - [E2533: Check if Lambda Function Runtimes are updatable] (Runtime 'nodejs18.x' was deprecated on '2025-07-31'...) matched test/fixtures/templates/good/generic.yaml:174
+
+Why the coding agent failed and how to improve its approach
+- The agent simply ran the entire test suite and stopped when it failed, but did not dig into why deterministic tests would suddenly become flaky or time-dependent.
+- The agent ignored the obvious smell: date-dependent rule using datetime.today(), coupled with data listing past deprecation dates, causing “good” templates to become “bad” over time.
+
+Concrete steps to fix
+- Make E2533 (and similar date-based rules) deterministic with respect to tests:
+  - Option A (recommended): Allow the rules to read an environment variable (e.g., CFNLINT_CURRENT_DATE) and default to datetime.today() if unset. Tests can set this env var (or the code could default to a fixed date in test mode), ensuring test stability.
+    - Example: self.current_date = parse_env_date("CFNLINT_CURRENT_DATE") or datetime.today()
+  - Option B: Provide a centralized “now()” provider injected from configuration or context, which tests can override.
+  - Option C: Avoid referencing realtime in rules and instead encode the logic to treat “good” templates’ runtimes as acceptable unless the test explicitly targets deprecation (but this reduces real-world usefulness of the rule).
+
+- Alternatively (not recommended long-term): Change AdditionalSpecs/LmbdRuntimeLifecycle.json to move “update-block” for nodejs18.x far enough into the future to keep the current date out of range. This is brittle and will regress later when the date crosses again.
+
+- Ensure that the test harness either:
+  - Sets a fixed date (via env var, monkeypatch, or injected context),
+  - Or that rules rely on an injected interface for “current date” that tests can control.
+
+Other observations
+- The integration tests with cfn-lint CLI (subprocess) failing with non-zero exit 14 vs 12 indicate 2 extra error matches; those are very likely E2533 matches that weren’t part of the historical expected results. Stabilizing E2533 behavior will realign exit codes.
+- The rest of the rule implementations (FindInMap, language extensions handling) looked consistent and unit tests for FindInMap all passed.
+- The override/patch mechanism for provider schemas is functioning; the failures there are collateral damage from E2533 rather than a problem with patching.
+- Exit code composition in Runner is based on severity bits (error=2, warning=4, informational=8). The presence of extra errors explains the changed totals.
+
+Actionable guidance for the coding agent
+- Before running tests, inspect for deterministic-vs-nondeterministic code paths, particularly those that rely on the system clock, network, or environment.
+- Grep for datetime.today(), datetime.utcnow(), time.time(), etc., and assess test impact.
+- Where appropriate, refactor rules to support dependency injection of current date/time or to accept an environment override for test contexts.
+- Keep AdditionalSpecs data consistent with test expectations, or make tests robust to time by mocking dates.
+- Rerun only the failing tests to validate the fix quickly (e.g., pytest -q tests that failed) before running the full suite.
+- For CLI integration tests invoking the binary, ensure the environment variable (if you implement Option A) is set in the test runner environment so that subprocesses inherit it.
+
+In short: The failures are not due to logic bugs in FindInMap or rule plumbing. They’re entirely caused by a date-sensitive E2533 rule flagging runtimes that the tests presume to be acceptable for “good” templates. Stabilize the current date for that rule during tests (env var or injected clock), and the 7 failing tests should pass again.

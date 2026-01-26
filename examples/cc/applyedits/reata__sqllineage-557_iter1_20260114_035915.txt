@@ -1,0 +1,110 @@
+Implement metadata-driven target column inference for INSERT INTO … SELECT when the target column list is omitted, and ensure it works for both sqlfluff and sqlparse analyzers.
+
+Goal
+When an INSERT INTO … SELECT … statement does not specify a target column list, infer the target column names from MetaDataProvider and use them as the target-side columns in column lineage, provided the number of inferred target columns matches the number of columns in the SELECT list. This should make the lineage behave as if the SQL had explicitly specified the target columns.
+
+Example
+- SQL: insert into target select user_id, user_name from source
+- Physical target columns: id, name
+- Expected lineage edges:
+  - source.user_id -> target.id
+  - source.user_name -> target.name
+- Only apply inference when lengths match. Do not override explicit target column lists.
+
+Where to change
+- The main logic for the sqlfluff analyzer path is in SourceHandlerMixin.end_of_query_cleanup in sqllineage/core/parser/__init__.py. You will add a metadata-based fallback mapping there.
+- For the sqlparse analyzer path, SourceHandlerMixin is also used, but today handlers don’t receive metadata_provider. You must pass metadata_provider to sqlparse handlers in sqllineage/core/parser/sqlparse/analyzer.py so that SourceHandlerMixin can access it via getattr(self, "metadata_provider", None).
+- Verify if sqlfluff handlers already receive metadata_provider; if not, propagate there similarly.
+
+What to implement
+1) Tests first (to reproduce the bug), then code change, then verification. Remove the test files before finalizing the commit if required by this repository’s contribution policy.
+
+2) Extend SourceHandlerMixin.end_of_query_cleanup:
+- Keep existing behavior that if len(holder.write_columns) == len(col_grp), use holder.write_columns[idx] as the resolved target column.
+- Otherwise, if a metadata provider is available and the write target is a concrete Table, fetch target table columns via metadata_provider.get_table_columns(tgt_tbl). If and only if the number of returned columns equals len(col_grp), use the column at the same index idx as tgt_col_resolved.
+- Only perform this mapping when the lengths match; otherwise, keep current behavior (using target-side names from the SELECT list).
+- Ensure the resolved target column’s parent is the target table. The metadata provider should return Columns already parented to the table; if not, set it.
+- Do not change wildcard expansion logic or any unrelated logic. Do not override explicit target column lists (holder.write_columns) if present.
+
+3) Propagate metadata_provider into sqlparse handlers:
+- In sqllineage/core/parser/sqlparse/analyzer.py, where DML handlers are instantiated (e.g., _extract_from_dml), set metadata_provider on each handler instance so that SourceHandlerMixin can read it with getattr(self, "metadata_provider", None).
+- If required, also ensure the sqlfluff analyzer path passes metadata_provider to its handlers in sqllineage/core/parser/sqlfluff/analyzer.py.
+
+Detailed step-by-step plan
+1) Add tests to reproduce the bug under tests/sql/column/, for example tests/sql/column/test_insert_select_target_infer.py:
+- Use tests/helpers.py utilities. There should be a metadata provider helper you can reuse (e.g., generate_metadata_providers or a DummyMetaDataProvider pattern).
+- Set up a provider with two tables:
+  - source with columns ["user_id", "user_name"]
+  - target with columns ["id", "name"]
+- SQL under test: insert into target select user_id, user_name from source
+- Extract lineage with the metadata provider, and assert column-lineage edges:
+  - ("source", "user_id") -> ("target", "id")
+  - ("source", "user_name") -> ("target", "name")
+- Also add a control test that, without a metadata provider, the behavior remains unchanged (target-side column names default to user_id, user_name).
+- Ensure the test runs both analyzers. Many helpers default to running both; if not, explicitly enable sqlparse in the test to cover both analyzer paths.
+
+2) Implement the fix in sqllineage/core/parser/__init__.py:
+- Locate SourceHandlerMixin.end_of_query_cleanup.
+- Inside the loop that iterates over selected columns grouped by union barriers (col_grp) and builds target-side columns:
+  - Today, code sets tgt_col_resolved = tgt_col_from_query, then if len(holder.write_columns) == len(col_grp) it uses holder.write_columns[idx].
+  - Extend this logic with a fallback that tries metadata-based mapping only if the explicit mapping didn’t occur:
+    - Obtain metadata_provider safely: metadata_provider = getattr(self, "metadata_provider", None)
+    - Identify the write target table (tgt_tbl) from the holder. Only proceed if it is a concrete Table (not a SubQuery, CTE, etc.). Use isinstance(tgt_tbl, Table); import Table if needed.
+    - If metadata_provider and tgt_tbl is a Table:
+      - meta_cols = metadata_provider.get_table_columns(tgt_tbl)
+      - If len(meta_cols) == len(col_grp), then set tgt_col_resolved = meta_cols[idx]
+  - Ensure parent of tgt_col_resolved is set to tgt_tbl if not already.
+  - Preserve the precedence of holder.write_columns over metadata-based mapping.
+  - Do not apply any mapping if lengths don’t match.
+
+Pseudocode to guide the edit (merge this into the existing logic at the point where tgt_col_resolved is chosen):
+- tgt_col_resolved = tgt_col_from_query
+- if len(holder.write_columns) == len(col_grp):
+    tgt_col_resolved = holder.write_columns[idx]
+  else:
+    metadata_provider = getattr(self, "metadata_provider", None)
+    if metadata_provider is not None and isinstance(tgt_tbl, Table):
+        meta_cols = metadata_provider.get_table_columns(tgt_tbl)
+        if meta_cols and len(meta_cols) == len(col_grp):
+            tgt_col_resolved = meta_cols[idx]
+- if tgt_col_resolved.parent is None:
+    tgt_col_resolved.parent = tgt_tbl
+- proceed to resolve source columns and add lineage edges as today
+
+Notes:
+- Make sure to import Table from the correct module (same Table class used in this codebase). If already imported in the file, reuse it; otherwise import it from the models module where Table is defined.
+- Do not alter or duplicate logic for wildcard expansion, source column resolution, or union group handling.
+
+3) Pass metadata_provider to sqlparse handlers:
+- Open sqllineage/core/parser/sqlparse/analyzer.py and locate the method that builds handlers for DML statements (likely _extract_from_dml).
+- After constructing current_handlers and next_handlers, set the metadata_provider attribute on each:
+  for h in current_handlers + next_handlers:
+      if getattr(self, "metadata_provider", None) is not None:
+          setattr(h, "metadata_provider", self.metadata_provider)
+- This ensures SourceHandlerMixin.end_of_query_cleanup sees a non-None metadata provider in the sqlparse path.
+- If sqlfluff analyzer does not already do this, mirror the same propagation in sqllineage/core/parser/sqlfluff/analyzer.py where handlers are created.
+
+4) Run tests and iterate:
+- Run the new tests. They should fail before the code change and pass after.
+- Ensure both analyzers pass the new test. If sqlparse still fails, double-check that metadata_provider is being set on its handlers and that SourceHandlerMixin.end_of_query_cleanup is being invoked with access to it.
+- Verify that explicit target column lists (INSERT INTO target(col1, col2) SELECT …) still behave the same because holder.write_columns takes precedence.
+- Verify behavior remains unchanged when metadata is not available or when target-table column count does not match the SELECT-list column count.
+
+5) Cleanup:
+- If this repository requires not committing new tests for this exercise, remove the test files you added under tests/sql/column/ before finalizing the code commit.
+- Ensure no unrelated changes are included.
+
+Acceptance criteria
+- With a MetaDataProvider that defines the target table’s columns, an INSERT INTO … SELECT without an explicit target column list produces column lineage edges that use the target table’s actual column names.
+- Behavior is unchanged when metadata is not available or when the number of metadata columns does not equal the SELECT-list length.
+- Explicit target column lists continue to work unchanged via holder.write_columns.
+- Both sqlfluff and sqlparse analyzer paths behave correctly with this mapping.
+- The new tests pass after the fix, and tests are removed prior to final submission if required.
+
+Implementation tips and pitfalls
+- Only attempt metadata-based mapping when the write target is a concrete Table. Do not attempt for SubQuery, CTE, or Path targets.
+- Only map when counts match exactly to avoid ambiguous mappings.
+- Parent assignment matters: Column identity comparisons in this codebase depend on both name and parent. Use the Column objects returned by metadata_provider.get_table_columns (they should already be parented to the target Table); if not, set the parent explicitly.
+- Respect ordering: map by index using the SELECT-list order within each union barrier group.
+- Do not alter wildcard expansion logic; it is handled elsewhere (e.g., SubQueryLineageHolder.expand_wildcard).
+- Keep the code changes minimal and localized to the selection of tgt_col_resolved and to metadata propagation in the sqlparse analyzer.

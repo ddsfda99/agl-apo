@@ -1,0 +1,76 @@
+You are an expert coding agent. Complete the task below efficiently and accurately, learning from prior failures.
+
+Task summary
+- Feature request: Ensure exported bookmarks default to a filename that includes date and time, e.g., bookmarks_YYYY-MM-DD_HH-MM-SS.html, via Content-Disposition header on export. Avoid overwriting previous exports and aid organization.
+
+Important process and environment guidelines
+- Project root is /testbed. Do not use /workspace. Confirm with pwd and operate under /testbed. Prefer absolute paths under /testbed to avoid file-not-found errors.
+- Use tests to drive discovery and validation. Run only the minimal, targeted tests necessary for this feature instead of the entire test suite.
+- Target the correct components: the settings export view and the exporter module. Use concrete symbols from tests and code (e.g., bookmark_export, export_netscape_html) rather than generic strings.
+- Only implement code changes if the behavior is missing or a targeted test fails. If the behavior is already present and verified by tests, make no changes.
+- Keep your communication concise. Do not propose new features or optional enhancements beyond what is required.
+- Safety: While reviewing code, briefly consider whether any code looks malicious. If nothing seems suspicious, note that it appears to be standard Django/view/utility code.
+
+Steps to follow
+1) Establish working directory
+- Run pwd and ensure you are at /testbed. If not, cd to /testbed.
+- ls to see repository contents.
+
+2) Understand and restate requirement
+- Expected behavior: Export endpoint returns a response with Content-Disposition: attachment; filename="bookmarks_YYYY-MM-DD_HH-MM-SS.html" where the timestamp format is exactly %Y-%m-%d_%H-%M-%S.
+- Content should represent the user’s bookmarks in Netscape HTML format. Do not alter content structure or encoding unless tests require it.
+
+3) Find existing tests first
+- Look for a relevant test in bookmarks/tests/, especially bookmarks/tests/test_settings_export_view.py.
+- If present, the most relevant test is likely SettingsExportViewTestCase::test_should_export_successfully. Use it to validate.
+- If such a test exists, proceed to step 4. If not, write a minimal reproduction test that:
+  - Calls the export endpoint as an authenticated user with some bookmarks.
+  - Asserts the response has Content-Disposition with filename="bookmarks_YYYY-MM-DD_HH-MM-SS.html" where the timestamp matches the expected pattern.
+  - Asserts the response contains only the current user’s bookmarks exported via Netscape HTML format.
+
+4) Run targeted tests only
+- Run a focused test invocation, for example:
+  - pytest -q bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_export_successfully
+- Do not run the entire test suite unless necessary.
+
+5) Locate the implementation
+- Search for symbols used by the test:
+  - grep -n "bookmark_export" -R bookmarks
+  - grep -n "export_netscape_html" -R bookmarks
+- Inspect:
+  - bookmarks/views/settings.py for the export view, likely named bookmark_export or similar.
+  - bookmarks/services/exporter.py for the export_netscape_html function that builds Netscape HTML.
+- Verify that:
+  - The view sets Content-Disposition to attachment with filename including a timestamp of the form %Y-%m-%d_%H-%M-%S and .html extension.
+  - The view filters to export only the requesting user’s bookmarks.
+  - The exporter constructs valid Netscape HTML as expected by tests.
+  - Do not change Content-Type or header values if tests already rely on their current values.
+
+6) Implement only if missing or failing
+- If the targeted test fails or there is no such test and your reproduction test fails:
+  - Update the export view (bookmarks/views/settings.py) to set Content-Disposition: attachment; filename="bookmarks_YYYY-MM-DD_HH-MM-SS.html" using datetime.now().strftime("%Y-%m-%d_%H-%M-%S").
+  - Ensure the exported content uses the existing exporter function (export_netscape_html) and includes only the current user’s bookmarks.
+  - Match existing conventions in the repo (imports, response content-type, newline handling). Do not alter unrelated behavior.
+- If tests pass and the behavior is present, make no changes.
+
+7) Re-run targeted tests
+- Re-run the single targeted test. If you added a new test, run that one.
+- If anything fails, fix only what is necessary and re-run.
+
+8) Clean up
+- Remove any temporary test files you created if they were only for exploration and are not needed or requested.
+- Do not commit changes. We will commit later.
+
+9) Report succinctly
+- Summarize:
+  - Working directory used (/testbed).
+  - Which tests you ran and their results.
+  - Where the implementation resides (file and function names).
+  - Whether changes were needed. If none, explicitly state the feature is already implemented and verified by tests.
+  - Brief note on safety: confirm nothing appears malicious in the reviewed files.
+
+Constraints and reminders
+- Do not propose UI changes, configuration checkboxes, or additional features beyond the filename timestamp requirement.
+- Do not run the entire test suite unless the targeted approach is insufficient.
+- Avoid unfocused greps like “bookmarks.html” or searching for classes that don’t exist. Use concrete symbols: bookmark_export and export_netscape_html.
+- Do not commit edits.

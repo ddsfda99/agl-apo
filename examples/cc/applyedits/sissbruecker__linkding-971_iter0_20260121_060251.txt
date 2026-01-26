@@ -1,0 +1,143 @@
+You are implementing the feature request “OIDC: Option for Username instead of Email” and must also fix a lurking compatibility bug so the OIDC username generation works with mozilla-django-oidc and our tests.
+
+Goal
+- Add a configurable setting to select which OIDC claim to use as the Django username (default “email” for backwards compatibility).
+- Update the username algorithm to honor that setting, accept the claims parameter as expected by mozilla-django-oidc, and fall back to email.
+- Add tests that reproduce and validate the new behavior and the corrected function signature.
+- Update documentation to mention the new option and behavior.
+- Do not commit changes; we will commit later.
+
+Important context from the codebase
+- siteroot/settings/base.py: OIDC wiring; when LD_ENABLE_OIDC is true, OIDC_USERNAME_ALGO = "bookmarks.utils.generate_username".
+- bookmarks/utils.py: currently defines generate_username(email) which is used as OIDC_USERNAME_ALGO, but its signature is wrong for mozilla-django-oidc (should accept email and claims).
+- bookmarks/tests/test_oidc_support.py: has some OIDC support tests but not for username generation.
+- docs/src/content/docs/options.md: mentions OIDC behavior and currently says the email is used as username.
+
+Plan
+Follow these steps precisely.
+
+1) Understand and restate requirements
+- Make OIDC-based login use a configurable claim as the username (e.g., preferred_username) instead of always using email.
+- Maintain backwards compatibility by defaulting to email.
+- Fall back to email if the configured claim is missing or empty in the OIDC claims.
+- Fix the OIDC username algorithm function to accept (email, claims) to match mozilla-django-oidc expectations.
+- Add tests validating all of the above.
+- Update documentation.
+
+2) Write reproduction/validation tests first
+Create a new test file to directly exercise the username algorithm without needing a live OIDC flow.
+
+File: bookmarks/tests/test_oidc_username_algo.py
+Content:
+- Tests should verify:
+  - Default behavior with no OIDC_USERNAME_CLAIM configured uses the email parameter.
+  - When OIDC_USERNAME_CLAIM is set to "preferred_username", and claims include that value, it is used as the username.
+  - If the configured claim is missing, None, or empty, fallback to the email parameter occurs.
+  - The function accepts both parameters (email, claims) without TypeError.
+  - Normalization (NFKC) and length trimming to 150 characters still apply.
+
+Suggested test code:
+
+from django.test import override_settings
+from bookmarks.utils import generate_username
+
+def test_default_uses_email_when_claim_config_not_set():
+    result = generate_username("user@example.com", {"preferred_username": "john"})
+    assert result == "user@example.com"
+
+@override_settings(OIDC_USERNAME_CLAIM="preferred_username")
+def test_uses_configured_claim_when_available():
+    result = generate_username("user@example.com", {"preferred_username": "john"})
+    assert result == "john"
+
+@override_settings(OIDC_USERNAME_CLAIM="preferred_username")
+def test_falls_back_to_email_when_claim_missing():
+    result = generate_username("user@example.com", {})
+    assert result == "user@example.com"
+
+@override_settings(OIDC_USERNAME_CLAIM="preferred_username")
+def test_falls_back_to_email_when_claim_empty_or_none():
+    assert generate_username("user@example.com", {"preferred_username": ""}) == "user@example.com"
+    assert generate_username("user@example.com", {"preferred_username": None}) == "user@example.com"
+
+@override_settings(OIDC_USERNAME_CLAIM="preferred_username")
+def test_normalizes_and_truncates_username():
+    # Full-width characters normalized to ASCII
+    result = generate_username("user@example.com", {"preferred_username": "ＡＢＣ"})
+    assert result == "ABC"
+    # Truncation to 150 chars
+    long_name = "a" * 200
+    result = generate_username("user@example.com", {"preferred_username": long_name})
+    assert len(result) == 150
+    assert result == "a" * 150
+
+def test_accepts_claims_parameter_without_type_error():
+    # Ensures signature generate_username(email, claims=None) works
+    result = generate_username("user@example.com", None)
+    assert result == "user@example.com"
+
+3) Implement the feature and the bug fix
+
+A) Add a configurable setting for the claim name:
+- In siteroot/settings/base.py, inside the existing LD_ENABLE_OIDC block where OIDC_USERNAME_ALGO is defined, add:
+  OIDC_USERNAME_CLAIM = os.getenv("OIDC_USERNAME_CLAIM", "email")
+Notes:
+- Keep OIDC_USERNAME_ALGO as "bookmarks.utils.generate_username".
+- Ensure os is imported at the top of the settings file if not already.
+
+B) Update the username algorithm to accept claims and honor the setting:
+- In bookmarks/utils.py, update generate_username signature and logic as follows:
+  - Accept parameters (email, claims=None).
+  - Read claim_name via getattr(settings, "OIDC_USERNAME_CLAIM", "email").
+  - Pick candidate = claims.get(claim_name) if present/truthy; otherwise fallback to email; then fallback to empty string if both are falsy.
+  - Normalize using unicodedata.normalize("NFKC", str(candidate)) and slice [:150].
+  - Handle claims being None by treating it as an empty dict.
+
+Example implementation:
+
+from django.conf import settings
+import unicodedata
+
+def generate_username(email, claims=None):
+    if claims is None:
+        claims = {}
+    claim_name = getattr(settings, "OIDC_USERNAME_CLAIM", "email")
+    candidate = None
+    if isinstance(claims, dict) and claim_name in claims:
+        candidate = claims.get(claim_name)
+    if not candidate:
+        candidate = email
+    candidate = "" if candidate is None else str(candidate)
+    return unicodedata.normalize("NFKC", candidate)[:150]
+
+Notes:
+- Keep any existing imports; ensure django.conf.settings is imported.
+- Default behavior remains using email, so existing behavior is preserved when no setting is configured.
+
+4) Run tests and fix any failures
+- Run: pytest -q
+- Ensure your new tests pass and you didn’t break existing tests.
+- If any issues occur, adjust code accordingly.
+
+5) Update documentation
+- Edit docs/src/content/docs/options.md under the OIDC section to document the new option.
+- Update the statement that currently says the email is used as the username to reflect the configurability and fallback.
+- Add a new documented option:
+
+OIDC_USERNAME_CLAIM
+- Default: email
+- Description: Name of the OIDC claim to use as the Django username for OIDC users. Set to preferred_username to avoid exposing email addresses publicly. If the configured claim is missing or empty in the user’s OIDC claims, the email claim is used as a fallback.
+
+6) Clean up
+- Do not leave any stray files or unused code.
+- Do not commit your changes.
+
+Additional guidance and pitfalls to avoid
+- The mozilla-django-oidc library expects the username algorithm to accept two parameters (email, claims). The previous implementation only accepted one argument, which would raise a TypeError during login. Ensure the new signature matches.
+- Backwards compatibility is critical: default must remain using email. Your tests verify this default.
+- Claims may be missing for some providers; the fallback to email prevents login failures.
+- Avoid adding tests that depend on LD_ENABLE_OIDC being true at settings import time, since that is controlled by environment variables and settings are loaded before tests. Focus tests on the function behavior using override_settings.
+- Keep changes minimal and localized.
+
+Reminder
+- Do not commit your edits. We will do it later.

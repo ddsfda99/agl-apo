@@ -1,0 +1,72 @@
+diff --git a/src/urllib3/connection.py b/src/urllib3/connection.py
+index 4195ee03..bf30a490 100644
+--- a/src/urllib3/connection.py
++++ b/src/urllib3/connection.py
+@@ -74,7 +74,7 @@ port_by_scheme = {"http": 80, "https": 443}
+ 
+ # When it comes time to update this value as a part of regular maintenance
+ # (ie test_recent_date is failing) update it to ~6 months before the current date.
+-RECENT_DATE = datetime.date(2023, 6, 1)
++RECENT_DATE = datetime.date(2025, 6, 1)
+ 
+ _CONTAINS_CONTROL_CHAR_RE = re.compile(r"[^-!#$%&'*+.^_`|~0-9a-zA-Z]")
+ 
+diff --git a/src/urllib3/response.py b/src/urllib3/response.py
+index 51dab248..f6b9117b 100644
+--- a/src/urllib3/response.py
++++ b/src/urllib3/response.py
+@@ -13,6 +13,7 @@ from contextlib import contextmanager
+ from http.client import HTTPMessage as _HttplibHTTPMessage
+ from http.client import HTTPResponse as _HttplibHTTPResponse
+ from socket import timeout as SocketTimeout
++import socket
+ 
+ if typing.TYPE_CHECKING:
+     from ._base_connection import BaseHTTPConnection
+@@ -1067,14 +1068,38 @@ class HTTPResponse(BaseHTTPResponse):
+         return True
+ 
+     def close(self) -> None:
+-        if not self.closed and self._fp:
+-            self._fp.close()
+-
+-        if self._connection:
+-            self._connection.close()
+-
+-        if not self.auto_close:
+-            io.IOBase.close(self)
++        # Close the underlying connection first to interrupt any concurrent
++        # blocking read on another thread. Closing the file-like object first
++        # can hang if it attempts to drain remaining bytes.
++        try:
++            if self._connection:
++                try:
++                    # Proactively shutdown the socket to interrupt any concurrent
++                    # blocking reads in other threads before closing.
++                    sock = getattr(self._connection, "sock", None)
++                    if sock is not None:
++                        try:
++                            sock.shutdown(socket.SHUT_RDWR)
++                        except Exception:
++                            # Ignore errors from shutdown (socket may already be closed)
++                            pass
++                    self._connection.close()
++                except Exception:
++                    # Best-effort close; suppress to avoid masking original errors
++                    pass
++            # Finally close the file-like object if present.
++            # Avoid draining remaining bytes; just close best-effort.
++            if self._fp is not None:
++                try:
++                    self._fp.close()
++                except Exception:
++                    pass
++        finally:
++            if not self.auto_close:
++                try:
++                    io.IOBase.close(self)
++                except Exception:
++                    pass
+ 
+     @property
+     def closed(self) -> bool:

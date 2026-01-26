@@ -1,0 +1,80 @@
+diff --git a/conan/tools/gnu/gnutoolchain.py b/conan/tools/gnu/gnutoolchain.py
+index 336d8e06a..4befc875e 100644
+--- a/conan/tools/gnu/gnutoolchain.py
++++ b/conan/tools/gnu/gnutoolchain.py
+@@ -237,7 +237,20 @@ class GnuToolchain:
+ 
+     @staticmethod
+     def _dict_to_list(flags):
+-        return [f"{k}={v}" if v else k for k, v in flags.items()]
++        # Convert a dict of flags/args to a list suitable for command line usage.
++        # Behavior:
++        # - If value is None: treat as a flag without value (keep only the key)
++        # - If value is any other falsy (e.g., "", 0, False): render as "key="
++        # - Otherwise: render as "key=value"
++        result = []
++        for k, v in flags.items():
++            if v is None:
++                result.append(k)
++            elif not v:
++                result.append(f"{k}=")
++            else:
++                result.append(f"{k}={v}")
++        return result
+ 
+     @property
+     def cxxflags(self):
+diff --git a/test/unittests/tools/gnu/test_gnutoolchain.py b/test/unittests/tools/gnu/test_gnutoolchain.py
+index cf053530e..c2b472f15 100644
+--- a/test/unittests/tools/gnu/test_gnutoolchain.py
++++ b/test/unittests/tools/gnu/test_gnutoolchain.py
+@@ -194,3 +194,49 @@ def test_update_or_prune_any_args(cross_building_conanfile):
+     at.make_args.update({"--new-complex-flag": "new-value"})
+     new_make_args = cmd_args_to_string(GnuToolchain._dict_to_list(at.make_args))
+     assert "--new-complex-flag=new-value" in new_make_args
++
++
++def test_make_args_empty_values_render_equal_sign():
++    settings = MockSettings({"build_type": "Release",
++                             "compiler": "gcc",
++                             "compiler.version": "11",
++                             "compiler.libcxx": "libstdc++",
++                             "os": "Linux",
++                             "arch": "x86_64"})
++    conanfile = ConanFileMock()
++    conanfile.settings = settings
++    conanfile.settings_build = settings
++
++    at = GnuToolchain(conanfile)
++    # Empty string should render as KEY=
++    at.make_args["PREFIX"] = ""
++    make_args_str = cmd_args_to_string(GnuToolchain._dict_to_list(at.make_args))
++    assert "PREFIX=" in make_args_str
++    assert " PREFIX " not in f" {make_args_str} "  # ensure not bare flag without '='
++
++    # Falsy values other than None should render as KEY=
++    at.make_args["EMPTYZERO"] = 0
++    make_args_str = cmd_args_to_string(GnuToolchain._dict_to_list(at.make_args))
++    assert "EMPTYZERO=" in make_args_str
++
++
++def test_configure_args_empty_values_render_equal_sign():
++    settings = MockSettings({"build_type": "Release",
++                             "compiler": "gcc",
++                             "compiler.version": "11",
++                             "compiler.libcxx": "libstdc++",
++                             "os": "Linux",
++                             "arch": "x86_64"})
++    conanfile = ConanFileMock()
++    conanfile.settings = settings
++    conanfile.settings_build = settings
++
++    at = GnuToolchain(conanfile)
++    at.configure_args["--with-foo"] = ""
++    cfg_args_str = cmd_args_to_string(GnuToolchain._dict_to_list(at.configure_args))
++    assert "--with-foo=" in cfg_args_str
++    # None values should remain as bare flags
++    at.configure_args["--enable-bar"] = None
++    cfg_args_str = cmd_args_to_string(GnuToolchain._dict_to_list(at.configure_args))
++    # Look for token regardless of quoting
++    assert "--enable-bar" in cfg_args_str

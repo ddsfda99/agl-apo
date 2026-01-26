@@ -1,0 +1,57 @@
+You are working in the /testbed repository. Your goal is to fix the Streamlink plugin issue “plugins.mangomolo: error: No plugin can handle URL” for the Kuwaiti media site URLs that include the www subdomain.
+
+Context and root cause
+- The mangomolo plugin has a URL matcher for media.gov.kw which currently only matches the bare domain media.gov.kw and not the www variant.
+- As a result, URLs like https://www.media.gov.kw/LiveTV.aspx and https://www.media.gov.kw/LiveTV.aspx?PanChannel=Drama are not recognized by the plugin, causing Streamlink to report “No plugin can handle URL”.
+- The fix is minimal: accept an optional www subdomain in the matcher.
+
+Requirements and constraints
+- Follow these steps: write isolated tests to reproduce, locate and fix the code, validate via tests, and finally delete the tests you wrote.
+- Do not modify established test modules in-place; add a separate temporary test file to isolate your changes.
+- Do not commit any changes.
+- Keep the fix minimal and targeted (optional www only). Broadening to arbitrary subdomains is not necessary for this task.
+- Ensure no regressions by also verifying that non-www URLs still match.
+- Optional: After the matcher fix, briefly sanity-check that the plugin proceeds beyond URL matching (no need for full integration/mocked HTTP unless trivial).
+
+Step-by-step plan
+1) Reproduce via isolated tests
+- Create a new test module at tests/plugins/test_mangomolo_www.py.
+- Import the mangomolo plugin and use the same testing style as existing tests/plugins/test_mangomolo.py (inspect that file to mirror its approach, eg. using PluginCanHandleUrl utilities or direct matcher assertions).
+- Add tests that assert the plugin can handle both of these URLs:
+  - https://www.media.gov.kw/LiveTV.aspx
+  - https://www.media.gov.kw/LiveTV.aspx?PanChannel=Drama
+- Also include a control test that asserts non-www URLs still match to avoid regressions:
+  - https://media.gov.kw/LiveTV.aspx
+- Run pytest on just this new file to confirm it fails initially (the matcher should not match the www URLs).
+
+2) Locate the matcher and implement the fix
+- Search for the mangomolo plugin source: src/streamlink/plugins/mangomolo.py.
+- Identify the matcher for media.gov.kw. It currently looks like a regex similar to:
+  - r"https?://media\\.gov\\.kw/"
+- Change it to accept an optional www subdomain:
+  - r"https?://(?:www\\.)?media\\.gov\\.kw/"
+- Do not alter other matchers unless necessary. This is a minimal, targeted fix.
+- Ensure your change preserves existing matcher names/structure so that tests referring to them (if any) remain valid.
+
+3) Validate the fix
+- Re-run pytest on tests/plugins/test_mangomolo_www.py. It should now pass, demonstrating that both www and non-www URLs are matched.
+- Optionally, run pytest on the existing mangomolo plugin tests to ensure no regressions:
+  - pytest tests/plugins/test_mangomolo.py
+
+4) Optional quick sanity-check
+- If feasible with existing test utilities, add a very lightweight sanity check to ensure the plugin proceeds beyond can-handle-url for a mocked page response. This is optional and should not require complex fixtures; if not straightforward, skip this.
+
+5) Clean up
+- Delete the temporary test file you created: tests/plugins/test_mangomolo_www.py.
+- Run the full test suite to ensure everything still passes without your temporary tests:
+  - pytest -q
+
+Acceptance criteria
+- Before the fix, the new isolated tests fail because the www URLs are not matched.
+- After changing the regex to include an optional www subdomain, the isolated tests pass for both www and non-www URLs.
+- No regressions in existing tests.
+- Temporary tests are removed at the end, as required.
+
+Notes
+- This fix addresses the specific reported failure mode. In a real PR, you would keep the added test coverage to prevent regression, but for this task, delete the temporary tests after validation.
+- Avoid broadening the matcher beyond the optional www, as this is sufficient and keeps the change minimal.

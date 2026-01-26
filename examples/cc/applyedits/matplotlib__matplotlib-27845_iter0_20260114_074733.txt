@@ -1,0 +1,82 @@
+You are working in the repository at /testbed.
+
+Goal
+Fix the bug: PathCollection using alpha ignores 'none' facecolors.
+- Repro: Creating a PathCollection with facecolors ['blue', 'none'] and alpha (either list or scalar) results in the 'none' facecolor being filled instead of remaining transparent.
+- Expected: 'none' should remain fully transparent regardless of the alpha provided to the collection, consistent with the documented behavior that “alpha is ignored for the color value 'none'”.
+
+Important constraints based on prior failed attempts
+- Make the fix minimal and localized. Do not change public API, error handling semantics, or error messages. Specifically, do not add new shape checks or custom exceptions in colors.to_rgba_array; rely on NumPy broadcasting behavior as before.
+- Preserve existing special-cases in to_rgba_array, including the behavior that a single value "none" returns an empty array of shape (0, 4).
+- Ensure the fix applies to sequence inputs where to_rgba_array previously overwrote alphas indiscriminately.
+- Write tests to reproduce and validate the fix, then delete the test files at the end. Do not commit any edits.
+
+Step-by-step plan
+1) Reproduce the bug with a minimal test
+   - Create a temporary test file (e.g., lib/matplotlib/tests/test_pathcollection_none_alpha.py) that:
+     - Constructs two Paths.
+     - Creates a PathCollection with edgecolors='black', facecolors=['blue', 'none'] and alpha=[1, 1]. Validate that the second facecolor remains transparent:
+       - coll.get_facecolor()[1, 3] == 0.0
+       - matplotlib.colors.same_color(coll.get_facecolor()[1], 'none') is True
+     - Repeat with alpha=1 (scalar), same assertions.
+   - Run pytest to confirm the test fails before implementing the fix.
+
+2) Locate the bug
+   - The issue arises when Collection._set_facecolor calls matplotlib.colors.to_rgba_array(c, self._alpha).
+   - In lib/matplotlib/colors.py, to_rgba_array applies an alpha override at the end by setting rgba[:, 3] = alpha for sequences, which overwrites the alpha channel for entries intended to be 'none'.
+   - This contradicts the documented behavior: alpha should be ignored for 'none'.
+
+3) Implement a minimal fix in lib/matplotlib/colors.py
+   - In to_rgba_array(c, alpha=None), in the branch that handles sequences:
+     - After computing rgba = np.array([to_rgba(cc) for cc in c]), do not introduce new shape checks or custom errors.
+     - If alpha is not None:
+       - First assign rgba[:, 3] = alpha (letting NumPy broadcasting behave exactly as before).
+       - Then preserve transparency for 'none' entries by resetting their alpha back to 0 using a mask derived from the original sequence c:
+         - Compute none_mask = [cbook._str_lower_equal(cc, "none") for cc in c]. This returns True for string "none" values and False otherwise.
+         - Apply rgba[none_mask, 3] = 0
+     - Keep the existing early special-case for a single value "none" that returns an empty array of shape (0, 4).
+   - Do not add any explicit length checks for alpha vs c, and do not change error messages. Let broadcasting raise as it did before if incompatible.
+
+   Pseudocode for the sequence case inside to_rgba_array:
+   - rgba = np.array([to_rgba(cc) for cc in c], float)
+   - if alpha is not None:
+       rgba[:, 3] = alpha  # preserve previous broadcasting semantics
+       try:
+           none_mask = np.array([cbook._str_lower_equal(cc, "none") for cc in c], dtype=bool)
+       except Exception:
+           none_mask = None
+       if none_mask is not None:
+           rgba[none_mask, 3] = 0.0
+   - return rgba
+
+   Notes:
+   - This approach avoids any change in exception behavior or messages while ensuring 'none' stays transparent.
+   - Do not move or change the single-value "none" special-case. The distinction between single "none" and sequences containing "none" must be preserved.
+
+4) Run tests
+   - Run only the newly added test file first to confirm the fix.
+   - Then run the broader relevant tests (e.g., colors and collections) if feasible to ensure no regressions:
+     - pytest lib/matplotlib/tests/test_colors.py -k rgba_array
+     - pytest lib/matplotlib/tests/test_collections.py
+   - If any failures arise, check that no new error handling or messaging was introduced and that broadcasting behavior is unchanged.
+
+5) Cleanup
+   - Delete the temporary test file(s) you added once you have validated the fix locally.
+   - Do not commit any edits.
+
+Acceptance criteria
+- With alpha provided as a scalar or a list, PathCollection facecolors=['blue', 'none'] yields a fully transparent second face (alpha==0) and same_color(..., 'none') is True.
+- No changes to exception messages or broadcasting behavior in matplotlib.colors.to_rgba_array.
+- All existing tests continue to pass after the fix.
+- Added tests are deleted at the end, and no commits are made.
+
+Tips and pitfalls to avoid
+- Do not add explicit checks or custom error messages in to_rgba_array; earlier attempts did this and broke tests that rely on NumPy’s broadcasting errors.
+- Do not change Collection code; the correct fix is in to_rgba_array where alpha is applied to sequences.
+- Ensure the mask correctly identifies entries that are literally the string "none". cbook._str_lower_equal handles non-string entries by returning False and avoids raising; keep the try/except around the mask build to be defensive but do not swallow errors elsewhere.
+- Keep the function’s documented and existing behavior intact, including the single-value "none" empty array special-case.
+
+Suggested commands
+- pytest lib/matplotlib/tests/test_pathcollection_none_alpha.py -q
+- pytest -q  # if you need to check broader regressions
+- Remove the temporary test file when done.

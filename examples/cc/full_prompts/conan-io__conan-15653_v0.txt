@@ -1,0 +1,45 @@
+You are given a code repository in the current directory.
+The task description is:
+[bug] semver fails to resolve metadata field correctly
+### Environment details
+
+* Operating System+version: Ubuntu 22.04
+* Compiler+version: N/A
+* Conan version: 2.0.17
+* Python version: 3.10.8
+
+
+### Steps to reproduce
+
+1. Have a package with a version number followed by a "metadata (i.e. preceded by +)" field containing a number. For example: ```1.0.0+2```. NOTE: There cannot be a "larger" version available, such as ```1.0.0+3``` if you want to reproduce this.
+2. in a conanfile, require ```>=``` this version. For example: ```self.requires("package/[>=1.0.0+2]")```
+3. Try to resolve dependencies. Conan will fail with: ```ERROR: Package 'package/[>=1.0.0+2]' not resolved: Version range '>=1.0.0+2' from requirement 'package/[>=1.0.0+2]' [etc, etc...] ```
+
+I can verify that this should not be the case by running:
+```
+>>> from conans.model.version import Version
+>>> Version("1.0.0+2") >= Version("1.0.0+2")
+True
+>>> Version("1.0.0+2") >= Version("1.0.0+3")
+False
+```
+
+Note also that if I set the metadata number to one LESS than the exisiting version, it will be able to find it! If I set ```self.requires("package/[>=1.0.0+1]")``` it will be able to find version ```1.0.0+2```.
+
+This seems like a bug to me?
+
+FYI: we use this field to hold  "build number" in case we run another build without changing the version. It increments after each build. It's useful to us to be able to specify that we should not use a build which is older than some build number.
+
+### Logs
+
+_No response_
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

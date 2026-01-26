@@ -1,0 +1,71 @@
+Summary of why the coding agent’s run failed and how to fix it
+
+What failed:
+- 7 tests failed, most notably:
+  - Integration tests for “good” templates now exit with error code 2 (they were expected to succeed with exit code 0).
+  - Non-strict “quickstart/openshift.yaml” integration checks (include only informational rules) expected exit code 12 but got 14 (an error leaked in).
+  - Unit tests that expect no matches for a known-good template now report an error match E2533 at test/fixtures/templates/good/generic.yaml:174.
+
+Root causes found:
+1) Time-dependent Lambda runtime lifecycle rule E2533 now flags nodejs18.x as non-updatable
+- Code: src/cfnlint/rules/resources/lmbd/DeprecatedRuntimeUpdate.py uses:
+  - self.current_date = datetime.today()
+  - Loads runtime lifecycle from src/cfnlint/data/AdditionalSpecs/LmbdRuntimeLifecycle.json
+- Data file updated to include nodejs18.x with:
+  - deprecated: "2025-07-31"
+  - update-block: "2025-10-01"
+- The “good/generic.yaml” template sets Runtime: nodejs18.x (line 174).
+- Because the agent ran tests on 2026-01-25, current_date > update-block, the rule yields a ValidationError E2533. That makes “good” templates produce errors where the tests expect none.
+- Unit tests for the rule itself are deterministic because they explicitly set rule.current_date to fixed dates via fixtures; however integration/unit tests for the default rules do not set the date and thus depend on wall-clock time, which drifted past the cutoff, breaking test expectations.
+
+2) Error rules leaking into informational-only integration run
+- test/integration/test_quickstart_templates_non_strict.py runs cfn-lint with:
+  - --include-checks I
+  - --include-experimental
+  - --configure-rule E3012:strict=false
+- Expected exit code for openshift.yaml is 12 (warning + informational), but actual exit code is 14 (error + warning + info).
+- That means an “error” rule was reported even when include_checks=["I"].
+- The likely culprit is again E2533 (error severity), appearing in openshift.yaml. The expected non-strict output for openshift.yaml shows only warnings and info (no errors) in test/fixtures/results/quickstart/non_strict/openshift.json. Our run produced exit code 14, aligning with an extra error present.
+- This indicates either:
+  - The rules collection isn’t being filtered correctly by include_checks (less likely; RulesCollection filtering tests pass), or
+  - The runtime lifecycle rule generated an error match that wasn’t supposed to occur in this scenario (more likely). In the expected openshift results, only W2531 is present for the Lambda Runtime (python3.8) and no E2533. The new LmbdRuntimeLifecycle.json data plus current date caused E2533 to trigger for other runtime(s) or different conditions.
+
+3) CLI output broken pipe during piping into Python
+- Attempted to pipe cfn-lint JSON output into Python caused BrokenPipeError due to process exit code and reading from stdout. This is incidental during investigation and not a test failure, but note that subprocess test harness captures output correctly in tests.
+
+What the agent missed or did poorly:
+- Ran the test suite without recognizing that certain rules depend on current date and updated lifecycle data, causing time-drift failures.
+- Did not inspect or adjust the date sensitivity of rules or data to preserve deterministic test outcomes.
+- Did not verify that include_checks filtering would prevent error rules from being included in an informational-only run in integration tests.
+
+How to improve and fix:
+- Make the runtime lifecycle rules deterministic for tests:
+  - Avoid using datetime.today() directly in DeprecatedRuntimeCreate/Eol/Update when running tests. Provide a mechanism to inject “current date” (e.g., via ConfigMixIn or environment variable) and default to datetime.today() only if not provided.
+  - For integration tests, ensure that the runner or rules use a consistent “current date” that aligns with test expectations (e.g., a fixed date that keeps nodejs18.x as updatable). The unit tests already set rule.current_date explicitly; integration should use similar control.
+  - Alternatively, adjust the AdditionalSpecs/LmbdRuntimeLifecycle.json to push the update-block dates far enough in the future that tests remain stable; however, that’s brittle and not ideal.
+
+- Verify include_checks filtering:
+  - Confirm that Runner initializes Rules with proper include_rules and ignores errors when include_checks=["I"]. The RulesCollection unit tests show filtering works, but integration runs rely on Runner’s loading process.
+  - In Runner._get_rules, rules are created via Rules() and updated with append/custom rules only. Ensure the default rules are loaded consistently with include_checks and ignore_checks from ConfigMixIn. If Rules() by default loads all rules, make sure filtering is applied before run. If it does not, ensure Runner loads default rules directory (_DEFAULT_RULESDIR). The unit tests create rules via RulesCollection().create_from_directory(_DEFAULT_RULESDIR) explicitly, which might not happen in Runner; confirm behavior and fix if necessary.
+
+- SnapStartSupported rule behavior seems fine:
+  - Class SnapStartSupported (E2530) checks runtime string safely and supports regions; tests for it pass. No direct relation to failures.
+
+Specific action points:
+1) Add a controllable “current date” source for Lambda runtime lifecycle rules:
+   - Expose current_date through rule initialization or configuration.
+   - In Runner or TemplateRunner, allow passing a fixed date through ConfigMixIn when running tests (integration harness constructs ConfigMixIn).
+   - Maintain unit tests using fixtures that override rule.current_date.
+   - Confirm that integration tests do not produce E2533 for nodejs18.x in generic.yaml or openshift.yaml when include_checks only ‘I’.
+
+2) Ensure Rules loading is consistent in Runner:
+   - Double-check that Runner._get_rules actually loads default rules (from _DEFAULT_RULESDIR). If not, it may be relying on Rules() constructor to do so; verify implementation. If missing, update Runner to create rules from default directory, honoring include_checks and ignore_checks from config before running.
+   - Confirm that include_checks=["I"] excludes error rule E2533 in the non-strict scenario.
+
+3) Validate expected outputs:
+   - After fixing current_date injection and filtering, rerun tests to ensure:
+     - test/unit/module/override/test_exclude.py stays deterministic (this one failed because E2533 appeared in good/generic.yaml; removing time drift will likely fix it).
+     - test/unit/module/test_rules_collections.py test_success_run returns [] (no matches); removing E2533 will fix.
+     - Integration tests exit codes match expected values.
+
+By addressing date sensitivity and rules loading/filtering, the agent will avoid time-drift failures and make tests pass consistently.

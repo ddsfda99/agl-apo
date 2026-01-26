@@ -1,0 +1,155 @@
+diff --git a/src/pybamm/solvers/processed_variable.py b/src/pybamm/solvers/processed_variable.py
+index 3de6e4bd5..8afbdc0b7 100644
+--- a/src/pybamm/solvers/processed_variable.py
++++ b/src/pybamm/solvers/processed_variable.py
+@@ -50,9 +50,12 @@ class ProcessedVariable:
+         self.all_inputs = solution.all_inputs
+         self.all_inputs_casadi = solution.all_inputs_casadi
+ 
+-        self.mesh = base_variables[0].mesh
+-        self.domain = base_variables[0].domain
+-        self.domains = base_variables[0].domains
++        # Some base variables (e.g. Scalar, Time, or composite expressions like Power)
++        # do not carry a mesh. Use getattr with sensible defaults to avoid AttributeError
++        # when variables are added post-build without an associated mesh.
++        self.mesh = getattr(base_variables[0], "mesh", None)
++        self.domain = getattr(base_variables[0], "domain", [])
++        self.domains = getattr(base_variables[0], "domains", {})
+         self.time_integral = time_integral
+ 
+         # Process spatial variables
+@@ -337,8 +340,17 @@ class ProcessedVariable:
+         kwargs = {key: value for key, value in kwargs.items() if value is not None}
+ 
+         # Use xarray interpolation, return numpy array
+-        out = xr_data_array.interp(**kwargs, kwargs={"fill_value": fill_value}).values
+-
++        try:
++            out = xr_data_array.interp(
++                **kwargs, kwargs={"fill_value": fill_value}
++            ).values
++        except TypeError:
++            # Some versions of xarray/scipy do not support kwargs={'fill_value': ...}
++            # Fallback: perform interp without kwargs and then fill NaNs/out-of-bounds
++            out = xr_data_array.interp(**kwargs).values
++            if not (isinstance(fill_value, str) and fill_value == "extrapolate"):
++                # Replace NaNs with the provided fill_value
++                out = np.where(np.isnan(out), fill_value, out)
+         return out
+ 
+     def _check_observe_raw(self, t):
+@@ -847,7 +859,12 @@ class ProcessedVariable2DSciKitFEM(ProcessedVariable2D):
+         time_integral: Optional[pybamm.ProcessedVariableTimeIntegral] = None,
+     ):
+         self.dimensions = 2
+-        super(ProcessedVariable2D, self).__init__(
++        # NOTE: Do not call ProcessedVariable2D.__init__ here since it expects
++        # a secondary_mesh-based layout that scikit-fem variables do not use.
++        # We intentionally bypass ProcessedVariable2D and initialize directly
++        # from ProcessedVariable to avoid secondary_mesh assumptions.
++        ProcessedVariable.__init__(
++            self,
+             base_variables,
+             base_variables_casadi,
+             solution,
+@@ -878,44 +895,72 @@ class ProcessedVariable2DSciKitFEM(ProcessedVariable2D):
+ 
+ 
+ def process_variable(base_variables, *args, **kwargs):
+-    mesh = base_variables[0].mesh
+-    domain = base_variables[0].domain
++    base_var = base_variables[0]
+ 
+     # Evaluate base variable at initial time
+-    base_eval_shape = base_variables[0].shape
+-    base_eval_size = base_variables[0].size
++    base_eval_shape = base_var.shape
++    base_eval_size = base_var.size
++
++    # Safely discover mesh/domain/secondary_mesh by traversing the expression tree.
++    mesh = getattr(base_var, "mesh", None)
++    domain = getattr(base_var, "domain", [])
++    secondary_mesh = getattr(base_var, "secondary_mesh", None)
++
++    if mesh is None or secondary_mesh is None or not domain:
++        # Walk the tree to find a symbol that carries mesh information
++        for node in base_var.pre_order():
++            m = getattr(node, "mesh", None)
++            if m is not None:
++                mesh = m
++                domain = getattr(node, "domain", [])
++                secondary_mesh = getattr(node, "secondary_mesh", None)
++                # Found sufficient information to classify dimensionality
++                break
+ 
+     # handle 2D (in space) finite element variables differently
+     if (
+-        mesh
+-        and "current collector" in domain
++        mesh is not None
+         and isinstance(mesh, pybamm.ScikitSubMesh2D)
++        and isinstance(domain, (list, tuple))
++        and "current collector" in domain
+     ):
+         return ProcessedVariable2DSciKitFEM(base_variables, *args, **kwargs)
+ 
+-    # check variable shape
++    # check variable shape; 0D or time-only variables
+     if len(base_eval_shape) == 0 or base_eval_shape[0] == 1:
+         return ProcessedVariable0D(base_variables, *args, **kwargs)
+ 
++    # If no mesh information was found, treat as 0D/time-only to avoid AttributeError
++    if mesh is None:
++        return ProcessedVariable0D(base_variables, *args, **kwargs)
++
++    # Try some shapes that could make the variable a 1D variable
+     n = mesh.npts
+     base_shape = base_eval_shape[0]
+-    # Try some shapes that could make the variable a 1D variable
+     if base_shape in [n, n + 1]:
+         return ProcessedVariable1D(base_variables, *args, **kwargs)
+ 
+     # Try some shapes that could make the variable a 2D variable
+-    first_dim_nodes = mesh.nodes
+-    first_dim_edges = mesh.edges
+-    second_dim_pts = base_variables[0].secondary_mesh.nodes
+-    if base_eval_size // len(second_dim_pts) in [
+-        len(first_dim_nodes),
+-        len(first_dim_edges),
+-    ]:
+-        return ProcessedVariable2D(base_variables, *args, **kwargs)
+-
+-    # Raise error for 3D variable
++    try:
++        first_dim_nodes = mesh.nodes
++        first_dim_edges = mesh.edges
++        second_dim_nodes = None
++        if secondary_mesh is None:
++            secondary_mesh = getattr(base_var, "secondary_mesh", None)
++        if secondary_mesh is not None:
++            second_dim_nodes = secondary_mesh.nodes
++        if second_dim_nodes is not None and (
++            base_eval_size // len(second_dim_nodes)
++            in [len(first_dim_nodes), len(first_dim_edges)]
++        ):
++            return ProcessedVariable2D(base_variables, *args, **kwargs)
++    except AttributeError:
++        # Missing attributes imply not a standard 1D/2D spatial variable
++        pass
++
++    # Raise error for 3D or unrecognized variable shapes
+     raise NotImplementedError(
+-        f"Shape not recognized for {base_variables[0]}"
++        f"Shape not recognized for {base_var}"
+         + "(note processing of 3D variables is not yet implemented)"
+     )
+ 
+@@ -931,7 +976,7 @@ def _is_f_contiguous(all_ys):
+         bool: True if all ys are f-contiguous
+     """
+ 
+-    return all(isinstance(y, np.ndarray) and y.data.f_contiguous for y in all_ys)
++    return all(isinstance(y, np.ndarray) and y.flags.f_contiguous for y in all_ys)
+ 
+ 
+ def _is_sorted(t):

@@ -26,8 +26,9 @@ the evaluations of previous failures:
 
 You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
 Return a complete revised prompt text that can be used directly as the user prompt.
-It MUST include the literal placeholder {{description}} unchanged.
-Do NOT introduce any other {{...}} placeholders.
+
+# Todo
+Do NOT introduce any {{...}} placeholders.
 If you need literal braces in the text, escape them as {{ and }}.
 """
 
@@ -70,18 +71,17 @@ def find_latest_prompt(prompt_dir: Path, instance_id: str) -> Optional[Path]:
     if not prompt_dir.exists():
         return None
     safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
-    pattern = re.compile(rf"^{re.escape(safe_id)}_v(\d+)\.txt$")
+    pattern = re.compile(rf"^{re.escape(safe_id)}_v\d+\.txt$")
     latest_path = None
-    latest_version = -1
+    latest_mtime = -1
     for path in prompt_dir.iterdir():
         if not path.is_file():
             continue
-        match = pattern.match(path.name)
-        if not match:
+        if not pattern.match(path.name):
             continue
-        version = int(match.group(1))
-        if version > latest_version:
-            latest_version = version
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
             latest_path = path
     return latest_path
 
@@ -90,23 +90,19 @@ def find_latest_textgrad(textgrads_dir: Path, instance_id: str) -> Optional[Path
     """Find the latest versioned textgrad output for the instance."""
     if not textgrads_dir.exists():
         return None
-    pattern_iter = re.compile(
-        rf"^{re.escape(instance_id)}_iter(\d+)_([0-9]{{8}}_[0-9]{{6}})\.txt$"
+    pattern = re.compile(
+        rf"^{re.escape(instance_id)}_iter\d+_[0-9]{{8}}_[0-9]{{6}}\.txt$"
     )
     latest_path = None
-    latest_key = (-1, "00000000_000000")
+    latest_mtime = -1
     for path in textgrads_dir.iterdir():
         if not path.is_file():
             continue
-        name = path.name
-        match = pattern_iter.match(name)
-        if not match:
+        if not pattern.match(path.name):
             continue
-        iter_idx = int(match.group(1))
-        ts = match.group(2)
-        key = (iter_idx, ts)
-        if key > latest_key:
-            latest_key = key
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
             latest_path = path
     return latest_path
 
@@ -178,10 +174,6 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
 
     print("=== Optimized dynamic ruleset ===")
     print(content if content else "[empty]")
-
-    if "{description}" not in content:
-        print("[error] Optimized prompt is missing required {description} placeholder.")
-        return
 
     output_dir = BASE_DIR / "applyedits"
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,54 @@
+Here’s a detailed review of the coding agent’s execution trace, focusing on why it failed and how to improve.
+
+What the agent did correctly
+- Located the correct area of code: src/briefcase/platforms/linux/system.py, specifically LinuxSystemMostlyPassiveMixin.distribution_filename(app).
+- Implemented a minimal, surgical change to distribution_filename for RPMs to handle SUSE/OpenSUSE properly:
+  - For SUSE targets, it now omits the distro tag and returns name-version-revision.abi.rpm.
+  - For other RPM distros (Fedora/RHEL), it preserves the existing behavior (tag between revision and abi).
+- Did not alter rpm_tag globally, as instructed. This avoids widespread test breakage since many tests mock or depend on rpm_tag.
+- Added a focused, isolated unit test that verifies distribution_filename(app) for an OpenSUSE target and avoided fixtures that mock rpm_tag. The test checks for the “no distro tag” filename and passed.
+- Validated selectively:
+  - Ran linux/system RPM-related tests: all passed.
+  - Ran distribution_path tests: all passed.
+
+Where the agent fell short
+1) Ad-hoc test cleanup was not performed.
+   - The instructions required removing any ad-hoc tests added for local validation. The agent created tests/platforms/linux/system/test_distribution_filename_opensuse.py and left it in place.
+   - Even though the added test passes, leaving it violates the directive and could cause process/policy failures. It also risks being out of scope for the existing test suite organization.
+
+2) Full test suite failure is unrelated and expected, but it still caused “failure”.
+   - The agent ran the full suite, and one test failed: tests/commands/base/test_paths.py::test_data_path_creation_failure.
+   - The instructions explicitly warned that unrelated environmental tests may fail (e.g., running as root, paths under /etc). This failure is consistent with that warning. The failure is not related to the SUSE RPM packaging fix.
+   - However, the overall run shows a red build because of this test. If the goal is “pass all tests” in an automated environment, running the full suite can make the task look failed even when the targeted fix is correct.
+
+3) Minor test hygiene issues in the ad-hoc test.
+   - The new test instantiates LinuxSystemCreateCommand with base_path and data_path potentially set to None via hasattr checks. This is sloppy and could be fragile. While distribution_filename doesn’t use base_path/data_path, it’s better practice to pass a real tmp_path to avoid surprises if code changes or if properties are accessed.
+   - Using LinuxSystemCreateCommand is fine, but LinuxSystemPackageCommand may be a more natural host for RPM filename tests. The guidance allowed either; however, ensuring clean, minimal setup is preferred.
+
+4) Slightly redundant vendor check in the code change.
+   - The detection uses getattr(app, "target_vendor_base", None) == SUSE or getattr(app, "target_vendor", None) == SUSE.
+   - In practice, “opensuse” is the vendor ID, while the vendor base is “suse” (per briefcase.platforms.linux vendor detection). The vendor_base check is sufficient. Checking target_vendor == SUSE (“suse”) is superfluous and will rarely match because the vendor is “opensuse”. It doesn’t break anything, but it’s unnecessary.
+
+Why the failure occurred
+- The “failure” observed was the full test suite having one failing test (test_data_path_creation_failure). This is unrelated to the SUSE RPM filename change and is an expected environmental issue (creating /etc/mydatadir) that the instructions told us to ignore early.
+- The agent didn’t remove the ad-hoc test file as required by the task. While this didn’t break tests, it’s a process failure per the user’s acceptance criteria.
+
+How to improve and make the agent pass
+- Remove the ad-hoc OpenSUSE test file created for local validation:
+  - Delete tests/platforms/linux/system/test_distribution_filename_opensuse.py before finishing.
+- Keep the surgical change in distribution_filename(app) as implemented, but you can simplify the SUSE detection to only check vendor_base == SUSE:
+  - This avoids confusion about target_vendor and stays tightly scoped.
+- For test hygiene, if you ever need to keep a unit test:
+  - Instantiate the command with actual tmp_path values for base_path and data_path rather than None.
+  - Continue to mock _build_env_abi and avoid touching rpm_tag in SUSE cases.
+- Be disciplined about test execution:
+  - Follow the guidance to run only linux/system RPM-related tests during iteration.
+  - If a full run is required by the CI, note that environment-specific failures like test_data_path_creation_failure are independently failing and unrelated; they were present before and should not be addressed here.
+  - If the CI requires all tests to pass, coordinate with the test owners or skip known environmental tests when running as root; otherwise, document that this is out-of-scope for the SUSE RPM filename bug fix.
+
+Summary of the fix’s impact
+- For SUSE targets, distribution_filename(app) correctly returns name-version-revision.abi.rpm with no distro tag (e.g., helloworld-0.0.1-1.x86_64.rpm).
+- Fedora/RHEL behavior remains unchanged; filenames still include the distro tag (e.g., -fcXX.- wonky.rpm), satisfying existing tests.
+- Packaging move step now aligned: rpmbuild_path/RPMS/<abi>/<distribution_filename(app)> resolves to the actual file generated on SUSE, so the move succeeds.
+
+Once the ad-hoc test is removed, the targeted tests still pass, the change is minimal and correct, and the only failing test is a known environmental issue that’s unrelated to this bug fix.

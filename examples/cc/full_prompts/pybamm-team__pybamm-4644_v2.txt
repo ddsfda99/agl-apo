@@ -1,0 +1,116 @@
+You are an expert coding agent tasked with fixing a bug in the current repository and adding safeguards to prevent regressions. Follow the plan carefully and be precise about what you change. If the repository already contains the fix, do not claim work you did not perform; instead, add missing regression tests and address the latent issues called out below.
+
+Context and goal
+- Issue: Post-processing variables added to a pre-built PyBaMM model can fail in pybamm.solvers.processed_variable.process_variable due to assuming all symbols have a mesh. The error seen was AttributeError: 'Power' object has no attribute 'mesh'.
+- We need to reproduce this, ensure it is covered by tests, and ensure processed_variable robustly handles meshless variables added post-build. Additionally, there are latent issues in the module that should be corrected to avoid subtle failures elsewhere.
+- Be careful about the ProcessedVariable2DSciKitFEM constructor and superclass calls; an incorrect super invocation can route into ProcessedVariable2D.__init__ and demand a secondary_mesh that scikit-FEM variables do not use.
+
+Constraints
+- Do not commit your edits.
+- Be honest about whether you actually changed code or whether the fix already exists.
+- Clean up any temporary test files you create.
+- Avoid relying on hardcoded paths like /workspace. Always use the repository root you are given.
+
+Execution plan
+1) Verify environment and locate the code
+- Run pwd to confirm the current working directory is the repository root.
+- List files with ls -la and ensure you see src/pybamm and tests/.
+- Open and read src/pybamm/solvers/processed_variable.py.
+- Grep for process_variable and specifically for any patterns that assume .mesh is present, e.g., mesh = base_variables[0].mesh, direct attribute access to .mesh/.domain/.secondary_mesh on arbitrary Symbols, and loops that do not early-exit when mesh is found.
+- Grep for functions that check contiguity, e.g., _is_f_contiguous or y.data.f_contiguous usage.
+- Search for ProcessedVariable2DSciKitFEM.__init__ and inspect how it calls super.
+- Search for uses of xarray.DataArray.interp and kwargs={"fill_value": ...} and any duplicate return statements around that logic.
+
+2) Write or confirm a failing reproduction test
+- First, search for an existing test that covers adding variables post-build:
+  - Look in tests/unit/test_solvers/test_processed_variable_postbuild.py and related tests under tests/unit/test_solvers/.
+- If a test exists and already covers meshless post-build variables and passes, do not claim you wrote it; note that the scenario is already covered and proceed to add or adjust other tests for the latent issues below.
+- Regardless, add at least one new regression test that explicitly reproduces the reported user scenario:
+  - Create a test file tests/unit/test_solvers/test_processed_variable_meshless_postbuild_ext.py.
+  - In the test:
+    - Build a simple model that solves quickly, e.g., pybamm.lithium_ion.SPM() or an equivalent minimal model.
+    - After building but before solving, manually add variables to model.variables such that they have no mesh:
+      - model.variables.update({"t squared": pybamm.t**2}) where pybamm.t**2 produces a Power symbol with no mesh.
+      - model.variables.update({"const": pybamm.Scalar(3.14)})
+      - model.variables.update({"expr": 2 * pybamm.t + pybamm.Scalar(1)})
+    - Solve the model.
+    - Access sol["t squared"].data, sol["const"].data, sol["expr"].data and assert they return arrays of expected shape and value without raising AttributeError, and that time interpolation behaves sensibly. For example:
+      - Assert that sol["const"].data is a constant array with the expected value at all time points.
+      - Assert that sol["t squared"](t) approximately equals t**2 for a few sample times.
+- If IDAKLU-dependent functionality could be reached by ProcessedVariable code paths, guard the test with pytest.importorskip or pytest.mark.skipif as needed to avoid spurious failures on environments lacking IDAKLU.
+
+3) Locate and inspect the critical code paths
+- In src/pybamm/solvers/processed_variable.py, locate process_variable and the logic that:
+  - Determines base_variables and obtains mesh or secondary_mesh.
+  - Chooses which ProcessedVariable class to instantiate for 0D, 1D, 2D, etc.
+- Confirm there is a safe path for meshless symbols:
+  - Ensure code does not blindly access base_variables[0].mesh when there are no mesh-carrying children.
+  - Traverse children via pre_order() to collect any symbols that have mesh or secondary_mesh. Stop early once you have found sufficient information to classify dimensionality.
+  - If none is found, treat the variable as 0D or time-only and construct an appropriate processed variable that does not require mesh access.
+- Inspect the traversal for inefficient or incorrect control flow:
+  - Replace any “pass” where an early exit was intended with a proper break once mesh and, if applicable, secondary_mesh information is found.
+  - Avoid broad try/except that swallows unrelated exceptions; if guarding attribute access, catch AttributeError specifically and proceed accordingly.
+- Inspect ProcessedVariable and subclasses for mesh/domain assumptions:
+  - Where __init__ reads .mesh, .domain, .domains, use getattr with defaults to avoid AttributeError on meshless symbols.
+- Inspect and document ProcessedVariable2DSciKitFEM.__init__:
+  - Verify the super call. Do not change this lightly. If the class inherits from ProcessedVariable2D and super().__init__ would invoke ProcessedVariable2D.__init__ with secondary_mesh requirements, prefer explicitly calling ProcessedVariable.__init__ and add a code comment explaining why (to avoid secondary_mesh assumptions for scikit-FEM).
+  - If the class hierarchy or signature allows using super(ProcessedVariable2DSciKitFEM, self).__init__(...) without pulling in ProcessedVariable2D semantics, you may use that, but only after running 2D scikit-FEM tests to confirm no regressions. Otherwise, keep or restore the explicit ProcessedVariable.__init__ call and document this decision.
+
+4) Implement fixes and cleanups as needed
+Make only the changes that are necessary and correct. Apply the following targeted fixes if they are present in the codebase:
+
+- Fix incorrect NumPy contiguous check:
+  - Find any function named _is_f_contiguous or equivalent code that does y.data.f_contiguous.
+  - Replace this with the correct NumPy API: y.flags.f_contiguous or y.flags["F_CONTIGUOUS"].
+  - Ensure this function works on standard NumPy arrays and returns a boolean.
+
+- Correct ProcessedVariable2DSciKitFEM initialization:
+  - If currently using super().__init__ or super(ProcessedVariable2D, self).__init__, and that routes into ProcessedVariable2D.__init__ requiring secondary_mesh, change it to explicitly call ProcessedVariable.__init__(...) instead.
+  - Add a brief comment explaining the design intent: scikit-FEM variables bypass ProcessedVariable2D assumptions (e.g., secondary_mesh), so we initialize directly from ProcessedVariable.
+  - Alternatively, if class hierarchy supports a safe super(ProcessedVariable2DSciKitFEM, self).__init__(...) without invoking ProcessedVariable2D.__init__, and tests confirm, you may use that. Prefer clarity and passing tests over “modernizing” super.
+
+- Harden process_variable for meshless variables:
+  - When computing the mesh to use:
+    - Traverse children via pre_order() to collect any symbols that have mesh or secondary_mesh using getattr with defaults and catching AttributeError only.
+    - Early-exit once you have discovered mesh and, if needed, secondary_mesh.
+    - If none is found, treat the variable as 0D or time-only and choose the appropriate processed variable class that does not require mesh.
+  - Ensure that common meshless symbols such as Scalar, Parameter, Time (pybamm.t), and operations like Power, Add, Mul are handled robustly.
+  - Do not rely on shape heuristics for classification; rely on domain/mesh detection and fall back to 0D only when no mesh is discoverable.
+  - Optionally, emit a debug-level log or warnings.warn when falling back to 0D for a variable that has no mesh, to help future maintainers spot misclassifications. Keep logs unobtrusive.
+
+- Validate xarray interpolation fill_value usage:
+  - Search for uses of xarray.DataArray.interp with kwargs={"fill_value": fill_value}.
+  - Wrap the call in try/except TypeError:
+    - First try interp(..., kwargs={"fill_value": fill_value}).
+    - If TypeError, fallback to interp(...) without kwargs and then post-process the result to set values outside supported bounds to fill_value, e.g., replace NaNs using where or fillna if appropriate for the DataArray shape and coordinates.
+  - Remove any duplicate return statements in the helper function that wraps interpolation.
+  - Add a small unit test if feasible to ensure no exceptions are raised when interpolating slightly outside the domain with a finite fill_value.
+
+- Optional but recommended: Python fallback for observation
+  - If there is a method _observe_raw_python raising NotImplementedError and the code path can be hit when pybamm.has_idaklu() is False, consider implementing a minimal Python fallback that evaluates the expression directly at the requested times and mesh points using NumPy, or guard tests to skip those paths when IDAKLU is unavailable.
+  - Only implement this if unit tests can reach this path in the project’s CI environment; otherwise, leave as is and document with a clear error message.
+
+5) Run tests
+- Start with the new regression test file you added to ensure it reproduces the scenario and passes after your changes.
+- Then run a broader subset of the suite to catch related issues:
+  - tests/unit/test_solvers/test_processed_variable_postbuild.py
+  - tests/unit/test_solvers/test_processed_variable.py
+  - tests/unit/test_solvers/test_processed_variable_computed.py
+  - tests/unit/test_solvers/test_solution.py
+  - Any 2D or scikit-FEM related tests, if present, to verify the ProcessedVariable2DSciKitFEM constructor behavior did not break anything.
+- If any failures appear, iterate: inspect the failing test and stack trace, patch the relevant code carefully, and rerun tests until they pass.
+- Avoid broad exception swallowing in code; fix the underlying cause. Add targeted guards with AttributeError where appropriate.
+
+6) Clean up
+- Remove any temporary files you created that are not part of the intended test suite.
+- Keep the repository tidy. Do not commit your edits.
+- Be explicit in the final summary about what you changed versus what was already correct in the repository when you started.
+
+Acceptance criteria
+- Accessing Solution variables added post-build that are meshless, such as pybamm.t**2 or a Scalar, does not raise AttributeError and returns sensible data arrays when indexed as sol["name"].data.
+- process_variable does not assume that all symbols have a mesh and correctly handles time-only and 0D variables, using pre_order traversal to find mesh when present and early-exiting once classification is possible.
+- The contiguous memory check uses the correct NumPy API.
+- The ProcessedVariable2DSciKitFEM.__init__ behavior does not route into ProcessedVariable2D secondary_mesh assumptions; either explicit ProcessedVariable.__init__ is used with a comment, or a safe super call is verified by passing tests.
+- xarray interpolation usage does not rely on unsupported kwargs and does not error in the project’s environment; duplicate returns are removed.
+- The targeted unit tests pass, and the broader subset listed above also passes.
+- No unnecessary broad try/except blocks are introduced; fallbacks are documented and minimally scoped.

@@ -1,0 +1,147 @@
+You are working in the current repository root. Do not assume any hardcoded path like /workspace; first list files to confirm you are in the project root that contains pyproject.toml and src/briefcase.
+
+Goal
+- Fix a UX issue: when a subprocess invoked by Briefcase fails for an unknown reason, its output is hidden in logs and not shown on the console. For adb install failures, Briefcase only shows a generic “Unable to install APK …” message, but not the actual adb error output. We need to display the failing subprocess’s output in the console unless Briefcase has a more specific, helpful message of its own.
+
+High-level approach
+- Specifically address ADB.install_apk so that when adb install fails and raises subprocess.CalledProcessError, we print the output captured by the failing call to the console before raising BriefcaseCommandError. This preserves the existing generic message but also surfaces the adb error text to users.
+- Do not change global Subprocess behavior.
+- Add a focused regression test that asserts the failing adb output appears on the console on failure.
+- Ensure that the success path continues to print nothing extra.
+
+Follow these steps
+
+1) Understand the requirements
+- When a subprocess fails for an unknown reason, show its output to the console.
+- For adb install, the failure currently raises BriefcaseCommandError without printing adb’s output. Users need to see adb’s output like: INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package com.example.helloworld signatures do not match previously installed version.
+- If there is already a specific, useful Briefcase error, do not duplicate noisy output. This is already handled in ADB.run for certain known cases; we only adjust ADB.install_apk’s generic failure path.
+
+2) Write or update reproduction tests
+- Locate existing tests for ADB.install_apk. Look under tests/integrations/android_sdk/ADB/ for test_install_apk.py or similar.
+- Add a new test that simulates a CalledProcessError from adb.run with a meaningful output string, and assert that this output shows up on the console.
+
+Example test to add in tests/integrations/android_sdk/ADB/test_install_apk.py:
+
+import subprocess
+import pytest
+
+from briefcase.exceptions import BriefcaseCommandError
+
+def test_install_failure_shows_subprocess_output(adb, capsys, monkeypatch):
+    # Simulate adb failing with a meaningful error message.
+    # The adb.run wrapper would normally call tools.subprocess.check_output,
+    # which populates CalledProcessError.output on failure.
+    error = subprocess.CalledProcessError(
+        returncode=1,
+        cmd="adb install -r example.apk",
+        output="Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: Package com.example.helloworld signatures do not match previously installed version]"
+    )
+    monkeypatch.setattr(adb, "run", lambda *a, **kw: (_ for _ in ()).throw(error))
+
+    with pytest.raises(BriefcaseCommandError):
+        adb.install_apk("example.apk")
+
+    captured = capsys.readouterr()
+    # Validate that the failing adb output is printed to console.
+    # Check both stdout and stderr to be robust.
+    combined = (captured.out or "") + (captured.err or "")
+    assert "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in combined
+
+Notes:
+- Keep existing tests intact. There should already be a success-path test that asserts nothing is printed on success; do not change that behavior.
+- The new test should only assert that output appears when there is a CalledProcessError.
+
+3) Locate the implementation to modify
+- Search for the adb installation logic:
+  - Open src/briefcase/integrations/android_sdk.py
+  - Find class ADB and method install_apk.
+- Current code (approximate):
+    def install_apk(self, apk_path: str | Path):
+        try:
+            self.run("install", "-r", apk_path)
+        except subprocess.CalledProcessError as e:
+            raise BriefcaseCommandError(
+                f"Unable to install APK {apk_path} on {self.device}"
+            ) from e
+- The self.run path uses tools.subprocess.check_output that captures output and raises CalledProcessError with the output attached. That output is currently only going to the log file at debug level; we need to show it in the console on failure.
+
+4) Implement the fix
+- Modify ADB.install_apk to print the failing subprocess output to the console when catching subprocess.CalledProcessError, then raise the same BriefcaseCommandError.
+- Keep behavior on success unchanged, and keep the same BriefcaseCommandError message.
+- Be robust to output possibly being bytes or empty; also check e.stderr if present.
+
+Suggested implementation:
+
+In src/briefcase/integrations/android_sdk.py, within class ADB:
+
+    def install_apk(self, apk_path: str | Path):
+        try:
+            self.run("install", "-r", apk_path)
+        except subprocess.CalledProcessError as e:
+            # Extract any output from the failing subprocess and show it to the user.
+            # tools.subprocess.check_output usually places combined stdout/stderr into e.output.
+            # Be defensive if output is bytes or if stderr is used.
+            parts = []
+            for attr in ("output", "stderr"):
+                val = getattr(e, attr, None)
+                if val:
+                    if isinstance(val, bytes):
+                        try:
+                            val = val.decode(errors="replace")
+                        except Exception:
+                            val = str(val)
+                    parts.append(str(val))
+
+            failing_output = "\n".join(p for p in parts if p).strip()
+
+            if failing_output:
+                # Prefer console if available; otherwise fall back to plain print.
+                try:
+                    console = getattr(self.tools, "console", None)
+                    if console and hasattr(console, "error"):
+                        console.error("adb output from failed install:")
+                        for line in failing_output.splitlines():
+                            console.error(f"    {line}")
+                    else:
+                        print("adb output from failed install:")
+                        print(failing_output)
+                except Exception:
+                    # In case console printing fails for any reason, still proceed to raise.
+                    pass
+
+            raise BriefcaseCommandError(
+                f"Unable to install APK {apk_path} on {self.device}"
+            ) from e
+
+Rationale:
+- Only prints in the error path.
+- Shows the exact adb output so users can search for the message.
+- Doesn’t alter known, more helpful error flows that ADB.run may handle explicitly.
+- Keeps the raised BriefcaseCommandError message unchanged.
+
+5) Run and validate tests
+- From the project root, run:
+  - pytest -q
+  - If the full suite is slow, you can filter:
+    - pytest -q tests/integrations/android_sdk/ADB -k install_apk
+- Ensure:
+  - The success-path test still passes and shows no output.
+  - The new failure test passes and finds the adb error message in console output.
+- If any tests fail due to stdout vs stderr, adjust the test to check combined captured.out + captured.err, as provided.
+
+6) Cleanup
+- No temporary files should be created during the fix.
+- Do not remove or revert the new regression test.
+- Do not commit your edits; leave changes staged in the working tree only.
+
+Important constraints and notes
+- Do not change global subprocess behavior or other unrelated integrations.
+- Do not change existing error messages except for adding the failing subprocess output to the console on failure.
+- Keep the fix narrowly scoped to ADB.install_apk, which is the source of the reported UX issue.
+- The example error INSTALL_FAILED_UPDATE_INCOMPATIBLE should appear in console output after your change when adb install fails.
+
+Deliverables checklist
+- Code change in src/briefcase/integrations/android_sdk.py inside ADB.install_apk to print failing subprocess output.
+- New test in tests/integrations/android_sdk/ADB/test_install_apk.py named test_install_failure_shows_subprocess_output that verifies console output contains the adb failure message.
+- All tests pass locally.
+- No commits performed.

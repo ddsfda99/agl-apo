@@ -1,0 +1,83 @@
+You are working in the repository at /testbed. Your goal is to implement a feature fix: when an INSERT INTO ... SELECT ... statement does not specify a target column list, infer the target column names from MetaDataProvider and use them as the target-side columns in column lineage, provided the number of inferred target columns matches the number of columns in the SELECT list. This should make the lineage behave as if the SQL had explicitly specified the target columns.
+
+Background and current problem
+- Scenario: SQL is "insert into target select user_id, user_name from source". The physical target table columns are id, name.
+- Current behavior: Column lineage uses user_id, user_name as target-side column names (from the SELECT list), which is incorrect.
+- Desired behavior: If the target column list is not specified, fetch the target table’s columns from MetaDataProvider and use those names as target-side columns. Effectively treat it like "insert into target(id, name) select user_id, user_name from source".
+
+Where to change
+- The main logic that wires column lineage for the sqlfluff analyzer path is in SourceHandlerMixin.end_of_query_cleanup in sqllineage/core/parser/__init__.py.
+- Existing behavior:
+  - It iterates over the selected columns (col_grp).
+  - Sets the parent of each target column to the target table.
+  - By default, sets tgt_col_resolved = tgt_col_from_query.
+  - If len(holder.write_columns) == len(col_grp), it substitutes tgt_col_resolved = holder.write_columns[idx] (write_columns are populated when the INSERT statement explicitly lists target columns or via DDL).
+  - Then it resolves source columns and adds lineage edges.
+
+Root cause
+- There is no logic to derive target columns from the target table schema via MetaDataProvider when target columns are not specified in the SQL. Therefore, the code incorrectly uses SELECT list column names on the target side.
+
+What you need to implement
+- In SourceHandlerMixin.end_of_query_cleanup, extend the mapping of target-side columns:
+  - Keep existing behavior that if len(holder.write_columns) == len(col_grp), use holder.write_columns[idx].
+  - Otherwise, if a metadata provider is available and the write target is a concrete Table, fetch the target table’s columns using the metadata provider. If the number of columns equals len(col_grp), use those target table columns indexed correspondingly to substitute tgt_col_resolved.
+  - Only perform this mapping when the lengths match; otherwise, leave the current behavior unchanged.
+  - Ensure you set the parent for the resolved target columns to the target table if not already set consistently.
+- Access the metadata provider safely: metadata_provider = getattr(self, "metadata_provider", None).
+- Only attempt metadata lookup if the write target is a Table (not a SubQuery, CTE, etc.).
+- This mirrors the behavior of explicit "INSERT INTO target(col1, col2) SELECT ..." but uses metadata when the column list is omitted.
+
+Testing approach and steps
+- First, write tests to reproduce the bug. Place them under tests/sql/column/. Use test helpers if available, such as tests/helpers.py generate_metadata_providers, to supply a DummyMetaDataProvider with predefined schemas.
+- Create a test that:
+  - Sets up a source table "source" with columns ["user_id", "user_name"] and a target table "target" with columns ["id", "name"] via MetaDataProvider.
+  - SQL: insert into target select user_id, user_name from source
+  - Runs lineage extraction with the metadata provider.
+  - Asserts that the resulting column lineage edges are:
+    - source.user_id -> target.id
+    - source.user_name -> target.name
+  - Also add a control test (optional) to assert that without a metadata provider, the behavior remains unchanged (i.e., target-side columns default to user_id, user_name).
+- Ensure that your test covers both sqlfluff and sqlparse analyzer paths if the repository runs both. If the sqlparse path fails after fixing the sqlfluff path, you will need to add analogous logic in the sqlparse analyzer’s end-of-query cleanup hook where INSERT SELECT target-side column mapping happens (the sqlparse path uses token handlers and a different cleanup hook).
+
+Implementation details and pitfalls
+- Guard the metadata lookup with getattr(self, "metadata_provider", None) to avoid attribute errors when no provider is passed.
+- Map only when len(target_table_columns) == len(col_grp); otherwise, do not force a mapping and keep existing behavior.
+- Confirm the write target is a Table before fetching metadata columns; do not attempt for SubQuery or other non-Table targets.
+- Respect existing holder.write_columns mapping when present; that path should take precedence and remain unchanged.
+- Preserve the order of the SELECT list for consistent index-based matching.
+- Do not alter wildcard expansion logic; that is handled elsewhere (SubQueryLineageHolder.expand_wildcard) and is not part of this fix.
+
+Step-by-step plan
+1) Write failing tests to reproduce the bug as described.
+   - Use a metadata provider that defines:
+     - source: columns user_id, user_name
+     - target: columns id, name
+   - SQL: insert into target select user_id, user_name from source
+   - Assert lineage edges source.user_id -> target.id and source.user_name -> target.name.
+   - Run tests (pytest recommended).
+
+2) Explore the code to locate the bug.
+   - Open sqllineage/core/parser/__init__.py and find SourceHandlerMixin.end_of_query_cleanup.
+   - Identify where tgt_col_resolved is set, where holder.write_columns is used, and where lineage edges are added.
+
+3) Implement the fix.
+   - After the check for len(holder.write_columns) == len(col_grp), add a fallback that:
+     - Retrieves metadata provider via getattr.
+     - If present and the target is a Table, gets the target columns via metadata_provider.get_table_columns(target_table).
+     - If len matches col_grp, set tgt_col_resolved to the corresponding target column for the current index.
+   - Ensure parent assignment to the target table is consistent for the resolved target column.
+
+4) Rerun your tests.
+   - Verify that the new tests pass.
+   - If the sqlparse analyzer path is used and tests still fail there, locate its end-of-query cleanup hook and add analogous target-column mapping logic.
+   - Rerun all tests until green.
+
+5) Cleanup.
+   - Delete the test files you added before finishing, per the task requirement not to commit tests.
+   - Do not commit any edits; you only need to prepare the changes.
+
+Acceptance criteria
+- With a MetaDataProvider that defines target table columns, an INSERT INTO ... SELECT ... without an explicit target column list produces column lineage edges that use the target table’s actual column names (id, name) instead of the SELECT list names (user_id, user_name).
+- Existing behavior remains unchanged when metadata is not available or when the number of target columns does not match the SELECT list length.
+- Explicit target column lists in INSERT statements continue to work as before via holder.write_columns.
+- Tests written to reproduce the bug pass after your fix, and you delete them before finalizing.

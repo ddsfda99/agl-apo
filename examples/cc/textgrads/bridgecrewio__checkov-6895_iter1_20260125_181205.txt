@@ -1,0 +1,67 @@
+Summary of what went wrong
+
+- You changed tests to use Runner-level “unknown” handling that the framework doesn’t expose
+  - In tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py you started collecting report.unknown_checks and asserted summary['unknown'].
+  - The Report object in this codebase does not have an unknown_checks attribute. The test failed with AttributeError: 'Report' object has no attribute 'unknown_checks'.
+  - Most existing tests that verify CheckResult.UNKNOWN do so by calling the check’s scan_resource_conf directly and asserting the enum value, not by relying on Runner/Report to track unknown checks.
+
+- You deviated from established test patterns
+  - The original PostgreSQL/MySQL tests used Runner, asserted passed/failed/skipped/parsing_errors only, and didn’t try to count “unknown”.
+  - The existing MariaDB test used hcl2 to parse a single resource and called check.scan_resource_conf(), asserting FAILED/PASSED results directly. You replaced it with a Runner-based test and added “unknown” expectations, which is not how the rest of the repository tests UNKNOWN cases.
+
+- You broadened scope and modified multiple checks unnecessarily
+  - You altered three checks (PostgreSQLFlexiServerGeoBackupEnabled, MySQLGeoBackupEnabled, MariaDBGeoBackupEnabled) to add create_mode logic and UNKNOWN handling. The task likely required a narrower change.
+  - You also added support for a resource type “azurerm_mariadb_flexible_server” in MariaDBGeoBackupEnabled and created test resources for it. Azure doesn’t offer a “MariaDB flexible server” resource in Terraform, and this type does not exist anywhere else in the repo (grep shows no references). This is speculative and misaligned with the codebase.
+
+- You introduced new test files and expectations without verifying framework capabilities
+  - You added new example .tf files for “replica” and “unknown create_mode” resources and then changed tests to assert unknown checks. But the Report API in this tree does not provide unknown_checks or summary['unknown'], so these assertions will always fail.
+
+- You didn’t validate API assumptions
+  - Before using report.unknown_checks, you should have searched the repo for how reports expose unknown results. A quick grep shows no one uses unknown_checks anywhere, while UNKNOWN is asserted via direct scan_resource_conf unit tests.
+
+- Overengineering: adding helpers and type checks not necessary to pass tests
+  - You added _extract_str, _is_unresolved_reference, and extra type annotations. The BaseResourceValueCheck already handles common Terraform list/scalar patterns. While not inherently wrong, this adds complexity and risk for little gain, especially since the tests didn’t require it.
+
+Concrete issues in files
+
+- tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+  - Introduced unknown_checks collection and summary['unknown'] assertion. Fails because Report has no unknown_checks attribute and likely no 'unknown' summary key.
+
+- tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+  - Same pattern: added unknown_checks and unknown summary assertions. Will fail for the same reason.
+
+- tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+  - Replaced simple hcl2-based unit tests with Runner-based test including unknown assertions. Diverges from project’s pattern and uses non-existent “azurerm_mariadb_flexible_server”.
+
+- checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py
+  - Extended supported_resources to ("azurerm_mariadb_server", "azurerm_mariadb_flexible_server"), but there is no such resource supported elsewhere. This is likely incorrect and will cause confusion.
+
+- checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py and PostgreSQLFlexiServerGeoBackupEnabled.py
+  - Added scan_resource_conf override to return UNKNOWN for certain create_mode values. Even if logically sound (replicas may not support geo-redundant backups), the existing tests didn’t require or expect this, and runner-level unknown handling is not supported by the Report API in this tree.
+
+How to fix
+
+- Revert test changes to match the codebase’s testing conventions:
+  - PostgreSQL and MySQL tests: keep using Runner as before and assert only 'passed', 'failed', 'skipped', 'parsing_errors'. Do not collect report.unknown_checks or assert summary['unknown'].
+  - If you truly need to test UNKNOWN behavior, add a separate unit test that directly calls check.scan_resource_conf() on a minimal conf dict and asserts the return value is CheckResult.UNKNOWN (this mirrors how other UNKNOWN tests are written in the repo).
+  - MariaDB test: revert to the original hcl2-based unit tests that assert CheckResult.FAILED/PASSED. Don’t convert this to a Runner-based test unless there’s a strong reason and the framework supports it.
+
+- Don’t invent unsupported resource types
+  - Remove “azurerm_mariadb_flexible_server” from supported_resources in MariaDBGeoBackupEnabled and delete the example files referencing this resource. There’s no evidence in the repo that this resource exists or is intended to be supported.
+
+- Minimize scope and risk
+  - Only change the minimal code needed to pass the targeted tests. Avoid speculative behavior changes (e.g., returning UNKNOWN based on create_mode) unless there are explicit tests in this repo that require it.
+  - If you keep the create_mode handling, ensure it doesn’t break existing checks and doesn’t require runner-level unknown reporting. Prefer unit tests for UNKNOWN results via scan_resource_conf.
+
+- Verify the API before using it
+  - Inspect Report to see what attributes are available. If unknown checks aren’t exposed as a list or summary metric, don’t assert on them.
+
+- Run the full relevant test subset
+  - After changes, run pytest on the affected tests (PostgreSQL, MySQL, and MariaDB check tests) to ensure your changes don’t break existing behavior.
+
+Key takeaways
+
+- Follow the established testing patterns in the repository: use direct scan_resource_conf assertions for UNKNOWN, and Runner-based assertions only for pass/fail/skip counts.
+- Avoid adding or testing for features (e.g., unknown_checks in Report or new resource types) that aren’t present in the codebase.
+- Keep changes constrained to the problem at hand; broad refactors increase failure risk.
+- Validate assumptions about framework APIs and run tests early and often.

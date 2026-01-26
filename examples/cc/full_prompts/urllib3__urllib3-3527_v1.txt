@@ -1,0 +1,88 @@
+Objective
+Fix a hang where closing an HTTPResponse from one thread does not interrupt a concurrent blocking read in another thread. The underlying cause is likely the order in which HTTPResponse.close() cleans up the file-like object and the socket/connection. The fix should ensure that closing the response interrupts any active blocking read on the socket, allowing the reading thread to exit promptly.
+
+Important constraints
+- Do not commit any changes. Make local edits only; we will commit later.
+- Avoid modifying upstream tests unless absolutely necessary. Use a local reproduction harness to validate the fix.
+- Ensure determinism in any local concurrency testing (use threading events for synchronization).
+
+Deliverables
+- A robust local reproduction harness that demonstrates the hang and verifies the fix.
+- A minimal code change to urllib3 that resolves the hang without introducing regressions.
+- Passing full pytest suite. If time-based tests fail (e.g., RECENT_DATE), update the constant appropriately.
+- Cleanup of any temporary files created during reproduction.
+
+Steps
+1) Establish a baseline by running the full test suite
+- Run pytest for the repository before making any changes.
+- If the suite fails due to time-based maintenance tests (commonly test_connection/test_recent_date refers to RECENT_DATE being too old), update the RECENT_DATE constant to a recent value.
+  - Location: src/urllib3/util/ssl_.py (constant RECENT_DATE).
+  - Choose a date within the last 12–18 months relative to the current environment date so the test passes.
+- Re-run pytest to confirm a clean baseline with no unrelated failures.
+- Do not commit any changes.
+
+2) Create a local, deterministic reproduction harness (do not add an upstream test)
+- Create a temporary script at the repo root, e.g., tmp_close_hang_repro.py. You will remove it later.
+- The harness should:
+  - Start a simple TCP server in a daemon thread that speaks HTTP/1.1 with Transfer-Encoding: chunked.
+  - Send response headers, then one valid chunk (e.g., “a\r\n0123456789\r\n”) and then stall without sending the terminating 0-length chunk or additional data.
+  - On the client side, use urllib3.PoolManager to GET the server endpoint.
+  - Spawn a client thread that reads from the HTTPResponse such that it:
+    - Reads and consumes the first chunk.
+    - Attempts to read the next chunk and blocks.
+  - Use threading.Event objects to ensure determinism:
+    - Signal when the client has consumed the first chunk and is about to block on the next read.
+    - Only after that signal, the main thread should call response.close().
+  - Verify behavior:
+    - Before the fix, response.close() hangs (reproduce the issue).
+    - After the fix, response.close() returns promptly and the client thread exits with an exception.
+  - Optionally log or assert the exception raised on the client thread (ProtocolError wrapping OSError or IncompleteRead are typical). It’s sufficient to assert that an exception occurred and the thread terminates.
+
+Implementation hints for the local harness
+- Server: Use socketserver or raw socket to emit:
+  - “HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n”
+  - “a\r\n0123456789\r\n”
+  - Then pause (sleep) and avoid sending “0\r\n\r\n”.
+- Client: PoolManager().request("GET", url, preload_content=False) to get a streaming HTTPResponse.
+  - Read in a loop (e.g., response.read(amt) or iterate with response.stream(amt)), set an event after reading the first chunk, then attempt another read which should block until the connection is interrupted.
+
+3) Locate the code to change and implement the fix
+- Target: src/urllib3/response.py, class HTTPResponse, method close().
+- Goal: Close the underlying connection/socket first, then close the file-like object (_fp). This ensures any blocking reads are interrupted at the OS/socket level.
+- Implementation details:
+  - If self._connection is present, call self._connection.close() before closing self._fp.
+  - Ensure idempotency: calling close() multiple times should not raise errors.
+  - Be careful not to attempt to drain/consume remaining bytes, as that can reintroduce blocking behavior.
+  - Suppress or safely handle exceptions during close; closing should be best-effort and not hang.
+  - Maintain the closed property semantics: after both actions, HTTPResponse.closed should reflect that the response is closed.
+  - Add a brief comment explaining the rationale:
+    - “Close the underlying connection first to interrupt any concurrent blocking read on another thread. Closing the file-like object first can hang if it attempts to drain remaining bytes.”
+
+4) Validate the fix with the local harness
+- Run tmp_close_hang_repro.py before the fix to confirm the hang.
+- Apply the fix and re-run the script:
+  - Confirm that response.close() returns promptly.
+  - Confirm that the reading client thread exits due to a read error (exception raised) and does not hang.
+  - Optionally assert that the exception is a urllib3.exceptions.ProtocolError or similar, but it’s acceptable to check that an exception occurred and the thread terminated.
+
+5) Run the full test suite
+- Run pytest to ensure your change doesn’t introduce regressions.
+- If any time-based test failures occur (e.g., RECENT_DATE), update the constant to an appropriately recent value and re-run.
+- Confirm that all tests pass or that only known and allowed xfail/skipped tests remain.
+
+6) Cleanup
+- Remove tmp_close_hang_repro.py and any other temporary files created for reproduction.
+- Do not commit changes.
+
+Notes and cautions
+- Avoid modifying upstream tests unless explicitly requested. The local harness is sufficient to reproduce and validate the behavior.
+- Ensure the fix does not alter connection pool semantics beyond what close() already implies. HTTPResponse.close() is expected to render the underlying connection unusable and not return it to the pool; calling self._connection.close() first is consistent with that behavior.
+- Document the change in a comment so future maintainers understand why close order matters for concurrency.
+- Keep the change minimal: do not refactor unrelated parts of HTTPResponse or the pooling logic.
+- Verify that the closed property and any downstream consumers still behave correctly after the change.
+
+Success criteria
+- The local reproduction harness demonstrates the original hang and verifies that the fix interrupts the blocking read and avoids hanging.
+- The fix is implemented in src/urllib3/response.py by closing the underlying connection before the file-like object.
+- The full pytest suite passes after addressing any time-based test failures (e.g., RECENT_DATE).
+- No upstream tests are modified, and all temporary files are cleaned up.

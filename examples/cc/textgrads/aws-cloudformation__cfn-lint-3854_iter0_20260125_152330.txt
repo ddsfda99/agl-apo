@@ -1,0 +1,68 @@
+Here’s a detailed review of what went wrong in the attempt, why the tests failed, and how to fix and improve the approach.
+
+What the bug was (and why your change was reasonable)
+- The symptom you were targeting: Rule W8001 (Conditions not used) incorrectly flagged a condition as unused when it was applied to resources generated via AWS::LanguageExtensions Fn::ForEach, especially in a nested ForEach where the inner collection (Fn::FindInMap) depended on an outer loop identifier (e.g., BucketGroupName).
+- Root cause in the code: During the transform, _ForEachCollection.values didn’t receive the substitution context (params) needed to resolve collections like Fn::FindInMap when they rely on an identifier defined by an outer Fn::ForEach iteration. Because it couldn’t resolve, it fell back to generating random placeholder values. The result was that the resource that should’ve used a condition (e.g., ShouldCreateBucket3) was never created, so W8001 correctly reported the condition as unused.
+- Your approach to fix it—threading the params (the current identifier values) down into the collection resolution—was the right direction.
+
+Where it went wrong
+- You changed function signatures and then passed arguments in the wrong order at a critical call site.
+
+  Specifically:
+  - You changed _ForEachCollection.values from:
+    values(self, cfn, collection_cache)
+    to something that accepts params. You eventually settled on:
+    values(self, cfn, collection_cache, params=None)
+    which is backward-compatible with existing tests.
+  - You also changed _ForEach.items and _Transform._walk to pass the params to the collection resolution.
+
+  But you introduced an argument-order mismatch:
+  - In _ForEach.items you currently have:
+    items = self._collection.values(cfn, params, self._collection_cache)
+    This is wrong. Given the final signature of values(self, cfn, collection_cache, params=None), it should be:
+    items = self._collection.values(cfn, self._collection_cache, params)
+
+  Because of this, params were treated as the collection cache dict, and the real collection cache was treated as params, so the nested Fn::FindInMap still could not see the outer loop identifier. That’s why you still saw placeholder expansions (two items) for the inner loop and never generated BucketGroup2Bucket3; consequently, Condition ShouldCreateBucket3 looked unused.
+
+- You modified core transform code signatures without coordinating all call sites, which initially caused:
+  - TypeError in TestForEachCollection::test_valid (values() missing required positional argument), which you then patched by changing the signature to be backward-compatible. Good instinct, but the follow-through (fixing the item call order) remained incomplete.
+
+- You added a new positive test under test/unit/rules/conditions/test_used.py that depends on your new fixture. This is risky for two reasons:
+  - It expands the test surface and can cause failures unrelated to your bugfix effort (e.g., time-based rules). Your newly added “good” template began failing because of the param threading bug—masking the actual fix, complicating debugging, and making the CI redder than necessary.
+  - The acceptance goal is typically to fix existing tests; adding new tests is fine if they only assert behavior required by the task and pass consistently. Here, the failure actually demonstrates the transform wasn’t fixed yet.
+
+- You saw other unrelated failures:
+  - Quickstart integration tests expected an exit code (e.g., 12) but got 14, and new matches like E2533 (“Lambda Function Runtimes are updatable”) appeared. These are almost certainly time-sensitive checks (Node.js 18 deprecation timelines). They are not caused by your transform changes and shouldn’t be “fixed” in transform or conditions code. Don’t chase these in the same change. If the test harness depends on a fixed date or excludes certain rules, it needs to be handled in test configuration or fixtures, not by changing production logic. Leave them alone.
+
+Concrete defects to fix
+- Fix the argument order mismatch. With the final signature you settled on:
+  - _ForEachCollection.values(self, cfn, collection_cache, params=None)
+  - _ForEach.items should call it as:
+    items = self._collection.values(cfn, self._collection_cache, params)
+  - _Transform._walk calling foreach.items(cfn, params) is compatible if _ForEach.items signature is def items(self, cfn, params: Mapping[str, Any] | None = None). If you made _ForEach.items require params, either keep it required everywhere or make it optional consistently. The safest is to allow params to be optional in items and pass it down intact to values.
+
+- After that change, re-verify:
+  - Nested ForEach where the inner Fn::FindInMap uses the outer identifier must resolve correctly (you already tested the collection in isolation and it returned Bucket3 for BucketGroup2 when params was passed correctly).
+  - Transform of your foreach_conditions.yaml should generate BucketGroup2Bucket3 with Condition ShouldCreateBucket3 so W8001 is satisfied.
+
+Process and hygiene issues
+- Avoid changing public/internal API signatures unless necessary; if you must, do so backward-compatibly and verify all call sites and unit tests. You did try to restore backward compatibility on _ForEachCollection.values—good—but you must propagate that correctness to every call (you missed _ForEach.items ordering).
+- Don’t add new unit tests to the suite unless they are required and stable. In this case, adding a new fixture to “success_templates” caused a failure that was actually due to a half-implemented change. It made the failure surface larger and obscured the real problem. Prove the fix against existing tests first, then add new asserts if needed.
+- Run targeted tests first when making a change this deep: all tests under test/unit/module/template/transforms/test_language_extensions.py and test/unit/rules/functions/test_for_each.py. Only then move to conditions tests and the full suite.
+- Keep your changes minimal and focused on the bug. You started changing transform internals (appropriate here), but also touched rule tests and created new fixtures; that broadened the scope unnecessarily.
+
+Suggested verification steps (after fixing the call order)
+- Re-run:
+  - test/unit/module/template/transforms/test_language_extensions.py
+  - test/unit/rules/functions/test_for_each.py
+  - test/unit/rules/conditions/test_used.py (without adding new fixtures to success_templates)
+- For manual sanity:
+  - Decode and transform your foreach_conditions.yaml, and confirm the generated resources include BucketGroup2Bucket3 with Condition ShouldCreateBucket3.
+  - Confirm W8001 finds no unused conditions with that transformed template.
+- Ignore time-based failures like E2533 in this change. They are orthogonal and not caused by your changes. If they must be addressed, it should be via test configuration or data (outside the scope of this fix).
+
+Summary
+- The root functional bug you targeted was valid: nested Fn::ForEach collections that depend on outer identifiers weren’t getting the params context.
+- Your fix direction was correct—thread params into _ForEachCollection.values—but you introduced a parameter order mismatch in _ForEach.items, so the transform still didn’t use params and kept producing placeholder values. That’s why W8001 still flagged an unused condition.
+- You also enlarged the test surface by adding new tests, which made the situation noisier and introduced failures unrelated to your changes (time-sensitive E2533, exit code expectations).
+- Remedy: correct the argument order in _ForEach.items to call values(cfn, self._collection_cache, params), keep backward-compatible signatures, verify with the transform/unit tests first, and avoid mixing unrelated failures into the same change.

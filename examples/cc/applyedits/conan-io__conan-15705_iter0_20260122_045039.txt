@@ -1,0 +1,123 @@
+You are an expert in coding agent prompt optimization.
+Your task is to implement a small feature in Conan and add solid tests so it is safe and does not break existing behavior. Carefully follow the steps below and be mindful of prior mistakes identified in evaluations.
+
+Goal
+Implement support for self.name in the configuration tools.cmake.cmake_layout:build_folder_vars so it can be used to disambiguate CMake presets and build folder naming across multiple sibling recipes sharing a root source folder. Example usage:
+- conan install -ctools.cmake.cmake_layout:build_folder_vars="['self.name']" sub1/conanfile.py
+- The generated CMakePresets should include the package name in the preset names, e.g. sub1-release (exact naming may include a Conan prefix; see details below).
+
+Acceptance criteria
+- tools.cmake.cmake_layout:build_folder_vars accepts "self.name" in addition to the already supported "settings.*" and "options.*".
+- If self.name is present:
+  - It participates in build folder and preset naming in the same order as listed with other variables.
+  - Its value is lowercased for consistency with existing behavior.
+  - If conanfile.name is not defined or falsy, it should be ignored (do not crash or inject "None" into names).
+- The change must not require CMake or compilers to run; only generation of presets is needed.
+- Update the config help text for tools.cmake.cmake_layout:build_folder_vars to reflect support for self.name.
+- Keep existing displayName formatting in presets unchanged (do not alter quotes or formatting).
+- Do not regress existing functionality. If changing error messages, update tests accordingly.
+
+Work plan
+1) Understand requirements and prior pitfalls
+- The feature request is to allow using self.name in tools.cmake.cmake_layout:build_folder_vars so preset names are unique when multiple sibling recipes share a source tree.
+- Previous attempt risks:
+  - Changed error message without checking tests.
+  - Added only one narrow test and forced Ninja, which can cause Windows vcvars issues.
+  - Didn’t test multi-config generators, combinations with other vars, or missing self.name.
+
+2) Write reproduction tests first
+Add tests that:
+- Do not invoke external tools (CMake/Ninja/MSVC) and can run in any environment.
+- Do not force a generator that could trigger vcvars on Windows; avoid setting generator unless necessary.
+- Assert on generated CMakePresets.json content and naming only.
+
+Proposed tests (names are indicative; adjust to the repo’s existing test organization and naming conventions):
+- test_cmake_presets_self_name_single_config:
+  - Create a folder layout with:
+    - root CMakeLists.txt and a trivial source file.
+    - sub1/conanfile.py defining class sub1Recipe(ConanFile): name="sub1"; version="1.0"; layout uses cmake_layout(self, src_folder=".."); generate uses CMakeToolchain; build optional/no-op.
+  - Run conan install sub1/conanfile.py with -ctools.cmake.cmake_layout:build_folder_vars="['self.name']".
+  - Read the generated sub1/build/generators/CMakePresets.json.
+  - Determine the expected naming scheme:
+    - Inspect conan/tools/cmake/presets.py to see if preset names are prefixed (often "conan-").
+    - Assert that the configurePreset and buildPreset names include the recipe name and build_type (e.g., "conan-sub1-release" or "sub1-release"), consistent with existing prefixing behavior.
+  - Also assert the file exists and is valid JSON.
+
+- test_cmake_presets_self_name_multi_config:
+  - Same as above but using a multi-config generator layout (do not force a generator in the test; if necessary, set "Ninja Multi-Config" only if this does not trigger external tools in your test environment).
+  - Assert that generated presets include self.name in configure/build presets and that build presets map to different configurations correctly.
+  - If naming differs for multi-config, inspect presets.py to assert accordingly.
+
+- test_cmake_presets_self_name_combined_order:
+  - Use build_folder_vars="['self.name', 'settings.build_type']" or combine with another supported var (e.g., settings.compiler).
+  - Assert the combined naming includes tokens in the given order and is lowercased (e.g., "conan-sub1-release" or "sub1-release", and for compiler: "conan-sub1-gcc-release" in the correct order).
+
+- test_cmake_presets_self_name_missing:
+  - Define a ConanFile without a name (simulate a consumer recipe or a recipe missing name).
+  - Use build_folder_vars="['self.name', 'settings.build_type']".
+  - Run conan install and ensure it does not crash.
+  - Assert that preset names do not contain "none" or "None" and that self.name was simply ignored (the preset should just include build_type part, e.g., "conan-release" or "release", consistent with current behavior).
+
+- test_cmake_layout_build_folder_vars_invalid_token_message:
+  - Pass an invalid token like "['foo.bar']" and assert the error mentions the allowed prefixes and tokens: "settings.", "options." and "self.name".
+  - Search the repo for existing tests asserting the old error message. If any exist, update them accordingly or preserve the old message wording while adding "self.name" as an additional allowed item.
+
+Notes for writing tests:
+- Place tests alongside existing cmake_layout or presets tests to follow repository conventions (e.g., conans/test/functional/tools/cmake or similar).
+- Do not mark with @pytest.mark.tool("cmake", ...) if the test only inspects generated files and doesn’t call CMake. This avoids CI tool availability constraints.
+- Do not force "Ninja" to avoid triggering MSVC vcvars on Windows environments. Prefer not specifying a generator at all if possible. Only set a generator if the code requires it for preset generation, and choose a safe default that doesn’t call external tools.
+
+3) Locate implementation points
+- conan/tools/cmake/layout.py: The function responsible for parsing tools.cmake.cmake_layout:build_folder_vars (likely get_build_folder_custom_vars or equivalent). Extend this function to accept exactly "self.name" (not arbitrary "self.*").
+  - Behavior:
+    - If token == "self.name": obtain conanfile.name. If falsy, skip (i.e., do not include a token). If truthy, lower-case and include it in the list of tokens for folder/preset naming.
+    - Keep existing normalization semantics (lowercase values) consistent with settings/options handling.
+    - Do not alter displayName logic in presets.
+
+- conan/tools/cmake/presets.py: Validate how preset names are constructed. Ensure that custom vars from build_folder_vars are used in preset naming and that your change integrates seamlessly. Do not change displayName formatting or add new quotes, unless tests indicate it was already intended.
+
+- conans/model/conf.py: Update the help/description string for tools.cmake.cmake_layout:build_folder_vars to include "self.name" in the allowed items. The current description likely mentions only “Settings and Options that will produce a different build folder…”. Update to mention “settings.*, options.*, and self.name”.
+
+4) Implement the change
+- Implement support for "self.name" as described.
+- Ensure the returned token list from get_build_folder_custom_vars (or equivalent) preserves order and lowercases tokens.
+- Self.name missing behavior: silently ignore (skip) so consumer recipes don’t break and preset names don’t end up with "none".
+- Update error messages to mention the newly accepted token:
+  - If a token does not start with "settings." or "options." and is not exactly "self.name", raise with a clear message: must start with 'settings.' or 'options.' or be 'self.name'.
+  - Before changing, check for tests asserting exact error strings. If such tests exist, update them as needed to reflect the new message.
+
+- Update conans/model/conf.py help string accordingly.
+
+5) Run tests
+- Run only the new tests you added and related cmake_layout/presets tests first to iterate quickly:
+  - pytest -k "cmake and presets" or the specific test names you added.
+- If something fails, inspect the actual preset naming in the generated CMakePresets.json and adjust expected names accordingly:
+  - There may be a "conan-" prefix or other prefixing logic in presets.py. Read the code or existing tests to assert the exact expected names. Do not guess: derive expectations from actual code or existing test patterns.
+- Once the new tests pass, run the full test suite to catch regressions, especially around:
+  - cmake_layout
+  - CMake presets generation
+  - error message assertions for invalid build_folder_vars
+
+6) Clean up
+- Remove any temporary files created during tests outside the test temp folder.
+- Do not commit changes.
+
+Important cautions
+- Do not force Ninja or any generator in tests unless absolutely necessary.
+- Do not modify displayName formatting in presets; it is out of scope and can cause unexpected changes.
+- Keep behavior fully backward compatible except for allowing self.name. If you change an error message, update related tests accordingly.
+- Ensure self.name is the only accepted self.* token. Do not implement a generic "self.*" expansion.
+- Ensure your implementation does not call external tools; generating presets should be a pure file-generation step.
+
+What to deliver (in the repo)
+- Code change in conan/tools/cmake/layout.py to support self.name as described.
+- Update to conans/model/conf.py description for tools.cmake.cmake_layout:build_folder_vars.
+- New tests:
+  - Single-config including self.name.
+  - Multi-config including self.name.
+  - Combination with other vars and order.
+  - Missing self.name handling (no crash, token skipped).
+  - Invalid token error message that now mentions 'self.name'.
+- All tests passing locally.
+
+Do not commit your edits. We will do it later.

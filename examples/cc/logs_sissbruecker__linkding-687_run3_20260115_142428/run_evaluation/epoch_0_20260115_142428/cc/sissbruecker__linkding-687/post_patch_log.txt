@@ -1,0 +1,1723 @@
+cat testlog.out
+============================= test session starts ==============================
+platform linux -- Python 3.10.17, pytest-8.0.0, pluggy-1.4.0
+django: version: 5.0.3, settings: siteroot.settings.dev (from ini)
+rootdir: /testbed
+configfile: pytest.ini
+plugins: django-4.7.0
+collected 680 items
+
+bookmarks/tests/test_anonymous_view.py .                                 [  0%]
+bookmarks/tests/test_app_options.py ...                                  [  0%]
+bookmarks/tests/test_auth_proxy_support.py ...                           [  1%]
+bookmarks/tests/test_bookmark_action_view.py ........................... [  5%]
+...........                                                              [  6%]
+bookmarks/tests/test_bookmark_archived_view.py ..................        [  9%]
+bookmarks/tests/test_bookmark_asset_view.py ..                           [  9%]
+bookmarks/tests/test_bookmark_assets.py ...                              [ 10%]
+bookmarks/tests/test_bookmark_details_modal.py ......................... [ 13%]
+....                                                                     [ 14%]
+bookmarks/tests/test_bookmark_details_view.py .......................... [ 18%]
+................................                                         [ 22%]
+bookmarks/tests/test_bookmark_edit_view.py ...........                   [ 24%]
+bookmarks/tests/test_bookmark_index_view.py ..................           [ 27%]
+bookmarks/tests/test_bookmark_new_view.py ..............                 [ 29%]
+bookmarks/tests/test_bookmark_search_form.py ...                         [ 29%]
+bookmarks/tests/test_bookmark_search_model.py ....                       [ 30%]
+bookmarks/tests/test_bookmark_search_tag.py .....                        [ 30%]
+bookmarks/tests/test_bookmark_shared_view.py ..................          [ 33%]
+bookmarks/tests/test_bookmark_validation.py .......                      [ 34%]
+bookmarks/tests/test_bookmarks_api.py .................................. [ 39%]
+........                                                                 [ 40%]
+bookmarks/tests/test_bookmarks_api_performance.py ...                    [ 41%]
+bookmarks/tests/test_bookmarks_api_permissions.py ............           [ 42%]
+bookmarks/tests/test_bookmarks_list_template.py ........................ [ 46%]
+......................                                                   [ 49%]
+bookmarks/tests/test_bookmarks_model.py .                                [ 49%]
+bookmarks/tests/test_bookmarks_service.py .............................. [ 54%]
+......................                                                   [ 57%]
+bookmarks/tests/test_bookmarks_tasks.py ......F......................... [ 62%]
+..........                                                               [ 63%]
+bookmarks/tests/test_context_path.py ..                                  [ 63%]
+bookmarks/tests/test_create_initial_superuser_command.py ....            [ 64%]
+bookmarks/tests/test_custom_css.py ..                                    [ 64%]
+bookmarks/tests/test_exporter.py ...                                     [ 65%]
+bookmarks/tests/test_exporter_performance.py .                           [ 65%]
+bookmarks/tests/test_favicon_loader.py .........                         [ 66%]
+bookmarks/tests/test_feeds.py ....................                       [ 69%]
+bookmarks/tests/test_feeds_performance.py .                              [ 69%]
+bookmarks/tests/test_health_view.py ..                                   [ 70%]
+bookmarks/tests/test_importer.py ..................                      [ 72%]
+bookmarks/tests/test_login_view.py ..                                    [ 73%]
+bookmarks/tests/test_metadata_view.py ..                                 [ 73%]
+bookmarks/tests/test_monolith_service.py ..                              [ 73%]
+bookmarks/tests/test_nav_menu.py .                                       [ 73%]
+bookmarks/tests/test_oidc_support.py .....                               [ 74%]
+bookmarks/tests/test_pagination_tag.py ........                          [ 75%]
+bookmarks/tests/test_parser.py ..........                                [ 77%]
+bookmarks/tests/test_password_change_view.py ....                        [ 77%]
+bookmarks/tests/test_queries.py ........................................ [ 83%]
+.............                                                            [ 85%]
+bookmarks/tests/test_settings_export_view.py ....                        [ 86%]
+bookmarks/tests/test_settings_general_view.py .................          [ 88%]
+bookmarks/tests/test_settings_import_view.py ......                      [ 89%]
+bookmarks/tests/test_settings_integrations_view.py .......               [ 90%]
+bookmarks/tests/test_signals.py .                                        [ 90%]
+bookmarks/tests/test_singlefile_service.py ..                            [ 91%]
+bookmarks/tests/test_tag_cloud_template.py ............                  [ 92%]
+bookmarks/tests/test_tags_model.py ........                              [ 93%]
+bookmarks/tests/test_tags_service.py ......                              [ 94%]
+bookmarks/tests/test_toasts_view.py .........                            [ 96%]
+bookmarks/tests/test_user_profile_model.py ..                            [ 96%]
+bookmarks/tests/test_user_select_tag.py ....                             [ 97%]
+bookmarks/tests/test_utils.py .........                                  [ 98%]
+bookmarks/tests/test_website_loader.py ........                          [ 99%]
+bookmarks/tests/test_bookmark_archived_view_performance.py .             [ 99%]
+bookmarks/tests/test_bookmark_index_view_performance.py .                [ 99%]
+bookmarks/tests/test_bookmark_shared_view_performance.py .               [100%]
+
+=================================== FAILURES ===================================
+______ BookmarkTasksTestCase.test_create_html_snapshot_truncate_filename _______
+
+self = <bookmarks.tests.test_bookmarks_tasks.BookmarkTasksTestCase testMethod=test_create_html_snapshot_truncate_filename>
+
+    @override_settings(LD_ENABLE_SNAPSHOTS=True)
+    def test_create_html_snapshot_truncate_filename(self):
+        # Create a bookmark with a very long URL
+        long_url = "http://" + "a" * 300 + ".com"
+        bookmark = self.setup_bookmark(url=long_url)
+    
+        tasks.create_html_snapshot(bookmark)
+        BookmarkAsset.objects.get(bookmark=bookmark)
+    
+        # Run periodic task to process the snapshot
+        tasks._schedule_html_snapshots_task()
+    
+        asset = BookmarkAsset.objects.get(bookmark=bookmark)
+>       self.assertEqual(len(asset.file), 192)
+E       AssertionError: 148 != 192
+
+bookmarks/tests/test_bookmarks_tasks.py:572: AssertionError
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:23,836 api: Executing bookmarks.services.tasks._schedule_html_snapshots_task: b3371c2b-1a6c-479f-9441-b68d7bcb3143
+INFO 2026-01-15 06:56:23,838 tasks: Create HTML snapshot for bookmark. url=http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com
+INFO 2026-01-15 06:56:23,839 tasks: Successfully created HTML snapshot for bookmark. url=http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com
+INFO 2026-01-15 06:56:23,839 api: bookmarks.services.tasks._schedule_html_snapshots_task: b3371c2b-1a6c-479f-9441-b68d7bcb3143 executed in 0.003s
+=============================== warnings summary ===============================
+bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_encode_search_params
+bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_encode_search_params
+bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_encode_search_params
+  /testbed/bookmarks/views/partials/contexts.py:81: UnorderedObjectListWarning: Pagination may yield inconsistent results with an unordered object_list: <class 'bookmarks.models.Bookmark'> QuerySet.
+    paginator = Paginator(query_set, DEFAULT_PAGE_SIZE)
+
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+  /testbed/bookmarks/tests/test_bookmarks_list_template.py:306: DeprecationWarning: The 'text' argument to find()-type methods is deprecated. Use 'string' instead.
+    description_text = description.find("span", text=bookmark.description)
+
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+  /testbed/bookmarks/tests/test_bookmarks_list_template.py:323: DeprecationWarning: The 'text' argument to find()-type methods is deprecated. Use 'string' instead.
+    tag_link = tags.find("a", text=f"#{tag.name}")
+
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+  /testbed/bookmarks/tests/test_bookmarks_list_template.py:392: DeprecationWarning: The 'text' argument to find()-type methods is deprecated. Use 'string' instead.
+    tag_link = tags.find("a", text=f"#{tag.name}")
+
+bookmarks/tests/test_login_view.py::LoginViewTestCase::test_should_not_show_oidc_login_by_default
+  /testbed/bookmarks/tests/test_login_view.py:18: DeprecationWarning: The 'text' argument to find()-type methods is deprecated. Use 'string' instead.
+    oidc_login_link = soup.find("a", text="Login with OIDC")
+
+bookmarks/tests/test_login_view.py::LoginViewTestCase::test_should_show_oidc_login_when_enabled
+  /testbed/bookmarks/tests/test_login_view.py:27: DeprecationWarning: The 'text' argument to find()-type methods is deprecated. Use 'string' instead.
+    oidc_login_link = soup.find("a", text="Login with OIDC")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+________ BookmarkActionViewTestCase.test_can_only_archive_own_bookmarks ________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:13,517 log: Not Found: /bookmarks/action
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/action
+________ BookmarkActionViewTestCase.test_can_only_unshare_own_bookmarks ________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:26,458 log: Not Found: /bookmarks/action
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/action
+_____ BookmarkActionViewTestCase.test_delete_can_only_delete_own_bookmarks _____
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:27,669 log: Not Found: /bookmarks/action
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/action
+_ BookmarkActionViewTestCase.test_shared_action_bulk_select_across_not_supported _
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:33,229 log: Bad Request: /bookmarks/shared/action
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Bad Request: /bookmarks/shared/action
+_____ BookmarkActionViewTestCase.test_should_not_redirect_to_external_url ______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:34,207 log: Not Found: /foo//example.com
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /foo//example.com
+___ BookmarkActionViewTestCase.test_unarchive_can_only_archive_own_bookmarks ___
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:37,009 log: Not Found: /bookmarks/action
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/action
+__________________ BookmarkAssetViewTestCase.test_view_access __________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:54,332 log: Not Found: /assets/2
+WARNING 2026-01-15 06:51:54,341 log: Not Found: /assets/3
+WARNING 2026-01-15 06:51:54,353 log: Not Found: /assets/4
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /assets/2
+WARNING  django.request:log.py:241 Not Found: /assets/3
+WARNING  django.request:log.py:241 Not Found: /assets/4
+____________ BookmarkAssetViewTestCase.test_view_access_guest_user _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:55,094 log: Not Found: /assets/1
+WARNING 2026-01-15 06:51:55,103 log: Not Found: /assets/2
+WARNING 2026-01-15 06:51:55,112 log: Not Found: /assets/3
+WARNING 2026-01-15 06:51:55,120 log: Not Found: /assets/4
+WARNING 2026-01-15 06:51:55,128 log: Not Found: /assets/5
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /assets/1
+WARNING  django.request:log.py:241 Not Found: /assets/2
+WARNING  django.request:log.py:241 Not Found: /assets/3
+WARNING  django.request:log.py:241 Not Found: /assets/4
+WARNING  django.request:log.py:241 Not Found: /assets/5
+___________________ BookmarkDetailsModalTestCase.test_access ___________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:51:58,769 log: Not Found: /bookmarks/2/details_modal
+WARNING 2026-01-15 06:51:58,775 log: Not Found: /bookmarks/9999/details_modal
+WARNING 2026-01-15 06:51:58,781 log: Not Found: /bookmarks/2/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/9999/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+____________ BookmarkDetailsModalTestCase.test_access_with_sharing _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:00,218 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:00,233 log: Not Found: /bookmarks/1/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+____________ BookmarkDetailsModalTestCase.test_form_partial_access _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:12,686 log: Not Found: /bookmarks/partials/details-form/2
+WARNING 2026-01-15 06:52:12,690 log: Not Found: /bookmarks/partials/details-form/9999
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/2
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/9999
+______ BookmarkDetailsModalTestCase.test_form_partial_access_with_sharing ______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:13,903 log: Not Found: /bookmarks/partials/details-form/1
+WARNING 2026-01-15 06:52:13,908 log: Not Found: /bookmarks/partials/details-form/1
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+________________ BookmarkDetailsModalTestCase.test_remove_asset ________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:16,042 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:16,056 log: Not Found: /bookmarks/1/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+____________ BookmarkDetailsModalTestCase.test_status_update_access ____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:18,580 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:18,587 log: Not Found: /bookmarks/2/details_modal
+WARNING 2026-01-15 06:52:18,595 log: Not Found: /bookmarks/3/details_modal
+WARNING 2026-01-15 06:52:18,605 log: Not Found: /bookmarks/4/details_modal
+WARNING 2026-01-15 06:52:18,612 log: Not Found: /bookmarks/5/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/4/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/5/details_modal
+_____________ BookmarkDetailsModalTestCase.test_status_visibility ______________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:19,855 log: Not Found: /bookmarks/3/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details_modal
+___________________ BookmarkDetailsModalTestCase.test_access ___________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:23,076 log: Not Found: /bookmarks/2/details_modal
+WARNING 2026-01-15 06:52:23,080 log: Not Found: /bookmarks/9999/details_modal
+WARNING 2026-01-15 06:52:23,085 log: Not Found: /bookmarks/2/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/9999/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+____________ BookmarkDetailsModalTestCase.test_access_with_sharing _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:24,302 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:24,316 log: Not Found: /bookmarks/1/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+____________ BookmarkDetailsModalTestCase.test_form_partial_access _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:37,403 log: Not Found: /bookmarks/partials/details-form/2
+WARNING 2026-01-15 06:52:37,408 log: Not Found: /bookmarks/partials/details-form/9999
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/2
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/9999
+______ BookmarkDetailsModalTestCase.test_form_partial_access_with_sharing ______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:38,745 log: Not Found: /bookmarks/partials/details-form/1
+WARNING 2026-01-15 06:52:38,750 log: Not Found: /bookmarks/partials/details-form/1
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+________________ BookmarkDetailsModalTestCase.test_remove_asset ________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:40,878 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:40,891 log: Not Found: /bookmarks/1/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+____________ BookmarkDetailsModalTestCase.test_status_update_access ____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:43,442 log: Not Found: /bookmarks/1/details_modal
+WARNING 2026-01-15 06:52:43,450 log: Not Found: /bookmarks/2/details_modal
+WARNING 2026-01-15 06:52:43,458 log: Not Found: /bookmarks/3/details_modal
+WARNING 2026-01-15 06:52:43,466 log: Not Found: /bookmarks/4/details_modal
+WARNING 2026-01-15 06:52:43,474 log: Not Found: /bookmarks/5/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/4/details_modal
+WARNING  django.request:log.py:241 Not Found: /bookmarks/5/details_modal
+_____________ BookmarkDetailsModalTestCase.test_status_visibility ______________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:44,736 log: Not Found: /bookmarks/3/details_modal
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details_modal
+___________________ BookmarkDetailsViewTestCase.test_access ____________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:47,939 log: Not Found: /bookmarks/2/details
+WARNING 2026-01-15 06:52:47,943 log: Not Found: /bookmarks/9999/details
+WARNING 2026-01-15 06:52:47,948 log: Not Found: /bookmarks/2/details
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/9999/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details
+_____________ BookmarkDetailsViewTestCase.test_access_with_sharing _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:52:49,166 log: Not Found: /bookmarks/1/details
+WARNING 2026-01-15 06:52:49,185 log: Not Found: /bookmarks/1/details
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details
+_____________ BookmarkDetailsViewTestCase.test_form_partial_access _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:01,569 log: Not Found: /bookmarks/partials/details-form/2
+WARNING 2026-01-15 06:53:01,574 log: Not Found: /bookmarks/partials/details-form/9999
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/2
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/9999
+______ BookmarkDetailsViewTestCase.test_form_partial_access_with_sharing _______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:02,798 log: Not Found: /bookmarks/partials/details-form/1
+WARNING 2026-01-15 06:53:02,803 log: Not Found: /bookmarks/partials/details-form/1
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+WARNING  django.request:log.py:241 Not Found: /bookmarks/partials/details-form/1
+________________ BookmarkDetailsViewTestCase.test_remove_asset _________________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:04,815 log: Not Found: /bookmarks/1/details
+WARNING 2026-01-15 06:53:04,827 log: Not Found: /bookmarks/1/details
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details
+____________ BookmarkDetailsViewTestCase.test_status_update_access _____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:08,184 log: Not Found: /bookmarks/1/details
+WARNING 2026-01-15 06:53:08,194 log: Not Found: /bookmarks/2/details
+WARNING 2026-01-15 06:53:08,204 log: Not Found: /bookmarks/3/details
+WARNING 2026-01-15 06:53:08,214 log: Not Found: /bookmarks/4/details
+WARNING 2026-01-15 06:53:08,224 log: Not Found: /bookmarks/5/details
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/2/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/4/details
+WARNING  django.request:log.py:241 Not Found: /bookmarks/5/details
+______________ BookmarkDetailsViewTestCase.test_status_visibility ______________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:09,614 log: Not Found: /bookmarks/3/details
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/3/details
+__________ BookmarkEditViewTestCase.test_can_only_edit_own_bookmarks ___________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:12,845 log: Not Found: /bookmarks/1/edit
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /bookmarks/1/edit
+______________ BookmarkEditViewTestCase.test_should_edit_bookmark ______________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:53:13,707 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:53:13,707 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:53:13,709 website_loader: Load duration: 0:00:00.193549
+DEBUG 2026-01-15 06:53:13,711 website_loader: Parsing duration: 0:00:00.001229
+______ BookmarkEditViewTestCase.test_should_not_redirect_to_external_url _______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:53:16,360 log: Not Found: /foo//example.com
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /foo//example.com
+____ BookmarkNewViewTestCase.test_auto_close_should_redirect_to_close_view _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:53:34,125 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:53:34,125 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:53:34,125 website_loader: Load duration: 0:00:00.131224
+DEBUG 2026-01-15 06:53:34,126 website_loader: Parsing duration: 0:00:00.000797
+___________ BookmarksApiTestCase.test_can_only_access_own_bookmarks ____________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:54:22,695 log: Not Found: /api/bookmarks/3/
+WARNING 2026-01-15 06:54:22,698 log: Not Found: /api/bookmarks/4/
+WARNING 2026-01-15 06:54:22,701 log: Not Found: /api/bookmarks/3/
+WARNING 2026-01-15 06:54:22,704 log: Not Found: /api/bookmarks/4/
+WARNING 2026-01-15 06:54:22,708 log: Not Found: /api/bookmarks/3/
+WARNING 2026-01-15 06:54:22,711 log: Not Found: /api/bookmarks/4/
+WARNING 2026-01-15 06:54:22,714 log: Not Found: /api/bookmarks/3/archive/
+WARNING 2026-01-15 06:54:22,717 log: Not Found: /api/bookmarks/4/archive/
+WARNING 2026-01-15 06:54:22,720 log: Not Found: /api/bookmarks/3/unarchive/
+WARNING 2026-01-15 06:54:22,723 log: Not Found: /api/bookmarks/4/unarchive/
+DEBUG 2026-01-15 06:54:22,948 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:54:22,948 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:54:22,949 website_loader: Load duration: 0:00:00.222259
+DEBUG 2026-01-15 06:54:22,950 website_loader: Parsing duration: 0:00:00.000860
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/3/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/4/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/3/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/4/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/3/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/4/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/3/archive/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/4/archive/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/3/unarchive/
+WARNING  django.request:log.py:241 Not Found: /api/bookmarks/4/unarchive/
+_ BookmarksApiTestCase.test_check_returns_no_bookmark_if_url_is_not_bookmarked _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:54:25,334 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:54:25,334 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:54:25,335 website_loader: Load duration: 0:00:00.220343
+DEBUG 2026-01-15 06:54:25,336 website_loader: Parsing duration: 0:00:00.000757
+______________ BookmarksApiTestCase.test_create_archived_bookmark ______________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:54:27,038 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:54:27,038 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:54:27,039 website_loader: Load duration: 0:00:00.230780
+DEBUG 2026-01-15 06:54:27,041 website_loader: Parsing duration: 0:00:00.000770
+__________________ BookmarksApiTestCase.test_update_bookmark ___________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:54:55,040 website_loader: Loaded chunk (iteration=1, total=0.5009765625)
+DEBUG 2026-01-15 06:54:55,040 website_loader: Request consumed: True
+DEBUG 2026-01-15 06:54:55,041 website_loader: Load duration: 0:00:00.242649
+DEBUG 2026-01-15 06:54:55,042 website_loader: Parsing duration: 0:00:00.000912
+___ BookmarksApiTestCase.test_update_bookmark_fails_without_required_fields ____
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:54:55,659 log: Bad Request: /api/bookmarks/1/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Bad Request: /api/bookmarks/1/
+_____ BookmarksApiPermissionsTestCase.test_archive_requires_authentication _____
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:01,466 log: Unauthorized: /api/bookmarks/1/archive/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/archive/
+______ BookmarksApiPermissionsTestCase.test_check_requires_authentication ______
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:01,475 log: Unauthorized: /api/bookmarks/check/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/check/
+_ BookmarksApiPermissionsTestCase.test_create_bookmark_requires_authentication _
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:02,083 log: Unauthorized: /api/bookmarks/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/
+_ BookmarksApiPermissionsTestCase.test_delete_bookmark_requires_authentication _
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:03,300 log: Unauthorized: /api/bookmarks/1/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/
+__ BookmarksApiPermissionsTestCase.test_get_bookmark_requires_authentication ___
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:03,911 log: Unauthorized: /api/bookmarks/1/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/
+_ BookmarksApiPermissionsTestCase.test_list_archived_bookmarks_requires_authentication _
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:03,921 log: Unauthorized: /api/bookmarks/archived/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/archived/
+_ BookmarksApiPermissionsTestCase.test_list_bookmarks_requires_authentication __
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:04,529 log: Unauthorized: /api/bookmarks/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/
+_ BookmarksApiPermissionsTestCase.test_patch_bookmark_requires_authentication __
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:06,350 log: Unauthorized: /api/bookmarks/1/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/
+____ BookmarksApiPermissionsTestCase.test_unarchive_requires_authentication ____
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:06,968 log: Unauthorized: /api/bookmarks/1/unarchive/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/unarchive/
+_ BookmarksApiPermissionsTestCase.test_update_bookmark_requires_authentication _
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:07,578 log: Unauthorized: /api/bookmarks/1/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/bookmarks/1/
+__ BookmarksApiPermissionsTestCase.test_user_profile_requires_authentication ___
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:55:07,592 log: Unauthorized: /api/user/profile/
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Unauthorized: /api/user/profile/
+_____ BookmarkTasksTestCase.test_create_html_snapshot_should_handle_error ______
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:20,760 api: Executing bookmarks.services.tasks._schedule_html_snapshots_task: fa51dfde-fd2e-4870-8408-8094238c95f1
+INFO 2026-01-15 06:56:20,762 tasks: Create HTML snapshot for bookmark. url=https://example.com
+ERROR 2026-01-15 06:56:20,763 tasks: Failed to HTML snapshot for bookmark. url=https://example.com
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 292, in _create_html_snapshot_task
+    singlefile.create_snapshot(asset.bookmark.url, filepath)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+bookmarks.services.singlefile.SingeFileError: Error
+INFO 2026-01-15 06:56:20,764 api: bookmarks.services.tasks._schedule_html_snapshots_task: fa51dfde-fd2e-4870-8408-8094238c95f1 executed in 0.004s
+___ BookmarkTasksTestCase.test_create_html_snapshot_should_update_file_info ____
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:23,197 api: Executing bookmarks.services.tasks._schedule_html_snapshots_task: 4c6d02c7-d46f-460b-a41e-eb9c10bcf114
+INFO 2026-01-15 06:56:23,199 tasks: Create HTML snapshot for bookmark. url=https://example.com
+INFO 2026-01-15 06:56:23,200 tasks: Successfully created HTML snapshot for bookmark. url=https://example.com
+INFO 2026-01-15 06:56:23,201 api: bookmarks.services.tasks._schedule_html_snapshots_task: 4c6d02c7-d46f-460b-a41e-eb9c10bcf114 executed in 0.003s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_force_update_snapshot _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:24,559 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: aa539e37-db7c-49a5-827d-92db4bf9b6e3 5 retries
+INFO 2026-01-15 06:56:24,560 tasks: Create new snapshot for bookmark. url=https://example.com/y4DYpAduRMF7CDmhUH3lFkvP0FLHbAyu...
+INFO 2026-01-15 06:56:24,561 tasks: Successfully created new snapshot for bookmark:. url=https://example.com/y4DYpAduRMF7CDmhUH3lFkvP0FLHbAyu
+INFO 2026-01-15 06:56:24,561 api: bookmarks.services.tasks._create_web_archive_snapshot_task: aa539e37-db7c-49a5-827d-92db4bf9b6e3 5 retries executed in 0.002s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_handle_missing_bookmark_id _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:25,168 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: 5db41913-c233-40cc-bf66-04bd91de71d8 5 retries
+INFO 2026-01-15 06:56:25,168 api: bookmarks.services.tasks._create_web_archive_snapshot_task: 5db41913-c233-40cc-bf66-04bd91de71d8 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_ignore_missing_newest_snapshot _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:25,776 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: 1c31f3e8-4a1a-4ea9-ab8e-f7bea0ab0ad9 5 retries
+INFO 2026-01-15 06:56:25,776 tasks: Create new snapshot for bookmark. url=https://example.com/f8DTYM68GjP9CjPz7OQfE8nxk2lHh4aB...
+ERROR 2026-01-15 06:56:25,777 tasks: Failed to create snapshot, trying to load newest snapshot as fallback. url=https://example.com/f8DTYM68GjP9CjPz7OQfE8nxk2lHh4aB
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 115, in _create_web_archive_snapshot_task
+    _create_snapshot(bookmark)
+  File "/testbed/bookmarks/services/tasks.py", line 96, in _create_snapshot
+    archive.save()
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+waybackpy.exceptions.WaybackError
+INFO 2026-01-15 06:56:25,777 tasks: Load existing snapshot for bookmark. url=https://example.com/f8DTYM68GjP9CjPz7OQfE8nxk2lHh4aB
+INFO 2026-01-15 06:56:25,777 api: bookmarks.services.tasks._create_web_archive_snapshot_task: 1c31f3e8-4a1a-4ea9-ab8e-f7bea0ab0ad9 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_ignore_newest_snapshot_errors _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:26,385 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: e76495ed-c085-4952-bfdb-4684648fc994 5 retries
+INFO 2026-01-15 06:56:26,385 tasks: Create new snapshot for bookmark. url=https://example.com/oMT8CqTlVbT4pH6u9o1QETp9kGw2MrHm...
+ERROR 2026-01-15 06:56:26,385 tasks: Failed to create snapshot, trying to load newest snapshot as fallback. url=https://example.com/oMT8CqTlVbT4pH6u9o1QETp9kGw2MrHm
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 115, in _create_web_archive_snapshot_task
+    _create_snapshot(bookmark)
+  File "/testbed/bookmarks/services/tasks.py", line 96, in _create_snapshot
+    archive.save()
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+waybackpy.exceptions.WaybackError
+INFO 2026-01-15 06:56:26,386 tasks: Load existing snapshot for bookmark. url=https://example.com/oMT8CqTlVbT4pH6u9o1QETp9kGw2MrHm
+ERROR 2026-01-15 06:56:26,386 tasks: Failed to load existing snapshot. url=https://example.com/oMT8CqTlVbT4pH6u9o1QETp9kGw2MrHm
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 74, in _load_newest_snapshot
+    existing_snapshot = cdx_api.newest()
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+waybackpy.exceptions.WaybackError
+INFO 2026-01-15 06:56:26,386 api: bookmarks.services.tasks._create_web_archive_snapshot_task: e76495ed-c085-4952-bfdb-4684648fc994 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_not_save_stale_bookmark_data _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:28,210 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: 6039a610-585d-4ce0-b775-96a2789b8ad7 5 retries
+INFO 2026-01-15 06:56:28,211 tasks: Create new snapshot for bookmark. url=https://example.com/geaigljPQf6THXRbp0lSFN9DCTWmNyIF...
+INFO 2026-01-15 06:56:28,212 tasks: Successfully created new snapshot for bookmark:. url=https://example.com/geaigljPQf6THXRbp0lSFN9DCTWmNyIF
+INFO 2026-01-15 06:56:28,212 api: bookmarks.services.tasks._create_web_archive_snapshot_task: 6039a610-585d-4ce0-b775-96a2789b8ad7 5 retries executed in 0.002s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_update_snapshot_url _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:29,426 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: 838448d8-c8d8-4d62-924c-53f8540b9e5c 5 retries
+INFO 2026-01-15 06:56:29,427 tasks: Create new snapshot for bookmark. url=https://example.com/sBpBqIs0akA6X6VBqZ2P23FIgCJxzQMt...
+INFO 2026-01-15 06:56:29,428 tasks: Successfully created new snapshot for bookmark:. url=https://example.com/sBpBqIs0akA6X6VBqZ2P23FIgCJxzQMt
+INFO 2026-01-15 06:56:29,428 api: bookmarks.services.tasks._create_web_archive_snapshot_task: 838448d8-c8d8-4d62-924c-53f8540b9e5c 5 retries executed in 0.002s
+_ BookmarkTasksTestCase.test_create_web_archive_snapshot_should_use_newest_snapshot_as_fallback _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:30,035 api: Executing bookmarks.services.tasks._create_web_archive_snapshot_task: 298f2f67-1718-41a2-b155-71f8b244909b 5 retries
+INFO 2026-01-15 06:56:30,036 tasks: Create new snapshot for bookmark. url=https://example.com/ScKPshpFooHI30fGvl2Z90iKUrYDu5bp...
+ERROR 2026-01-15 06:56:30,036 tasks: Failed to create snapshot, trying to load newest snapshot as fallback. url=https://example.com/ScKPshpFooHI30fGvl2Z90iKUrYDu5bp
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 115, in _create_web_archive_snapshot_task
+    _create_snapshot(bookmark)
+  File "/testbed/bookmarks/services/tasks.py", line 96, in _create_snapshot
+    archive.save()
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+waybackpy.exceptions.WaybackError
+INFO 2026-01-15 06:56:30,036 tasks: Load existing snapshot for bookmark. url=https://example.com/ScKPshpFooHI30fGvl2Z90iKUrYDu5bp
+INFO 2026-01-15 06:56:30,037 tasks: Using newest snapshot. url=https://example.com/ScKPshpFooHI30fGvl2Z90iKUrYDu5bp from=2026-01-15 06:56:29.432968
+INFO 2026-01-15 06:56:30,037 api: bookmarks.services.tasks._create_web_archive_snapshot_task: 298f2f67-1718-41a2-b155-71f8b244909b 5 retries executed in 0.002s
+______ BookmarkTasksTestCase.test_load_favicon_should_create_favicon_file ______
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:30,768 api: Executing bookmarks.services.tasks._load_favicon_task: 388e5b21-836c-4ccc-96fb-dc274245d63e 5 retries
+INFO 2026-01-15 06:56:30,770 tasks: Load favicon for bookmark. url=https://example.com/nsOCoX0dlGmDff3gT4aJSCktSxQ4fOmk
+INFO 2026-01-15 06:56:30,770 tasks: Successfully updated favicon for bookmark. url=https://example.com/nsOCoX0dlGmDff3gT4aJSCktSxQ4fOmk icon=https_example_com.png
+INFO 2026-01-15 06:56:30,770 api: bookmarks.services.tasks._load_favicon_task: 388e5b21-836c-4ccc-96fb-dc274245d63e 5 retries executed in 0.002s
+____ BookmarkTasksTestCase.test_load_favicon_should_handle_missing_bookmark ____
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:31,493 api: Executing bookmarks.services.tasks._load_favicon_task: 798d4aba-0a1e-4ec2-b130-d37e6b2d2b1b 5 retries
+INFO 2026-01-15 06:56:31,493 api: bookmarks.services.tasks._load_favicon_task: 798d4aba-0a1e-4ec2-b130-d37e6b2d2b1b 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_load_favicon_should_not_save_stale_bookmark_data __
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:33,677 api: Executing bookmarks.services.tasks._load_favicon_task: f93ec782-cd09-4af0-b882-579bd8df90cd 5 retries
+INFO 2026-01-15 06:56:33,678 tasks: Load favicon for bookmark. url=https://example.com/ULbm6LjVYedVtxXYGjbGF874Zn4BVHWE
+INFO 2026-01-15 06:56:33,679 tasks: Successfully updated favicon for bookmark. url=https://example.com/ULbm6LjVYedVtxXYGjbGF874Zn4BVHWE icon=https_example_com.png
+INFO 2026-01-15 06:56:33,679 api: bookmarks.services.tasks._load_favicon_task: f93ec782-cd09-4af0-b882-579bd8df90cd 5 retries executed in 0.002s
+______ BookmarkTasksTestCase.test_load_favicon_should_update_favicon_file ______
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:34,336 api: Executing bookmarks.services.tasks._load_favicon_task: f99aa725-fc05-4f42-9caa-1a550d521044 5 retries
+INFO 2026-01-15 06:56:34,337 tasks: Load favicon for bookmark. url=https://example.com/lmFCHVmQnIxlbfrbjCw3YiEpQsbDgXnj
+INFO 2026-01-15 06:56:34,338 tasks: Successfully updated favicon for bookmark. url=https://example.com/lmFCHVmQnIxlbfrbjCw3YiEpQsbDgXnj icon=https_example_updated_com.png
+INFO 2026-01-15 06:56:34,338 api: bookmarks.services.tasks._load_favicon_task: f99aa725-fc05-4f42-9caa-1a550d521044 5 retries executed in 0.002s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_handle_missing_bookmark_id _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:35,017 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: 3df6a5f8-c17f-4a1b-b2b1-2ae0d56c480b 5 retries
+INFO 2026-01-15 06:56:35,018 api: bookmarks.services.tasks._load_web_archive_snapshot_task: 3df6a5f8-c17f-4a1b-b2b1-2ae0d56c480b 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_handle_missing_snapshot _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:35,636 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: 0c0acf0e-5734-4097-bdca-23dd6eba9b05 5 retries
+INFO 2026-01-15 06:56:35,637 tasks: Load existing snapshot for bookmark. url=https://example.com/vYyuHD4rlY8h7KBot4l2l5xgPKq9HvDQ
+INFO 2026-01-15 06:56:35,637 api: bookmarks.services.tasks._load_web_archive_snapshot_task: 0c0acf0e-5734-4097-bdca-23dd6eba9b05 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_handle_wayback_errors _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:36,364 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: 0b7c35ed-2a9a-4726-8ab1-99abed6af8c4 5 retries
+INFO 2026-01-15 06:56:36,365 tasks: Load existing snapshot for bookmark. url=https://example.com/4aulFIsL2VRSgbAclX6EpL01EmkpCneR
+ERROR 2026-01-15 06:56:36,365 tasks: Failed to load existing snapshot. url=https://example.com/4aulFIsL2VRSgbAclX6EpL01EmkpCneR
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/tasks.py", line 74, in _load_newest_snapshot
+    existing_snapshot = cdx_api.newest()
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1114, in __call__
+    return self._mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1118, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+  File "/usr/local/lib/python3.10/unittest/mock.py", line 1173, in _execute_mock_call
+    raise effect
+waybackpy.exceptions.WaybackError
+INFO 2026-01-15 06:56:36,366 api: bookmarks.services.tasks._load_web_archive_snapshot_task: 0b7c35ed-2a9a-4726-8ab1-99abed6af8c4 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_not_save_stale_bookmark_data _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:36,994 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: a50d3594-db9e-4ff2-8112-71d9e38e0aa7 5 retries
+INFO 2026-01-15 06:56:36,995 tasks: Load existing snapshot for bookmark. url=https://example.com/RhltobphHMIAFQiemmmmJutmGHuboYWE
+INFO 2026-01-15 06:56:36,996 tasks: Using newest snapshot. url=https://example.com/RhltobphHMIAFQiemmmmJutmGHuboYWE from=2026-01-15 06:56:36.370168
+INFO 2026-01-15 06:56:36,996 api: bookmarks.services.tasks._load_web_archive_snapshot_task: a50d3594-db9e-4ff2-8112-71d9e38e0aa7 5 retries executed in 0.002s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_skip_if_snapshot_exists _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:37,604 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: 81a1a9bd-292a-40bb-b5ce-2f9e3947c560 5 retries
+INFO 2026-01-15 06:56:37,605 api: bookmarks.services.tasks._load_web_archive_snapshot_task: 81a1a9bd-292a-40bb-b5ce-2f9e3947c560 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_load_web_archive_snapshot_should_update_snapshot_url _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:38,212 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: a0c1545b-251f-4f2a-9e79-fc80e32bce64 5 retries
+INFO 2026-01-15 06:56:38,213 tasks: Load existing snapshot for bookmark. url=https://example.com/2LMlPcuBpvSgPdVP4chxqlB4NwsWVUM8
+INFO 2026-01-15 06:56:38,213 tasks: Using newest snapshot. url=https://example.com/2LMlPcuBpvSgPdVP4chxqlB4NwsWVUM8 from=2026-01-15 06:56:37.609466
+INFO 2026-01-15 06:56:38,214 api: bookmarks.services.tasks._load_web_archive_snapshot_task: a0c1545b-251f-4f2a-9e79-fc80e32bce64 5 retries executed in 0.001s
+_ BookmarkTasksTestCase.test_schedule_bookmarks_without_favicons_should_load_favicon_for_all_bookmarks_without_favicon _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:38,827 api: Executing bookmarks.services.tasks._schedule_bookmarks_without_favicons_task: 3940d279-f1b8-452b-8b7c-9ddb22fb2a7f 5 retries
+INFO 2026-01-15 06:56:38,829 api: Executing bookmarks.services.tasks._load_favicon_task: 428541ed-22b0-4997-8f6f-f7abe588bc19 5 retries
+INFO 2026-01-15 06:56:38,830 tasks: Load favicon for bookmark. url=https://example.com/uUsZzabVsQNdma9A5ItTnoGbHqqatiDv
+INFO 2026-01-15 06:56:38,830 tasks: Successfully updated favicon for bookmark. url=https://example.com/uUsZzabVsQNdma9A5ItTnoGbHqqatiDv icon=https_example_com.png
+INFO 2026-01-15 06:56:38,831 api: bookmarks.services.tasks._load_favicon_task: 428541ed-22b0-4997-8f6f-f7abe588bc19 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:38,831 api: Executing bookmarks.services.tasks._load_favicon_task: a63249f3-e935-42d2-b13c-0c65979b282f 5 retries
+INFO 2026-01-15 06:56:38,831 tasks: Load favicon for bookmark. url=https://example.com/hMPdsuKjXeDrd81aTGrtpp5SwW96jlyC
+INFO 2026-01-15 06:56:38,832 tasks: Successfully updated favicon for bookmark. url=https://example.com/hMPdsuKjXeDrd81aTGrtpp5SwW96jlyC icon=https_example_com.png
+INFO 2026-01-15 06:56:38,832 api: bookmarks.services.tasks._load_favicon_task: a63249f3-e935-42d2-b13c-0c65979b282f 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:38,832 api: Executing bookmarks.services.tasks._load_favicon_task: 72586ddf-dd38-452e-9282-f6ee51b9f4ab 5 retries
+INFO 2026-01-15 06:56:38,833 tasks: Load favicon for bookmark. url=https://example.com/AZpwkEs0KqprdT7y8i28hReKgAem0BRO
+INFO 2026-01-15 06:56:38,833 tasks: Successfully updated favicon for bookmark. url=https://example.com/AZpwkEs0KqprdT7y8i28hReKgAem0BRO icon=https_example_com.png
+INFO 2026-01-15 06:56:38,833 api: bookmarks.services.tasks._load_favicon_task: 72586ddf-dd38-452e-9282-f6ee51b9f4ab 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:38,833 api: bookmarks.services.tasks._schedule_bookmarks_without_favicons_task: 3940d279-f1b8-452b-8b7c-9ddb22fb2a7f 5 retries executed in 0.006s
+_ BookmarkTasksTestCase.test_schedule_bookmarks_without_favicons_should_only_update_user_owned_bookmarks _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:41,261 api: Executing bookmarks.services.tasks._schedule_bookmarks_without_favicons_task: 655ee017-ce80-4bf7-8432-3cc0287afd30 5 retries
+INFO 2026-01-15 06:56:41,263 api: Executing bookmarks.services.tasks._load_favicon_task: 8366b160-97a1-4aba-a8ce-e38a28ebdf3c 5 retries
+INFO 2026-01-15 06:56:41,264 tasks: Load favicon for bookmark. url=https://example.com/ccQEFJPsSCRvhpy3v35psxUAAtPudCPu
+INFO 2026-01-15 06:56:41,264 tasks: Successfully updated favicon for bookmark. url=https://example.com/ccQEFJPsSCRvhpy3v35psxUAAtPudCPu icon=https_example_com.png
+INFO 2026-01-15 06:56:41,265 api: bookmarks.services.tasks._load_favicon_task: 8366b160-97a1-4aba-a8ce-e38a28ebdf3c 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,265 api: Executing bookmarks.services.tasks._load_favicon_task: 956fb8f4-1d0d-42b8-bfc0-975263f65ac1 5 retries
+INFO 2026-01-15 06:56:41,265 tasks: Load favicon for bookmark. url=https://example.com/ycBD3efm2qKKRWgUDqE0C97F8GvJNHVD
+INFO 2026-01-15 06:56:41,266 tasks: Successfully updated favicon for bookmark. url=https://example.com/ycBD3efm2qKKRWgUDqE0C97F8GvJNHVD icon=https_example_com.png
+INFO 2026-01-15 06:56:41,266 api: bookmarks.services.tasks._load_favicon_task: 956fb8f4-1d0d-42b8-bfc0-975263f65ac1 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,266 api: Executing bookmarks.services.tasks._load_favicon_task: 948c4c62-45dc-4afd-9d4e-3e56b4d3e84b 5 retries
+INFO 2026-01-15 06:56:41,267 tasks: Load favicon for bookmark. url=https://example.com/FjP7JfiuYUssj84Zqc3y9G2UggaYy2CA
+INFO 2026-01-15 06:56:41,267 tasks: Successfully updated favicon for bookmark. url=https://example.com/FjP7JfiuYUssj84Zqc3y9G2UggaYy2CA icon=https_example_com.png
+INFO 2026-01-15 06:56:41,267 api: bookmarks.services.tasks._load_favicon_task: 948c4c62-45dc-4afd-9d4e-3e56b4d3e84b 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,267 api: bookmarks.services.tasks._schedule_bookmarks_without_favicons_task: 655ee017-ce80-4bf7-8432-3cc0287afd30 5 retries executed in 0.006s
+_ BookmarkTasksTestCase.test_schedule_bookmarks_without_snapshots_should_load_snapshot_for_all_bookmarks_without_snapshot _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:41,881 api: Executing bookmarks.services.tasks._schedule_bookmarks_without_snapshots_task: 4fd7d61c-186b-4386-8187-1387a0715c44 5 retries
+INFO 2026-01-15 06:56:41,882 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: e3a92559-173e-49d9-9845-c5c3fd5f98be 5 retries
+INFO 2026-01-15 06:56:41,883 tasks: Load existing snapshot for bookmark. url=https://example.com/JBbZ3wLo7IINhfduSaeTNZHUPcg5J0V0
+INFO 2026-01-15 06:56:41,884 tasks: Using newest snapshot. url=https://example.com/JBbZ3wLo7IINhfduSaeTNZHUPcg5J0V0 from=2026-01-15 06:56:41.271583
+INFO 2026-01-15 06:56:41,884 api: bookmarks.services.tasks._load_web_archive_snapshot_task: e3a92559-173e-49d9-9845-c5c3fd5f98be 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,884 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: b804ce8d-1482-4fd4-a9f7-8b8448d2d1ce 5 retries
+INFO 2026-01-15 06:56:41,885 tasks: Load existing snapshot for bookmark. url=https://example.com/OZH7VvZLpHm9PYEIFUfdbFk8OgacFrmT
+INFO 2026-01-15 06:56:41,885 tasks: Using newest snapshot. url=https://example.com/OZH7VvZLpHm9PYEIFUfdbFk8OgacFrmT from=2026-01-15 06:56:41.271583
+INFO 2026-01-15 06:56:41,885 api: bookmarks.services.tasks._load_web_archive_snapshot_task: b804ce8d-1482-4fd4-a9f7-8b8448d2d1ce 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,885 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: e1846234-4d0c-4623-b174-f286a14b6ba6 5 retries
+INFO 2026-01-15 06:56:41,886 tasks: Load existing snapshot for bookmark. url=https://example.com/1T1TQ7ydBfJAI9n2tJvPsw8Pntwb8paQ
+INFO 2026-01-15 06:56:41,886 tasks: Using newest snapshot. url=https://example.com/1T1TQ7ydBfJAI9n2tJvPsw8Pntwb8paQ from=2026-01-15 06:56:41.271583
+INFO 2026-01-15 06:56:41,887 api: bookmarks.services.tasks._load_web_archive_snapshot_task: e1846234-4d0c-4623-b174-f286a14b6ba6 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:41,887 api: bookmarks.services.tasks._schedule_bookmarks_without_snapshots_task: 4fd7d61c-186b-4386-8187-1387a0715c44 5 retries executed in 0.006s
+_ BookmarkTasksTestCase.test_schedule_bookmarks_without_snapshots_should_only_update_user_owned_bookmarks _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:44,314 api: Executing bookmarks.services.tasks._schedule_bookmarks_without_snapshots_task: 7882258f-a740-4797-a94e-3fef936721bc 5 retries
+INFO 2026-01-15 06:56:44,316 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: ba496ac3-49b9-448b-a9ca-1ad28061b0b5 5 retries
+INFO 2026-01-15 06:56:44,316 tasks: Load existing snapshot for bookmark. url=https://example.com/06zE2lWJR5NZp4IcXfjDp317p5fFK0B4
+INFO 2026-01-15 06:56:44,317 tasks: Using newest snapshot. url=https://example.com/06zE2lWJR5NZp4IcXfjDp317p5fFK0B4 from=2026-01-15 06:56:43.104772
+INFO 2026-01-15 06:56:44,317 api: bookmarks.services.tasks._load_web_archive_snapshot_task: ba496ac3-49b9-448b-a9ca-1ad28061b0b5 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:44,317 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: 41824751-1c4a-4326-b14d-d2a5281806b2 5 retries
+INFO 2026-01-15 06:56:44,318 tasks: Load existing snapshot for bookmark. url=https://example.com/JvbECGg8mvSrboTgql6Kwh0JYDBCCGsq
+INFO 2026-01-15 06:56:44,318 tasks: Using newest snapshot. url=https://example.com/JvbECGg8mvSrboTgql6Kwh0JYDBCCGsq from=2026-01-15 06:56:43.104772
+INFO 2026-01-15 06:56:44,318 api: bookmarks.services.tasks._load_web_archive_snapshot_task: 41824751-1c4a-4326-b14d-d2a5281806b2 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:44,318 api: Executing bookmarks.services.tasks._load_web_archive_snapshot_task: c232a8fd-e4d3-44dc-86a6-7f22a389d41d 5 retries
+INFO 2026-01-15 06:56:44,319 tasks: Load existing snapshot for bookmark. url=https://example.com/cmRCtkBroWaWc1DHtU4Tdn2edhecS4TZ
+INFO 2026-01-15 06:56:44,320 tasks: Using newest snapshot. url=https://example.com/cmRCtkBroWaWc1DHtU4Tdn2edhecS4TZ from=2026-01-15 06:56:43.104772
+INFO 2026-01-15 06:56:44,320 api: bookmarks.services.tasks._load_web_archive_snapshot_task: c232a8fd-e4d3-44dc-86a6-7f22a389d41d 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:44,320 api: bookmarks.services.tasks._schedule_bookmarks_without_snapshots_task: 7882258f-a740-4797-a94e-3fef936721bc 5 retries executed in 0.006s
+_ BookmarkTasksTestCase.test_schedule_refresh_favicons_should_only_update_user_owned_bookmarks _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:47,356 api: Executing bookmarks.services.tasks._schedule_refresh_favicons_task: 731e5810-149e-4d1c-89ca-308966f2571a 5 retries
+INFO 2026-01-15 06:56:47,358 api: Executing bookmarks.services.tasks._load_favicon_task: 89512ec8-8a63-4324-b7a8-ca0ebeb77950 5 retries
+INFO 2026-01-15 06:56:47,359 tasks: Load favicon for bookmark. url=https://example.com/BmHEdXPKjZnWF35621ebJrMgJpRntJOm
+INFO 2026-01-15 06:56:47,359 tasks: Successfully updated favicon for bookmark. url=https://example.com/BmHEdXPKjZnWF35621ebJrMgJpRntJOm icon=https_example_com.png
+INFO 2026-01-15 06:56:47,359 api: bookmarks.services.tasks._load_favicon_task: 89512ec8-8a63-4324-b7a8-ca0ebeb77950 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:47,359 api: Executing bookmarks.services.tasks._load_favicon_task: ae17d5b9-ef59-4e57-b3d3-0d539db60c71 5 retries
+INFO 2026-01-15 06:56:47,360 tasks: Load favicon for bookmark. url=https://example.com/uON5xpv1UaCpKm8LbfeMe1Ihcw1ffTNi
+INFO 2026-01-15 06:56:47,361 tasks: Successfully updated favicon for bookmark. url=https://example.com/uON5xpv1UaCpKm8LbfeMe1Ihcw1ffTNi icon=https_example_com.png
+INFO 2026-01-15 06:56:47,361 api: bookmarks.services.tasks._load_favicon_task: ae17d5b9-ef59-4e57-b3d3-0d539db60c71 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:47,361 api: Executing bookmarks.services.tasks._load_favicon_task: 3828ef94-94b4-43e9-b0b7-618fde76cdb3 5 retries
+INFO 2026-01-15 06:56:47,361 tasks: Load favicon for bookmark. url=https://example.com/gydFmKp8STi5YyGcJH82VDRsov1NU2hP
+INFO 2026-01-15 06:56:47,362 tasks: Successfully updated favicon for bookmark. url=https://example.com/gydFmKp8STi5YyGcJH82VDRsov1NU2hP icon=https_example_com.png
+INFO 2026-01-15 06:56:47,362 api: bookmarks.services.tasks._load_favicon_task: 3828ef94-94b4-43e9-b0b7-618fde76cdb3 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:47,362 api: bookmarks.services.tasks._schedule_refresh_favicons_task: 731e5810-149e-4d1c-89ca-308966f2571a 5 retries executed in 0.006s
+_ BookmarkTasksTestCase.test_schedule_refresh_favicons_should_update_favicon_for_all_bookmarks _
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:47,998 api: Executing bookmarks.services.tasks._schedule_refresh_favicons_task: ac42d275-6b08-4331-993c-ba0dcc72e89b 5 retries
+INFO 2026-01-15 06:56:47,999 api: Executing bookmarks.services.tasks._load_favicon_task: 680e7e1a-e1d2-4ede-96eb-c2b9dec29b31 5 retries
+INFO 2026-01-15 06:56:48,000 tasks: Load favicon for bookmark. url=https://example.com/5F55IZn9khadJRsBc50LFtOoMkEthUp6
+INFO 2026-01-15 06:56:48,001 tasks: Successfully updated favicon for bookmark. url=https://example.com/5F55IZn9khadJRsBc50LFtOoMkEthUp6 icon=https_example_com.png
+INFO 2026-01-15 06:56:48,001 api: bookmarks.services.tasks._load_favicon_task: 680e7e1a-e1d2-4ede-96eb-c2b9dec29b31 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,001 api: Executing bookmarks.services.tasks._load_favicon_task: 0ece5c3e-f66c-4b8f-953a-546c2e6a041b 5 retries
+INFO 2026-01-15 06:56:48,002 tasks: Load favicon for bookmark. url=https://example.com/XADuC0dzQnFQ9E2PRrqS8y4oh2VeCMNF
+INFO 2026-01-15 06:56:48,002 tasks: Successfully updated favicon for bookmark. url=https://example.com/XADuC0dzQnFQ9E2PRrqS8y4oh2VeCMNF icon=https_example_com.png
+INFO 2026-01-15 06:56:48,002 api: bookmarks.services.tasks._load_favicon_task: 0ece5c3e-f66c-4b8f-953a-546c2e6a041b 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,002 api: Executing bookmarks.services.tasks._load_favicon_task: 2300dede-99b8-4761-bc0d-3e1f0e6ef583 5 retries
+INFO 2026-01-15 06:56:48,003 tasks: Load favicon for bookmark. url=https://example.com/MQEpk5AWPTwQxlx9wZAlUx034DMSHlLp
+INFO 2026-01-15 06:56:48,003 tasks: Successfully updated favicon for bookmark. url=https://example.com/MQEpk5AWPTwQxlx9wZAlUx034DMSHlLp icon=https_example_com.png
+INFO 2026-01-15 06:56:48,003 api: bookmarks.services.tasks._load_favicon_task: 2300dede-99b8-4761-bc0d-3e1f0e6ef583 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,004 api: Executing bookmarks.services.tasks._load_favicon_task: e245398f-0a7c-445b-a25c-e463e7fc2ef9 5 retries
+INFO 2026-01-15 06:56:48,004 tasks: Load favicon for bookmark. url=https://example.com/RB3UsM9mEq5me07ou9HT3DSkF07BdUP1
+INFO 2026-01-15 06:56:48,004 api: bookmarks.services.tasks._load_favicon_task: e245398f-0a7c-445b-a25c-e463e7fc2ef9 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,005 api: Executing bookmarks.services.tasks._load_favicon_task: 5004acad-d747-49c2-8d3f-e686907075ed 5 retries
+INFO 2026-01-15 06:56:48,005 tasks: Load favicon for bookmark. url=https://example.com/PDjpKMiLNZrCgorenjtpuMdRoqrKIzp0
+INFO 2026-01-15 06:56:48,005 api: bookmarks.services.tasks._load_favicon_task: 5004acad-d747-49c2-8d3f-e686907075ed 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,006 api: Executing bookmarks.services.tasks._load_favicon_task: 26558d29-9278-44d2-985d-b03d94e46ee8 5 retries
+INFO 2026-01-15 06:56:48,006 tasks: Load favicon for bookmark. url=https://example.com/HVvvSKgtB8AGyfHgXaKjd4erZ7dSpL3u
+INFO 2026-01-15 06:56:48,006 api: bookmarks.services.tasks._load_favicon_task: 26558d29-9278-44d2-985d-b03d94e46ee8 5 retries executed in 0.001s
+INFO 2026-01-15 06:56:48,006 api: bookmarks.services.tasks._schedule_refresh_favicons_task: ac42d275-6b08-4331-993c-ba0dcc72e89b 5 retries executed in 0.009s
+_________ TestCreateInitialSuperuserCommand.test_create_multiple_times _________
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:48,685 create_initial_superuser: Created initial superuser
+INFO 2026-01-15 06:56:48,685 create_initial_superuser: Skip creating initial superuser, user already exists
+INFO 2026-01-15 06:56:48,686 create_initial_superuser: Skip creating initial superuser, user already exists
+_________ TestCreateInitialSuperuserCommand.test_create_with_password __________
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:49,290 create_initial_superuser: Created initial superuser
+________ TestCreateInitialSuperuserCommand.test_create_without_options _________
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:49,892 create_initial_superuser: Skip creating initial superuser, LD_SUPERUSER_NAME option is not defined
+________ TestCreateInitialSuperuserCommand.test_create_without_password ________
+----------------------------- Captured stderr call -----------------------------
+INFO 2026-01-15 06:56:49,898 create_initial_superuser: Created initial superuser
+_________ FaviconLoaderTestCase.test_custom_provider_with_domain_param _________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,436 favicon_loader: Loading favicon from: https://custom.icons.com/?url=example.com
+DEBUG 2026-01-15 06:56:54,436 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+__________ FaviconLoaderTestCase.test_custom_provider_with_url_param ___________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,439 favicon_loader: Loading favicon from: https://custom.icons.com/?url=https://example.com
+DEBUG 2026-01-15 06:56:54,440 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+_______________ FaviconLoaderTestCase.test_guess_file_extension ________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,443 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,443 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+DEBUG 2026-01-15 06:56:54,444 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,445 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.ico
+___________________ FaviconLoaderTestCase.test_load_favicon ____________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,448 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,448 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+_____________ FaviconLoaderTestCase.test_load_favicon_caches_icons _____________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,452 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,452 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+_____ FaviconLoaderTestCase.test_load_favicon_creates_folder_if_not_exists _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,456 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,456 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+_ FaviconLoaderTestCase.test_load_favicon_creates_multiple_icons_for_different_base_url _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,459 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,459 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+DEBUG 2026-01-15 06:56:54,459 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://sub.example.com&size=32
+DEBUG 2026-01-15 06:56:54,460 favicon_loader: Saved favicon as: /testbed/data/favicons/https_sub_example_com.png
+DEBUG 2026-01-15 06:56:54,460 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://other-domain.com&size=32
+DEBUG 2026-01-15 06:56:54,460 favicon_loader: Saved favicon as: /testbed/data/favicons/https_other_domain_com.png
+_ FaviconLoaderTestCase.test_load_favicon_creates_single_icon_for_same_base_url _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,464 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,464 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+__________ FaviconLoaderTestCase.test_load_favicon_updates_stale_icon __________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:56:54,467 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,468 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+DEBUG 2026-01-15 06:56:54,468 favicon_loader: Loading favicon from: https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://example.com&size=32
+DEBUG 2026-01-15 06:56:54,469 favicon_loader: Saved favicon as: /testbed/data/favicons/https_example_com.png
+__________ FeedsTestCase.test_all_returns_404_for_unknown_feed_token ___________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:56:55,712 log: Not Found: /feeds/foo/all
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /feeds/foo/all
+_________ FeedsTestCase.test_shared_returns_404_for_unknown_feed_token _________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:57:05,123 log: Not Found: /feeds/foo/shared
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /feeds/foo/shared
+_________ FeedsTestCase.test_unread_returns_404_for_unknown_feed_token _________
+----------------------------- Captured stderr call -----------------------------
+WARNING 2026-01-15 06:57:10,067 log: Not Found: /feeds/foo/unread
+------------------------------ Captured log call -------------------------------
+WARNING  django.request:log.py:241 Not Found: /feeds/foo/unread
+___________________ HealthViewTestCase.test_health_unhealhty ___________________
+----------------------------- Captured stderr call -----------------------------
+ERROR 2026-01-15 06:57:13,385 log: Internal Server Error: /health
+------------------------------ Captured log call -------------------------------
+ERROR    django.request:log.py:241 Internal Server Error: /health
+_____________________ ImporterTestCase.test_archived_state _____________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:14,013 importer: Parse duration: 0:00:00.001394
+DEBUG 2026-01-15 06:57:14,019 importer: Import duration: 0:00:00.007355
+__________________ ImporterTestCase.test_create_missing_tags ___________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:14,630 importer: Parse duration: 0:00:00.001100
+DEBUG 2026-01-15 06:57:14,635 importer: Import duration: 0:00:00.006724
+DEBUG 2026-01-15 06:57:14,637 importer: Parse duration: 0:00:00.001259
+DEBUG 2026-01-15 06:57:14,648 importer: Import duration: 0:00:00.012762
+______ ImporterTestCase.test_create_missing_tags_does_not_duplicate_tags _______
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:15,254 importer: Parse duration: 0:00:00.001093
+DEBUG 2026-01-15 06:57:15,260 importer: Import duration: 0:00:00.006359
+_________________________ ImporterTestCase.test_import _________________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:15,940 importer: Parse duration: 0:00:00.001702
+DEBUG 2026-01-15 06:57:15,948 importer: Import duration: 0:00:00.009204
+____ ImporterTestCase.test_import_invalid_bookmark_does_not_associate_tags _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:16,585 importer: Parse duration: 0:00:00.000666
+ERROR 2026-01-15 06:57:16,588 importer: Error importing bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=['tag1', 'tag...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['This field cannot be blank.']}
+WARNING 2026-01-15 06:57:16,590 importer: Failed to assign tags to the bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=['tag1', 'tag.... Could not find bookmark by URL.
+DEBUG 2026-01-15 06:57:16,590 importer: Import duration: 0:00:00.006161
+------------------------------ Captured log call -------------------------------
+ERROR    root:importer.py:169 Error importing bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=['tag1', 'tag...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['This field cannot be blank.']}
+WARNING  root:importer.py:212 Failed to assign tags to the bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=['tag1', 'tag.... Could not find bookmark by URL.
+______________________ ImporterTestCase.test_import_tags _______________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:17,197 importer: Parse duration: 0:00:00.001027
+DEBUG 2026-01-15 06:57:17,203 importer: Import duration: 0:00:00.006730
+___________ ImporterTestCase.test_import_with_some_invalid_bookmarks ___________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:17,809 importer: Parse duration: 0:00:00.000990
+ERROR 2026-01-15 06:57:17,812 importer: Error importing bookmark: NetscapeBookmark(href='foo.com', title='', description='', notes='', date_added='', tag_names=[], to...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['Enter a valid URL.']}
+ERROR 2026-01-15 06:57:17,812 importer: Error importing bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=[], to_read=F...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['This field cannot be blank.']}
+WARNING 2026-01-15 06:57:17,814 importer: Failed to assign tags to the bookmark: NetscapeBookmark(href='foo.com', title='', description='', notes='', date_added='', tag_names=[], to.... Could not find bookmark by URL.
+WARNING 2026-01-15 06:57:17,814 importer: Failed to assign tags to the bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=[], to_read=F.... Could not find bookmark by URL.
+DEBUG 2026-01-15 06:57:17,814 importer: Import duration: 0:00:00.005543
+------------------------------ Captured log call -------------------------------
+ERROR    root:importer.py:169 Error importing bookmark: NetscapeBookmark(href='foo.com', title='', description='', notes='', date_added='', tag_names=[], to...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['Enter a valid URL.']}
+ERROR    root:importer.py:169 Error importing bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=[], to_read=F...
+Traceback (most recent call last):
+  File "/testbed/bookmarks/services/importer.py", line 159, in _import_batch
+    bookmark.clean_fields(exclude=["owner"])
+  File "/usr/local/lib/python3.10/site-packages/django/db/models/base.py", line 1577, in clean_fields
+    raise ValidationError(errors)
+django.core.exceptions.ValidationError: {'url': ['This field cannot be blank.']}
+WARNING  root:importer.py:212 Failed to assign tags to the bookmark: NetscapeBookmark(href='foo.com', title='', description='', notes='', date_added='', tag_names=[], to.... Could not find bookmark by URL.
+WARNING  root:importer.py:212 Failed to assign tags to the bookmark: NetscapeBookmark(href='', title='', description='', notes='', date_added='', tag_names=[], to_read=F.... Could not find bookmark by URL.
+_ ImporterTestCase.test_keep_description_if_imported_bookmark_has_empty_description _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:18,423 importer: Parse duration: 0:00:00.000704
+DEBUG 2026-01-15 06:57:18,426 importer: Import duration: 0:00:00.004034
+DEBUG 2026-01-15 06:57:18,427 importer: Parse duration: 0:00:00.000707
+DEBUG 2026-01-15 06:57:18,433 importer: Import duration: 0:00:00.006514
+____ ImporterTestCase.test_keep_title_if_imported_bookmark_has_empty_title _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:19,040 importer: Parse duration: 0:00:00.000670
+DEBUG 2026-01-15 06:57:19,043 importer: Import duration: 0:00:00.003965
+DEBUG 2026-01-15 06:57:19,044 importer: Parse duration: 0:00:00.000758
+DEBUG 2026-01-15 06:57:19,050 importer: Import duration: 0:00:00.006436
+_________________________ ImporterTestCase.test_notes __________________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:19,658 importer: Parse duration: 0:00:00.000685
+DEBUG 2026-01-15 06:57:19,662 importer: Import duration: 0:00:00.004117
+DEBUG 2026-01-15 06:57:19,664 importer: Parse duration: 0:00:00.000688
+DEBUG 2026-01-15 06:57:19,670 importer: Import duration: 0:00:00.006715
+DEBUG 2026-01-15 06:57:19,672 importer: Parse duration: 0:00:00.000683
+DEBUG 2026-01-15 06:57:19,678 importer: Import duration: 0:00:00.006437
+______________________ ImporterTestCase.test_private_flag ______________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:20,286 importer: Parse duration: 0:00:00.001301
+DEBUG 2026-01-15 06:57:20,290 importer: Import duration: 0:00:00.005755
+DEBUG 2026-01-15 06:57:20,296 importer: Parse duration: 0:00:00.001174
+DEBUG 2026-01-15 06:57:20,300 importer: Import duration: 0:00:00.005394
+____________ ImporterTestCase.test_replace_whitespace_in_tag_names _____________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:20,909 importer: Parse duration: 0:00:00.000749
+DEBUG 2026-01-15 06:57:20,913 importer: Import duration: 0:00:00.005384
+________________ ImporterTestCase.test_schedule_favicon_loading ________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:21,519 importer: Parse duration: 0:00:00.000532
+DEBUG 2026-01-15 06:57:21,521 importer: Import duration: 0:00:00.001980
+_______________ ImporterTestCase.test_schedule_snapshot_creation _______________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:22,156 importer: Parse duration: 0:00:00.000490
+DEBUG 2026-01-15 06:57:22,158 importer: Import duration: 0:00:00.001835
+_ ImporterTestCase.test_should_append_tags_to_bookmark_when_reimporting_with_different_tags _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:22,854 importer: Parse duration: 0:00:00.000687
+DEBUG 2026-01-15 06:57:22,858 importer: Import duration: 0:00:00.004939
+DEBUG 2026-01-15 06:57:22,859 importer: Parse duration: 0:00:00.001048
+DEBUG 2026-01-15 06:57:22,868 importer: Import duration: 0:00:00.009553
+______________________ ImporterTestCase.test_synchronize _______________________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:23,476 importer: Parse duration: 0:00:00.001653
+DEBUG 2026-01-15 06:57:23,482 importer: Import duration: 0:00:00.008089
+DEBUG 2026-01-15 06:57:23,490 importer: Parse duration: 0:00:00.002001
+DEBUG 2026-01-15 06:57:23,505 importer: Import duration: 0:00:00.017552
+___________ ImporterTestCase.test_use_current_date_when_no_add_date ____________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:57:24,122 importer: Parse duration: 0:00:00
+DEBUG 2026-01-15 06:57:24,125 importer: Import duration: 0:00:00
+__________ SettingsImportViewTestCase.test_should_import_successfully __________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:58:43,034 importer: Parse duration: 0:00:00.001098
+DEBUG 2026-01-15 06:58:43,040 importer: Import duration: 0:00:00.007311
+____ SettingsImportViewTestCase.test_should_respect_map_private_flag_option ____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:58:43,674 importer: Parse duration: 0:00:00.001159
+DEBUG 2026-01-15 06:58:43,680 importer: Import duration: 0:00:00.006888
+DEBUG 2026-01-15 06:58:43,707 importer: Parse duration: 0:00:00.001185
+DEBUG 2026-01-15 06:58:43,712 importer: Import duration: 0:00:00.006412
+_ TagServiceTestCase.test_get_or_create_tag_should_handle_legacy_dbs_with_existing_duplicates _
+----------------------------- Captured stderr call -----------------------------
+ERROR 2026-01-15 06:59:03,772 tags: Found multiple tags for the name 'Book' with different capitalization. Using the first tag with the name 'book'. Since v.1.2 tags work case-insensitive, which means duplicates of the same name are not allowed anymore. To solve this error remove the duplicate tag in admin.
+_________ WebsiteLoaderTestCase.test_load_page_limits_large_documents __________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,688 website_loader: Loaded chunk (iteration=1, total=1000.0)
+DEBUG 2026-01-15 06:59:20,690 website_loader: Loaded chunk (iteration=2, total=2000.0)
+DEBUG 2026-01-15 06:59:20,693 website_loader: Loaded chunk (iteration=3, total=3000.0)
+DEBUG 2026-01-15 06:59:20,697 website_loader: Loaded chunk (iteration=4, total=4000.0)
+DEBUG 2026-01-15 06:59:20,701 website_loader: Loaded chunk (iteration=5, total=5000.0)
+DEBUG 2026-01-15 06:59:20,706 website_loader: Loaded chunk (iteration=6, total=6000.0)
+DEBUG 2026-01-15 06:59:20,707 website_loader: Cancel reading document after 6144000 bytes
+_____ WebsiteLoaderTestCase.test_load_page_removes_bytes_after_end_of_head _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,717 website_loader: Loaded chunk (iteration=1, total=0.0166015625)
+DEBUG 2026-01-15 06:59:20,717 website_loader: Found closing head tag after 17 bytes
+_____________ WebsiteLoaderTestCase.test_load_page_returns_content _____________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,720 website_loader: Loaded chunk (iteration=1, total=1.0)
+DEBUG 2026-01-15 06:59:20,720 website_loader: Loaded chunk (iteration=2, total=2.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=3, total=3.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=4, total=4.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=5, total=5.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=6, total=6.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=7, total=7.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=8, total=8.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=9, total=9.0)
+DEBUG 2026-01-15 06:59:20,721 website_loader: Loaded chunk (iteration=10, total=10.0)
+______ WebsiteLoaderTestCase.test_load_page_stops_reading_at_end_of_head _______
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,726 website_loader: Loaded chunk (iteration=1, total=1000.0)
+DEBUG 2026-01-15 06:59:20,727 website_loader: Loaded chunk (iteration=2, total=1000.0068359375)
+DEBUG 2026-01-15 06:59:20,727 website_loader: Found closing head tag after 1024007 bytes
+_______________ WebsiteLoaderTestCase.test_load_website_metadata _______________
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,732 website_loader: Load duration: 0:00:00.000031
+DEBUG 2026-01-15 06:59:20,733 website_loader: Parsing duration: 0:00:00.000745
+_ WebsiteLoaderTestCase.test_load_website_metadata_prefers_description_over_og_description _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,737 website_loader: Load duration: 0:00:00.000029
+DEBUG 2026-01-15 06:59:20,738 website_loader: Parsing duration: 0:00:00.000610
+_ WebsiteLoaderTestCase.test_load_website_metadata_trims_title_and_description _
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,740 website_loader: Load duration: 0:00:00.000028
+DEBUG 2026-01-15 06:59:20,741 website_loader: Parsing duration: 0:00:00.000633
+____ WebsiteLoaderTestCase.test_load_website_metadata_using_og_description _____
+----------------------------- Captured stderr call -----------------------------
+DEBUG 2026-01-15 06:59:20,744 website_loader: Load duration: 0:00:00.000027
+DEBUG 2026-01-15 06:59:20,745 website_loader: Parsing duration: 0:00:00.000777
+=========================== short test summary info ============================
+PASSED bookmarks/tests/test_anonymous_view.py::AnonymousViewTestCase::test_publicly_shared_bookmarks_link
+PASSED bookmarks/tests/test_app_options.py::AppOptionsTestCase::test_empty_csrf_trusted_origins
+PASSED bookmarks/tests/test_app_options.py::AppOptionsTestCase::test_multiple_csrf_trusted_origin
+PASSED bookmarks/tests/test_app_options.py::AppOptionsTestCase::test_single_csrf_trusted_origin
+PASSED bookmarks/tests/test_auth_proxy_support.py::AuthProxySupportTest::test_auth_proxy_authentication
+PASSED bookmarks/tests/test_auth_proxy_support.py::AuthProxySupportTest::test_auth_proxy_is_disabled_by_default
+PASSED bookmarks/tests/test_auth_proxy_support.py::AuthProxySupportTest::test_auth_proxy_with_custom_header
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_archive_should_archive_bookmark
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_archived_action_bulk_select_across_only_affects_archived_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_archived_action_bulk_select_across_respects_query
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_archive
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_delete
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_mark_as_read
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_mark_as_unread
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_select_across
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_select_across_ignores_page
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_share
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_tag
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_unarchive
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_unshare
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_bulk_untag
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_archive_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_archive_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_delete_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_mark_as_read_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_mark_as_unread_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_share_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_tag_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_unarchive_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_unshare_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_bulk_untag_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_can_only_unshare_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_delete_can_only_delete_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_delete_should_delete_bookmark
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_empty_action_does_not_modify_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_handles_empty_bookmark_id
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_index_action_bulk_select_across_only_affects_active_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_index_action_bulk_select_across_respects_query
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_mark_as_read
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_shared_action_bulk_select_across_not_supported
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_should_not_redirect_to_external_url
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_should_redirect_to_return_url
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_unarchive_can_only_archive_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_unarchive_should_unarchive_bookmark
+PASSED bookmarks/tests/test_bookmark_action_view.py::BookmarkActionViewTestCase::test_unshare_should_unshare_bookmark
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_allowed_bulk_actions
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_allowed_bulk_actions_with_sharing_enabled
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_apply_search_preferences
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_bulk_edit_respects_search_options
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_edit_link_return_url_respects_search_options
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_encode_search_params
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_save_search_preferences
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_display_search_terms_from_query_as_selected_tags_in_lax_mode
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_display_selected_tags_from_query
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_list_archived_and_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_list_bookmarks_and_tags_for_search_preferences
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_list_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_list_tags_for_archived_and_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_list_tags_for_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_not_display_search_terms_from_query_as_selected_tags_in_strict_mode
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_open_bookmarks_in_new_page_by_default
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_should_open_bookmarks_in_same_page_if_specified_in_user_profile
+PASSED bookmarks/tests/test_bookmark_archived_view.py::BookmarkArchivedViewTestCase::test_url_encode_bookmark_actions_url
+PASSED bookmarks/tests/test_bookmark_asset_view.py::BookmarkAssetViewTestCase::test_view_access
+PASSED bookmarks/tests/test_bookmark_asset_view.py::BookmarkAssetViewTestCase::test_view_access_guest_user
+PASSED bookmarks/tests/test_bookmark_assets.py::BookmarkAssetsTestCase::test_bulk_delete_bookmarks_deletes_asset_files
+PASSED bookmarks/tests/test_bookmark_assets.py::BookmarkAssetsTestCase::test_delete_bookmark_deletes_asset_file
+PASSED bookmarks/tests/test_bookmark_assets.py::BookmarkAssetsTestCase::test_save_updates_file_size
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_access
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_file_size
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_list
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_list_visibility
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_status
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_asset_without_file
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_assets_visibility_no_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_assets_visibility_with_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_create_snapshot
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_date_added
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_delete_button
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_description
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_displays_title
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_edit_link
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_form_partial_access
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_form_partial_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_internet_archive_link
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_notes
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_remove_asset
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_status
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_status_update
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_status_update_access
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_status_visibility
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_tags
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_weblinks_respect_target_setting
+PASSED bookmarks/tests/test_bookmark_details_modal.py::BookmarkDetailsModalTestCase::test_website_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_file_size
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_list
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_list_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_status
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_asset_without_file
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_assets_visibility_no_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_assets_visibility_with_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_create_snapshot
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_date_added
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_delete_button
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_description
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_displays_title
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_edit_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_form_partial_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_form_partial_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_internet_archive_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_notes
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_remove_asset
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_status
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_status_update
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_status_update_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_status_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_tags
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_weblinks_respect_target_setting
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsModalTestCase::test_website_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_actions_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_file_size
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_list
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_list_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_status
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_asset_without_file
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_assets_visibility_no_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_assets_visibility_with_snapshot_support
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_create_snapshot
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_date_added
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_delete_button
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_description
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_displays_title
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_edit_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_form_partial_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_form_partial_access_with_sharing
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_internet_archive_link
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_notes
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_remove_asset
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_status
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_status_update
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_status_update_access
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_status_visibility
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_tags
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_weblinks_respect_target_setting
+PASSED bookmarks/tests/test_bookmark_details_view.py::BookmarkDetailsViewTestCase::test_website_link
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_can_only_edit_own_bookmarks
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_edit_bookmark
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_edit_shared_state
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_edit_unread_state
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_hide_notes_if_there_are_no_notes
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_not_redirect_to_external_url
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_prefill_bookmark_form_fields
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_redirect_to_bookmark_index_by_default
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_redirect_to_return_url
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_respect_share_profile_setting
+PASSED bookmarks/tests/test_bookmark_edit_view.py::BookmarkEditViewTestCase::test_should_show_notes_if_there_are_notes
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_allowed_bulk_actions
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_allowed_bulk_actions_with_sharing_enabled
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_apply_search_preferences
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_bulk_edit_respects_search_options
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_edit_link_return_url_respects_search_options
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_encode_search_params
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_save_search_preferences
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_display_search_terms_from_query_as_selected_tags_in_lax_mode
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_display_selected_tags_from_query
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_list_bookmarks_and_tags_for_search_preferences
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_list_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_list_tags_for_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_list_tags_for_unarchived_and_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_list_unarchived_and_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_not_display_search_terms_from_query_as_selected_tags_in_strict_mode
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_open_bookmarks_in_new_page_by_default
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_should_open_bookmarks_in_same_page_if_specified_in_user_profile
+PASSED bookmarks/tests/test_bookmark_index_view.py::BookmarkIndexViewTestCase::test_url_encode_bookmark_actions_url
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_auto_close_should_redirect_to_close_view
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_create_new_bookmark
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_create_new_shared_bookmark
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_create_new_unread_bookmark
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_enable_auto_close_when_specified_in_url_parameter
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_hide_notes_if_there_are_no_notes
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_not_enable_auto_close_when_not_specified_in_url_parameter
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_not_redirect_to_external_url
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_prefill_description_from_url_parameter
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_prefill_title_from_url_parameter
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_prefill_url_from_url_parameter
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_redirect_to_index_view
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_respect_share_profile_setting
+PASSED bookmarks/tests/test_bookmark_new_view.py::BookmarkNewViewTestCase::test_should_show_respective_share_hint
+PASSED bookmarks/tests/test_bookmark_search_form.py::BookmarkSearchFormTest::test_hidden_fields
+PASSED bookmarks/tests/test_bookmark_search_form.py::BookmarkSearchFormTest::test_initial_values
+PASSED bookmarks/tests/test_bookmark_search_form.py::BookmarkSearchFormTest::test_user_options
+PASSED bookmarks/tests/test_bookmark_search_model.py::BookmarkSearchModelTest::test_from_request
+PASSED bookmarks/tests/test_bookmark_search_model.py::BookmarkSearchModelTest::test_has_modifications
+PASSED bookmarks/tests/test_bookmark_search_model.py::BookmarkSearchModelTest::test_modified_params
+PASSED bookmarks/tests/test_bookmark_search_model.py::BookmarkSearchModelTest::test_preferences_dict
+PASSED bookmarks/tests/test_bookmark_search_tag.py::BookmarkSearchTagTest::test_modified_indicator
+PASSED bookmarks/tests/test_bookmark_search_tag.py::BookmarkSearchTagTest::test_modified_labels
+PASSED bookmarks/tests/test_bookmark_search_tag.py::BookmarkSearchTagTest::test_preferences_form_inputs
+PASSED bookmarks/tests/test_bookmark_search_tag.py::BookmarkSearchTagTest::test_preferences_form_inputs_shared_mode
+PASSED bookmarks/tests/test_bookmark_search_tag.py::BookmarkSearchTagTest::test_search_form_inputs
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_apply_search_preferences
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_edit_link_return_url_respects_search_options
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_encode_search_params
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_save_search_preferences
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_bookmarks_and_tags_for_search_preferences
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_only_publicly_shared_bookmarks_without_login
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_only_tags_for_publicly_shared_bookmarks_without_login
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_only_users_with_publicly_shared_bookmarks_without_login
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_shared_bookmarks_from_all_users_that_have_sharing_enabled
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_shared_bookmarks_from_selected_user
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_tags_for_bookmarks_matching_query
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_tags_for_shared_bookmarks_from_all_users_that_have_sharing_enabled
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_tags_for_shared_bookmarks_from_selected_user
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_list_users_with_shared_bookmarks_if_sharing_is_enabled
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_open_bookmarks_in_new_page_by_default
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_should_open_bookmarks_in_same_page_if_specified_in_user_profile
+PASSED bookmarks/tests/test_bookmark_shared_view.py::BookmarkSharedViewTestCase::test_url_encode_bookmark_actions_url
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_form_should_not_validate_url_if_disabled_in_settings
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_form_should_validate_required_fields
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_form_should_validate_url_if_not_disabled_in_settings
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_model_should_not_allow_empty_url
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_model_should_not_allow_missing_url
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_model_should_not_validate_url_if_disabled_in_settings
+PASSED bookmarks/tests/test_bookmark_validation.py::BookmarkValidationTestCase::test_bookmark_model_should_validate_url_if_not_disabled_in_settings
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_archive
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_can_only_access_own_bookmarks
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_check_returns_bookmark_if_url_is_bookmarked
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_check_returns_existing_metadata_if_url_is_bookmarked
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_check_returns_no_bookmark_if_url_is_not_bookmarked
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_check_returns_scraped_metadata_if_url_is_not_bookmarked
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_archived_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_is_not_archived_by_default
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_is_not_shared_by_default
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_is_not_unread_by_default
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_minimal_payload
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_replaces_whitespace_in_tag_names
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_bookmark_with_same_url_updates_existing_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_shared_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_create_unread_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_delete_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_get_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_get_bookmark_with_more_details
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_archived_bookmarks_does_not_return_unarchived_bookmarks
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_archived_bookmarks_should_filter_by_query
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_archived_bookmarks_should_respect_sort
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_does_not_return_archived_bookmarks
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_filter_shared
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_filter_unread
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_should_filter_by_query
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_should_respect_sort
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_bookmarks_with_more_details
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_only_publicly_shared_bookmarks_when_not_logged_in
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_shared_bookmarks
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_shared_bookmarks_should_filter_by_query_and_user
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_list_shared_bookmarks_should_respect_sort
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_patch_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_patch_with_empty_payload_does_not_modify_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_unarchive
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_update_bookmark
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_update_bookmark_fails_without_required_fields
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_update_bookmark_shared_flag
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_update_bookmark_unread_flag
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_update_bookmark_with_minimal_payload_clears_all_fields
+PASSED bookmarks/tests/test_bookmarks_api.py::BookmarksApiTestCase::test_user_profile
+PASSED bookmarks/tests/test_bookmarks_api_performance.py::BookmarksApiPerformanceTestCase::test_list_archived_bookmarks_max_queries
+PASSED bookmarks/tests/test_bookmarks_api_performance.py::BookmarksApiPerformanceTestCase::test_list_bookmarks_max_queries
+PASSED bookmarks/tests/test_bookmarks_api_performance.py::BookmarksApiPerformanceTestCase::test_list_shared_bookmarks_max_queries
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_archive_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_check_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_create_bookmark_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_delete_bookmark_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_get_bookmark_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_list_archived_bookmarks_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_list_bookmarks_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_list_shared_bookmarks_does_not_require_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_patch_bookmark_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_unarchive_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_update_bookmark_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_api_permissions.py::BookmarksApiPermissionsTestCase::test_user_profile_requires_authentication
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_bookmark_description_max_lines
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_bookmark_link_target_should_be_blank_by_default
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_bookmark_link_target_should_respect_user_profile
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_bookmark_url_should_be_hidden_by_default
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_empty_state
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_favicon_should_be_hidden_when_favicons_disabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_favicon_should_be_hidden_when_there_is_no_icon
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_favicon_should_be_visible_when_favicons_enabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_archive_link
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_bookmark_url_when_disabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_edit_link
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_mark_as_read_for_non_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_mark_as_read_when_read
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_remove_link
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_unshare_button_when_not_shared
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_unshare_button_when_sharing_is_disabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_unshare_for_non_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_hide_view_link
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_inline_bookmark_description
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_note_cleans_html
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_note_renders_markdown
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_notes_are_hidden_initially_by_default
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_notes_are_hidden_initially_with_permanent_notes_disabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_notes_are_visible_initially_with_permanent_notes_enabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_separate_bookmark_description
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_share_info_user_link_keeps_query_params
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_reflect_both_unread_and_shared_state_as_css_class
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_reflect_shared_state_as_css_class
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_reflect_unread_state_as_css_class
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_render_web_archive_link_with_absolute_date_setting
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_render_web_archive_link_with_relative_date_setting
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_respect_absolute_date_setting
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_should_respect_relative_date_setting
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_show_bookmark_actions_for_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_show_bookmark_url_when_enabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_show_mark_as_read_when_unread
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_show_share_info_for_non_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_show_unshare_button_when_shared
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_toggle_notes_is_hidden_with_permanent_notes_enabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_toggle_notes_is_visible_by_default
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_toggle_notes_is_visible_with_permanent_notes_disabled
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_web_archive_link_target_should_be_blank_by_default
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_web_archive_link_target_should_respect_user_profile
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_with_anonymous_user
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_with_notes
+PASSED bookmarks/tests/test_bookmarks_list_template.py::BookmarkListTemplateTest::test_without_notes
+PASSED bookmarks/tests/test_bookmarks_model.py::BookmarkTestCase::test_bookmark_resolved_title
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_archive_bookmark
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_archive_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_archive_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_archive_bookmarks_should_only_archive_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_archive_bookmarks_should_only_archive_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_create_web_archive_snapshot
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_load_favicon
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_load_html_snapshot
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_not_load_html_snapshot_when_setting_is_disabled
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_update_existing_bookmark_with_same_url
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_create_should_update_website_metadata
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_delete_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_delete_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_delete_bookmarks_should_only_delete_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_delete_bookmarks_should_only_delete_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_read
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_read_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_read_should_only_update_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_read_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_unread
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_unread_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_unread_should_only_update_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_mark_bookmarks_as_unread_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_share_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_share_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_share_bookmarks_should_only_update_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_share_bookmarks_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks_should_create_tags
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks_should_handle_existing_relationships
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks_should_only_tag_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_tag_bookmarks_should_only_tag_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unarchive_bookmark
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unarchive_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unarchive_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unarchive_bookmarks_should_only_unarchive_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unarchive_bookmarks_should_only_unarchive_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unshare_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unshare_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unshare_bookmarks_should_only_update_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_unshare_bookmarks_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_untag_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_untag_bookmarks_should_accept_mix_of_int_and_string_ids
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_untag_bookmarks_should_only_tag_specified_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_untag_bookmarks_should_only_tag_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_create_web_archive_snapshot_if_url_did_change
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_not_create_html_snapshot
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_not_create_web_archive_snapshot_if_url_did_not_change
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_not_update_website_metadata_if_url_did_not_change
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_update_favicon
+PASSED bookmarks/tests/test_bookmarks_service.py::BookmarkServiceTestCase::test_update_should_update_website_metadata_if_url_did_change
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_create_pending_asset
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_handle_error
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_handle_missing_bookmark
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_not_create_asset_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_not_create_asset_when_single_file_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_should_update_file_info
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_force_update_snapshot
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_handle_missing_bookmark_id
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_ignore_missing_newest_snapshot
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_ignore_newest_snapshot_errors
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_not_run_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_not_run_when_web_archive_integration_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_not_save_stale_bookmark_data
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_skip_if_snapshot_exists
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_update_snapshot_url
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_web_archive_snapshot_should_use_newest_snapshot_as_fallback
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_create_favicon_file
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_handle_missing_bookmark
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_not_run_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_not_run_when_favicon_feature_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_not_save_stale_bookmark_data
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_favicon_should_update_favicon_file
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_handle_missing_bookmark_id
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_handle_missing_snapshot
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_handle_wayback_errors
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_not_save_stale_bookmark_data
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_skip_if_snapshot_exists
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_load_web_archive_snapshot_should_update_snapshot_url
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_favicons_should_load_favicon_for_all_bookmarks_without_favicon
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_favicons_should_not_run_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_favicons_should_not_run_when_favicon_feature_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_favicons_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_snapshots_should_load_snapshot_for_all_bookmarks_without_snapshot
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_snapshots_should_not_run_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_snapshots_should_not_run_when_web_archive_integration_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_bookmarks_without_snapshots_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_refresh_favicons_should_not_run_when_background_tasks_are_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_refresh_favicons_should_not_run_when_favicon_feature_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_refresh_favicons_should_not_run_when_refresh_is_disabled
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_refresh_favicons_should_only_update_user_owned_bookmarks
+PASSED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_schedule_refresh_favicons_should_update_favicon_for_all_bookmarks
+PASSED bookmarks/tests/test_context_path.py::ContextPathTestCase::test_route_with_context_path
+PASSED bookmarks/tests/test_context_path.py::ContextPathTestCase::test_route_without_context_path
+PASSED bookmarks/tests/test_create_initial_superuser_command.py::TestCreateInitialSuperuserCommand::test_create_multiple_times
+PASSED bookmarks/tests/test_create_initial_superuser_command.py::TestCreateInitialSuperuserCommand::test_create_with_password
+PASSED bookmarks/tests/test_create_initial_superuser_command.py::TestCreateInitialSuperuserCommand::test_create_without_options
+PASSED bookmarks/tests/test_create_initial_superuser_command.py::TestCreateInitialSuperuserCommand::test_create_without_password
+PASSED bookmarks/tests/test_custom_css.py::CustomCssTestCase::test_does_not_render_custom_style_tag_by_default
+PASSED bookmarks/tests/test_custom_css.py::CustomCssTestCase::test_renders_custom_style_tag_if_user_has_custom_css
+PASSED bookmarks/tests/test_exporter.py::ExporterTestCase::test_escape_html
+PASSED bookmarks/tests/test_exporter.py::ExporterTestCase::test_export_bookmarks
+PASSED bookmarks/tests/test_exporter.py::ExporterTestCase::test_handle_empty_values
+PASSED bookmarks/tests/test_exporter_performance.py::ExporterPerformanceTestCase::test_export_max_queries
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_custom_provider_with_domain_param
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_custom_provider_with_url_param
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_guess_file_extension
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon_caches_icons
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon_creates_folder_if_not_exists
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon_creates_multiple_icons_for_different_base_url
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon_creates_single_icon_for_same_base_url
+PASSED bookmarks/tests/test_favicon_loader.py::FaviconLoaderTestCase::test_load_favicon_updates_stale_icon
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_all_metadata
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_all_returns_404_for_unknown_feed_token
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_all_returns_all_unarchived_bookmarks
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_all_returns_only_user_owned_bookmarks
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_all_with_query
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_public_shared_does_not_require_auth
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_public_shared_metadata
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_public_shared_returns_publicly_shared_bookmarks_only
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_public_shared_with_query
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_sanitize_with_none_text
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_shared_metadata
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_shared_returns_404_for_unknown_feed_token
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_shared_returns_shared_bookmarks_only
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_shared_with_query
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_strip_control_characters
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_unread_metadata
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_unread_returns_404_for_unknown_feed_token
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_unread_returns_only_user_owned_bookmarks
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_unread_returns_unread_and_unarchived_bookmarks
+PASSED bookmarks/tests/test_feeds.py::FeedsTestCase::test_unread_with_query
+PASSED bookmarks/tests/test_feeds_performance.py::FeedsPerformanceTestCase::test_all_max_queries
+PASSED bookmarks/tests/test_health_view.py::HealthViewTestCase::test_health_healthy
+PASSED bookmarks/tests/test_health_view.py::HealthViewTestCase::test_health_unhealhty
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_archived_state
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_create_missing_tags
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_create_missing_tags_does_not_duplicate_tags
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_import
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_import_invalid_bookmark_does_not_associate_tags
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_import_tags
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_import_with_some_invalid_bookmarks
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_keep_description_if_imported_bookmark_has_empty_description
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_keep_title_if_imported_bookmark_has_empty_title
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_notes
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_private_flag
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_replace_whitespace_in_tag_names
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_schedule_favicon_loading
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_schedule_snapshot_creation
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_should_append_tags_to_bookmark_when_reimporting_with_different_tags
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_synchronize
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_use_current_date_when_no_add_date
+PASSED bookmarks/tests/test_importer.py::ImporterTestCase::test_validate_empty_or_missing_bookmark_url
+PASSED bookmarks/tests/test_login_view.py::LoginViewTestCase::test_should_not_show_oidc_login_by_default
+PASSED bookmarks/tests/test_login_view.py::LoginViewTestCase::test_should_show_oidc_login_when_enabled
+PASSED bookmarks/tests/test_metadata_view.py::MetadataViewTestCase::test_default_manifest
+PASSED bookmarks/tests/test_metadata_view.py::MetadataViewTestCase::test_manifest_respects_context_path
+PASSED bookmarks/tests/test_monolith_service.py::MonolithServiceTestCase::test_create_snapshot
+PASSED bookmarks/tests/test_monolith_service.py::MonolithServiceTestCase::test_create_snapshot_failure
+PASSED bookmarks/tests/test_nav_menu.py::NavMenuTestCase::test_should_respect_share_profile_setting
+PASSED bookmarks/tests/test_oidc_support.py::OidcSupportTest::test_default_settings
+PASSED bookmarks/tests/test_oidc_support.py::OidcSupportTest::test_should_add_oidc_authentication_backend_when_enabled
+PASSED bookmarks/tests/test_oidc_support.py::OidcSupportTest::test_should_add_oidc_urls_when_enabled
+PASSED bookmarks/tests/test_oidc_support.py::OidcSupportTest::test_should_not_add_oidc_authentication_backend_by_default
+PASSED bookmarks/tests/test_oidc_support.py::OidcSupportTest::test_should_not_add_oidc_urls_by_default
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_next_disabled_on_last_page
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_next_enabled_before_last_page
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_previous_disabled_on_page_1
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_previous_enabled_after_page_1
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_respects_search_parameters
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_truncate_pages_middle
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_truncate_pages_near_end
+PASSED bookmarks/tests/test_pagination_tag.py::PaginationTagTest::test_truncate_pages_start
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_description_tag_before_anchor_tag
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_empty_title
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_no_bookmarks
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_notes
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_parse_bookmarks
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_private_flag
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_reset_properties_after_adding_bookmark
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_unescape_content
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_with_closing_description_tag
+PASSED bookmarks/tests/test_parser.py::ParserTestCase::test_with_folders
+PASSED bookmarks/tests/test_password_change_view.py::PasswordChangeViewTestCase::test_change_password
+PASSED bookmarks/tests/test_password_change_view.py::PasswordChangeViewTestCase::test_change_password_done
+PASSED bookmarks/tests/test_password_change_view.py::PasswordChangeViewTestCase::test_should_return_error_for_invalid_old_password
+PASSED bookmarks/tests/test_password_change_view.py::PasswordChangeViewTestCase::test_should_return_error_for_mismatching_new_password
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmark_tags_should_only_return_user_owned_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmark_tags_should_return_distinct_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmark_tags_should_return_tags_for_archived_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmark_tags_untagged_should_never_return_any_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_should_not_return_unarchived_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_should_only_return_user_owned_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_unread_should_return_unread_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_untagged_should_be_combinable_with_search_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_untagged_should_not_be_combinable_with_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_archived_bookmarks_untagged_should_return_untagged_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_filter_shared
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_filter_unread
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_in_lax_mode_should_search_tags_as_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_in_strict_mode_should_not_search_tags_as_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_only_return_user_owned_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_return_all_tags_for_empty_query
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_return_distinct_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_return_no_matches
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_return_tags_for_unarchived_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_multiple_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_multiple_tags_ignoring_casing
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_multiple_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_single_tag
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_single_term
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_should_search_term_and_tag_combined
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmark_tags_untagged_should_never_return_any_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_filter_shared
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_in_lax_mode_should_search_tags_as_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_in_strict_mode_should_not_search_tags_as_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_not_return_archived_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_only_return_user_owned_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_return_all_for_empty_query
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_return_no_matches
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_multiple_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_multiple_tags_ignoring_casing
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_multiple_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_single_tag
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_single_term
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_should_search_terms_and_tags_combined
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_unread_should_return_unread_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_untagged_should_be_combinable_with_search_terms
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_untagged_should_not_be_combinable_with_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_bookmarks_untagged_should_return_untagged_bookmarks_only
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_publicly_shared_bookmark_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_publicly_shared_bookmark_users
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_publicly_shared_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_shared_bookmark_tags
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_shared_bookmark_users
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_query_shared_bookmarks
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_sort_by_title_asc
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_sort_by_title_desc
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_sorty_by_date_added_asc
+PASSED bookmarks/tests/test_queries.py::QueriesTestCase::test_sorty_by_date_added_desc
+PASSED bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_check_authentication
+PASSED bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_export_successfully
+PASSED bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_only_export_user_bookmarks
+PASSED bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_show_hint_when_export_raises_error
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_about_shows_version_info
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_automatic_html_snapshots_should_be_hidden_when_snapshots_not_supported
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_automatic_html_snapshots_should_be_visible_when_snapshots_supported
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_enable_favicons_should_schedule_icon_update
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_get_version_info_handles_invalid_response
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_get_version_info_just_displays_latest_when_versions_are_equal
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_get_version_info_shows_latest_version_when_versions_are_not_equal
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_get_version_info_silently_ignores_request_errors
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_refresh_favicons
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_refresh_favicons_should_be_visible_when_favicons_enabled_in_profile
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_refresh_favicons_should_not_be_called_without_respective_form_action
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_refresh_favicons_should_not_be_visible_when_disabled
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_refresh_favicons_should_not_be_visible_when_favicons_disabled_in_profile
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_should_check_authentication
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_should_render_successfully
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_update_profile
+PASSED bookmarks/tests/test_settings_general_view.py::SettingsGeneralViewTestCase::test_update_profile_should_not_be_called_without_respective_form_action
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_check_authentication
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_import_successfully
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_respect_map_private_flag_option
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_show_hint_if_import_raises_exception
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_show_hint_if_there_is_no_file
+PASSED bookmarks/tests/test_settings_import_view.py::SettingsImportViewTestCase::test_should_show_respective_hints_if_not_all_bookmarks_were_imported_successfully
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_check_authentication
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_display_feed_urls
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_generate_api_token_if_not_exists
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_generate_feed_token_if_not_exists
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_not_generate_api_token_if_exists
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_not_generate_feed_token_if_exists
+PASSED bookmarks/tests/test_settings_integrations_view.py::SettingsIntegrationsViewTestCase::test_should_render_successfully
+PASSED bookmarks/tests/test_signals.py::SignalsTestCase::test_login_should_schedule_snapshot_creation
+PASSED bookmarks/tests/test_singlefile_service.py::SingleFileServiceTestCase::test_create_snapshot
+PASSED bookmarks/tests/test_singlefile_service.py::SingleFileServiceTestCase::test_create_snapshot_failure
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_cjk_using_single_group
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_group_alphabetically
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_no_duplicate_selected_tags
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_no_duplicate_tag_names
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tag_url_keeps_other_query_terms
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tag_url_respects_search_options
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tags
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tags_are_excluded_from_groups
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tags_ignore_casing_when_removing_query_part
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_selected_tags_with_lax_tag_search
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_tag_url_respects_search_options
+PASSED bookmarks/tests/test_tag_cloud_template.py::TagCloudTemplateTest::test_with_anonymous_user
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_deduplicates_tag_names
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_handles_duplicate_separators
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_handles_invalid_input
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_handles_whitespace
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_orders_tag_names_alphabetically
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_replaces_whitespace_within_names
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_respects_separator
+PASSED bookmarks/tests/test_tags_model.py::TagTestCase::test_parse_tag_string_returns_list_of_tag_names
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tag_should_create_new_tag
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tag_should_handle_legacy_dbs_with_existing_duplicates
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tag_should_ignore_casing_when_looking_for_existing_tag
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tag_should_return_existing_tag
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tags_should_deduplicate_tags
+PASSED bookmarks/tests/test_tags_service.py::TagServiceTestCase::test_get_or_create_tags_should_return_tags
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_acknowledge_toast
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_acknowledge_toast_should_not_acknowledge_other_users_toast
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_acknowledge_toast_should_redirect_to_index_by_default
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_acknowledge_toast_should_redirect_to_return_url
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_form_tag
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_should_not_render_acknowledged_toasts
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_should_not_render_toasts_of_other_users
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_should_render_unacknowledged_toasts
+PASSED bookmarks/tests/test_toasts_view.py::ToastsViewTestCase::test_toast_content
+PASSED bookmarks/tests/test_user_profile_model.py::UserProfileTestCase::test_bookmark_sharing_is_disabled_by_default
+PASSED bookmarks/tests/test_user_profile_model.py::UserProfileTestCase::test_create_user_should_init_profile
+PASSED bookmarks/tests/test_user_select_tag.py::UserSelectTagTest::test_empty_option
+PASSED bookmarks/tests/test_user_select_tag.py::UserSelectTagTest::test_hidden_inputs
+PASSED bookmarks/tests/test_user_select_tag.py::UserSelectTagTest::test_preselect_user_option
+PASSED bookmarks/tests/test_user_select_tag.py::UserSelectTagTest::test_render_user_options
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_humanize_absolute_date
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_humanize_absolute_date_should_use_current_date_as_default
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_humanize_relative_date
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_humanize_relative_date_should_use_current_date_as_default
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_parse_timestamp_fails_for_invalid_timestamps
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_parse_timestamp_fails_for_out_of_range_timestamp
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_parse_timestamp_parses_microsecond_timestamps
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_parse_timestamp_parses_millisecond_timestamps
+PASSED bookmarks/tests/test_utils.py::UtilsTestCase::test_parse_timestamp_parses_nanosecond_timestamps
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_page_limits_large_documents
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_page_removes_bytes_after_end_of_head
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_page_returns_content
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_page_stops_reading_at_end_of_head
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_website_metadata
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_website_metadata_prefers_description_over_og_description
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_website_metadata_trims_title_and_description
+PASSED bookmarks/tests/test_website_loader.py::WebsiteLoaderTestCase::test_load_website_metadata_using_og_description
+PASSED bookmarks/tests/test_bookmark_archived_view_performance.py::BookmarkArchivedViewPerformanceTestCase::test_should_not_increase_number_of_queries_per_bookmark
+PASSED bookmarks/tests/test_bookmark_index_view_performance.py::BookmarkIndexViewPerformanceTestCase::test_should_not_increase_number_of_queries_per_bookmark
+PASSED bookmarks/tests/test_bookmark_shared_view_performance.py::BookmarkSharedViewPerformanceTestCase::test_should_not_increase_number_of_queries_per_bookmark
+FAILED bookmarks/tests/test_bookmarks_tasks.py::BookmarkTasksTestCase::test_create_html_snapshot_truncate_filename
+============ 1 failed, 679 passed, 19 warnings in 518.04s (0:08:38) ============

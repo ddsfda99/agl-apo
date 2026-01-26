@@ -1,0 +1,120 @@
+You are an expert engineer tasked with fixing a pagination keyword mismatch bug and ensuring tests pass. Carefully follow the steps below. Do not commit your changes; leave the working tree modified so we can commit later.
+
+Context and bug summary
+- Reported error: "Error executing tool search: SearchMixin.search_issues() got an unexpected keyword argument 'start_at'".
+- Cause: The server tool layer (src/mcp_atlassian/servers/jira.py) calls JiraFetcher methods with keyword start_at while the underlying mixins and fetchers use parameter name start.
+- Impact: Calling jira_search and other paginated tools raises unexpected keyword argument errors against real fetcher implementations.
+
+Goal
+- Preserve the public server tool API that exposes start_at.
+- Add backward-compatible support in the fetcher and mixins to accept start_at and map it to start internally, avoiding changes to the server layer and its unit tests.
+- Add a reproduction unit test to guard against regression.
+- Run the test suite and fix any fallout.
+
+High-level plan
+1) Write a small reproduction unit test to assert that passing start_at into SearchMixin.search_issues works and maps correctly to the underlying Jira client call which expects start.
+2) Search for all server tools that pass start_at and confirm their corresponding fetcher or mixin methods. Identify any other mismatches beyond search_issues and address them similarly, including the boards method name mismatch.
+3) Implement compatibility at the mixin and fetcher layers: Update affected methods to accept start_at and map it to start internally, then pass start=effective_start to the Jira client.
+4) Run pytest. If additional mismatches surface in boards, sprints, projects, or issue retrieval methods, apply the same start_at compatibility fix to those methods. Iterate until tests pass.
+5) Clean up any temporary test files created for debugging and keep only the final reproduction test.
+
+Detailed steps
+
+Step 1: Reproduction test
+- Create a new unit test that uses a minimal dummy Jira client and the SearchMixin directly to reproduce the reported error and validate the fix.
+- New file: tests/unit/jira/test_start_at_compat.py
+- Implement a dummy Jira client with a method signature similar to the real client’s jql method that accepts start and limit and records the start value it receives.
+- Implement a minimal class that inherits from SearchMixin and sets self.jira to the dummy client instance.
+- Call fetcher.search_issues("assignee = currentUser()", start_at=30, limit=5) and assert that the dummy client’s recorded start equals 30 and no exception is raised.
+
+Guided content for the test file:
+- Define class DummyJira with:
+  - An attribute last_start initialized to None
+  - A method jql(jql, fields=None, start=0, limit=50, validate_query=True) that sets self.last_start = start and returns a minimal structure, for example a dict with issues as an empty list.
+- Define class DummyFetcher(SearchMixin) whose __init__ sets self.jira = dummy_client.
+- In the test function:
+  - Instantiate dummy = DummyJira() and fetcher = DummyFetcher(dummy)
+  - Call fetcher.search_issues("assignee = currentUser()", start_at=30, limit=5)
+  - Assert dummy.last_start == 30
+
+This test should fail pre-fix with the unexpected keyword error and pass once the compatibility is implemented with correct start mapping.
+
+Step 2: Locate all mismatches
+- Search in the server layer: grep or ripgrep for start_at= in src/mcp_atlassian/servers/jira.py and note all tools that pass start_at to the fetcher. Expected offenders include:
+  - search
+  - get_project_issues
+  - get_agile_boards
+  - get_board_issues
+  - get_sprints_from_board
+  - get_sprint_issues
+- For each, find the corresponding fetcher or mixin method that receives the call. Confirm that their current parameter names use start and not start_at.
+- Critical: Fix the boards method naming mismatch. The server calls fetcher.get_boards(...), but the boards mixin typically provides methods named get_all_agile_boards or similar. Add a get_boards wrapper method on the fetcher path so server calls succeed without changing server code.
+
+Step 3: Implement compatibility at the mixin and fetcher level
+- For each affected method that currently accepts start, update the signature to also accept start_at with a default of None.
+- Compute the effective start as:
+  - effective_start = start_at if start_at is not None else start
+- Pass effective_start to the underlying Jira client using the start keyword argument.
+- Maintain original parameter ordering. Add start_at at the end of the parameter list to avoid breaking callers.
+- Typing: Use int | None if the module already uses Python 3.11 union syntax, otherwise use Optional[int] to match the file’s style.
+- If both start and start_at are provided, prefer start_at.
+
+Apply the above to at least the following methods and any others you find that page results:
+- src/mcp_atlassian/jira/search.py:
+  - search_issues(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and call self.jira.jql(..., start=effective_start, limit=limit, ...)
+  - get_board_issues(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and call self.jira.get_issues_for_board(..., start=effective_start, limit=limit, ...)
+  - get_sprint_issues(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and call self.jira.get_sprint_issues(..., start=effective_start, limit=limit, ...)
+  - Optionally: get_epic_issues add start_at similarly and map to start for internal calls. Even if the server maps start_at to start for epic issues, adding this keeps consistency and future-proofs the API.
+- src/mcp_atlassian/jira/projects.py:
+  - get_project_issues(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and pass start=effective_start when delegating to search_issues or the Jira client
+- src/mcp_atlassian/jira/boards.py:
+  - get_all_agile_boards(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and call the Jira client with start=effective_start
+  - Add a wrapper method get_boards that the server expects if it does not already exist:
+    - def get_boards(self, board_name=None, project_key=None, board_type=None, start: int = 0, limit: int = 50, start_at: int | None = None):
+      - Compute effective_start
+      - Return self.get_all_agile_boards(board_name=board_name, project_key=project_key, board_type=board_type, start=effective_start, limit=limit)
+  - Ensure JiraFetcher inherits this method so fetcher.get_boards exists for the server tool to call.
+- src/mcp_atlassian/jira/sprints.py:
+  - get_all_sprints_from_board(..., start: int = 0, limit: int = 50, ..., start_at: int | None = None)
+    - Compute effective_start and call the Jira client with start=effective_start
+- src/mcp_atlassian/jira/fetcher.py if present:
+  - If JiraFetcher defines wrapper methods for any of the above, ensure their signatures also accept start_at and forward effective_start to the mixins.
+  - If JiraFetcher does not currently expose get_boards but the server calls it, add get_boards here instead of or in addition to the mixin implementation, delegating to the mixin method and mapping start_at to start.
+
+Implementation notes:
+- Do not change the server code under src/mcp_atlassian/servers.
+- Keep the default behavior unchanged when start_at is not provided.
+- Parameter order matters; add start_at to the end of parameter lists.
+- Respect typing conventions per file. Use int | None or Optional[int] consistent with existing style.
+
+Step 4: Run the tests and iterate
+- Run: pytest -q
+- The new test tests/unit/jira/test_start_at_compat.py must pass and should confirm that start_at is accepted and mapped to start correctly.
+- If additional tests fail due to similar mismatches in boards, sprints, projects, or issues retrieval, apply the same start_at compatibility pattern to those methods, then rerun pytest until all tests pass.
+
+Step 5: Clean up
+- Keep the new reproduction test as part of the suite. It guards against regression of this bug.
+- Remove any temporary or exploratory files you created during debugging.
+- Ensure code passes type checks and lints if the repo uses them.
+
+Acceptance criteria
+- Calling the jira_search tool with start_at no longer raises unexpected keyword argument errors.
+- Pagination semantics are correct: when start_at is provided, the underlying Jira client receives that value via the start parameter.
+- The new unit test for SearchMixin.start_at mapping passes.
+- Existing tests continue to pass without modifying server-layer code.
+- The get_agile_boards server tool works by virtue of fetcher.get_boards existing and accepting start_at, and it correctly maps to start internally.
+
+Hints and verification
+- To quickly locate all areas that need compatibility updates, search for methods that call the Jira client with start= in src/mcp_atlassian/jira and update those signatures to accept start_at with mapping.
+- Also grep for def get_*issues, def get_*boards, and def get_*sprints to ensure you didn’t miss any pagination-capable methods.
+- Specifically verify that:
+  - SearchMixin.search_issues accepts start_at and maps it.
+  - ProjectsMixin.get_project_issues accepts start_at and maps it.
+  - Boards mixin or JiraFetcher provides get_boards with start_at mapping, resolving the naming mismatch with get_all_agile_boards.
+  - Sprints-related methods accept start_at and map it.
+- Do not commit your edits. Leave the working tree modified for later commit.

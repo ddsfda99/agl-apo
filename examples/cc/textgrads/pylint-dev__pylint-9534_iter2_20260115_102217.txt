@@ -1,0 +1,150 @@
+Here’s what went wrong with the coding agent’s attempt and how to fix it thoroughly.
+
+What the bug is about
+- In codebases that use six for cross-version compatibility, it’s common to write conditional imports such as:
+  - if six.PY3: from urllib.parse import urlparse
+  - else: from urlparse import urlparse
+- Pylint should not report import errors or no-name-in-module for imports inside a branch that is guarded by a version flag which is not true for the current runtime.
+- The historic issue you referenced showed Pylint on Python 2 erroneously inspecting the Python 3 branch under six.PY3 and flagging “No name 'parse' in module 'urllib'”.
+
+Why the agent failed
+- It did not write any test cases to reproduce the bug.
+- It did not run the test suite to verify behavior.
+- It identified the relevant checker (pylint/checkers/variables.py) and the guard helper function (is_sys_guard in pylint/checkers/utils.py), but did not implement any code change for six.PY2/PY3 guards.
+- It did not follow the requested workflow: write tests, locate bug, fix, run tests, iterate, and finally delete test files.
+
+Where the bug is in the codebase
+- The messages “no-name-in-module” are emitted from pylint/checkers/variables.py:
+  - visit_import and visit_importfrom unconditionally analyze import statements unless they are in guarded blocks.
+  - They currently skip checking imports in guards detected by:
+    - in_type_checking_block(node) (typing.TYPE_CHECKING)
+    - is_sys_guard(node.parent) (sys.version_info guards)
+  - There is no analogous detection for six.PY2/six.PY3 guards.
+
+- ImportError handling is in pylint/checkers/imports.py, function _ignore_import_failure:
+  - It also ignores failures under TYPE_CHECKING and sys.version_info guards.
+  - It does not ignore under six.PY2/PY3 guards either, so conditional imports can still trip import-error or cascade to no-name-in-module.
+
+What needs to be implemented
+- A guard detection function for six version flags, similar in spirit to is_sys_guard.
+- Use that detection in:
+  - variables.visit_import
+  - variables.visit_importfrom
+  - imports._ignore_import_failure
+- This ensures Pylint won’t check or flag imports in a branch guarded by six.PY2 or six.PY3, just like it already does for sys.version_info and TYPE_CHECKING.
+
+Proposed changes (concrete guidance)
+
+1) Add a new utility in pylint/checkers/utils.py:
+
+- Create a function is_six_guard(node: nodes.If) -> bool that returns True if the if statement test is a six version flag.
+- Minimal and robust implementation should detect common forms:
+  - if six.PY3:
+  - if six.PY2:
+  - optionally handle unary “not six.PY3” if desired.
+
+Example implementation:
+
+- In pylint/checkers/utils.py, after is_sys_guard:
+
+  def is_six_guard(node: nodes.If) -> bool:
+      """Return True if IF stmt is guarded by six.PY2 or six.PY3."""
+      test = node.test
+      # Handle simple `if six.PY3:` or `if six.PY2:`
+      if isinstance(test, nodes.Attribute) and test.attrname in ("PY2", "PY3"):
+          return True
+      # Handle `if not six.PY3:` or `if not six.PY2:`
+      if isinstance(test, nodes.UnaryOp) and test.op == "not":
+          operand = test.operand
+          if isinstance(operand, nodes.Attribute) and operand.attrname in ("PY2", "PY3"):
+              return True
+      return False
+
+Notes:
+- This is syntactic detection; it doesn’t force six to be installed. It will match even if six is shadowed or not importable, which is acceptable for guard detection.
+
+2) Use the new guard in variables.py:
+
+- At the top imports where is_sys_guard is imported, also import is_six_guard:
+
+  from pylint.checkers.utils import is_sys_guard, is_six_guard
+
+- In visit_import (around lines ~2038–2045), change:
+
+  if isinstance(node.parent, nodes.If) and is_sys_guard(node.parent):
+      return
+
+  to:
+
+  if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+      return
+
+- In visit_importfrom (around lines ~2061–2066), change similarly:
+
+  if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+      return
+
+This skips no-name-in-module checks for conditional imports in six.PY guards.
+
+3) Use the new guard in imports.py:
+
+- At the top where is_sys_guard is imported, also import is_six_guard:
+
+  from pylint.checkers.utils import is_sys_guard, is_six_guard
+
+- In _ignore_import_failure (around lines ~148–154), change:
+
+  if isinstance(node.parent, nodes.If) and is_sys_guard(node.parent):
+      return True
+
+  to:
+
+  if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+      return True
+
+This ensures import-error is ignored under six guards, harmonizing behavior with sys.version_info and TYPE_CHECKING.
+
+Tests to reproduce (and later delete)
+- Add a functional test that exercises a false branch under six guard containing an invalid import expected to be ignored.
+- Avoid a dependency on the six package; you can emulate the flag by defining a local class named six with PY3/PY2 attributes.
+
+Create tests/functional/s/six/six_guard_import.py with content:
+
+- Disable unused-import just to avoid noise.
+- Define a local six class with PY3=True and PY2=False.
+- Put a guarded invalid import in the false branch (which would otherwise trigger no-name-in-module).
+- Put a valid import in the true branch.
+
+Example:
+
+  # pylint: disable=unused-import
+  class six:
+      PY3 = True
+      PY2 = False
+
+  if six.PY2:
+      from sys import stdoout  # would be [no-name-in-module] without guard handling
+  else:
+      from sys import stdout
+
+- With the current code (no is_six_guard), Pylint will still inspect the false branch and flag no-name-in-module on stdoout.
+- After the fix, Pylint should not inspect the false branch, and no message should be produced.
+
+Run the tests:
+- Execute the functional test suite to verify the new test fails before the fix and passes after the fix.
+- Ensure no regressions in related tests (e.g., sys version guard and TYPE_CHECKING behavior).
+
+Finally, delete the test files you added (per the instructions).
+
+Potential edge cases and considerations
+- Some projects use six.PY3 with negation or comparisons; the minimal implementation covers direct attribute and “not six.PY3”. If needed, extend to comparisons like “if six.PY3 is True:” by unwrapping nodes.Compare and looking for an Attribute on the left with attrname in ("PY2", "PY3").
+- Aliases like “import six as s; if s.PY3” won’t be recognized by a strict check for the name “six”. To be more flexible, the implementation above checks only the attribute name (“PY2”, “PY3”), not the base name. This reduces false negatives and should be safe given these attribute names are unlikely to clash elsewhere.
+- Consistency: apply the guard in both the variables checker (emitting no-name-in-module) and the imports checker (ignoring import-error) so conditional imports behave uniformly.
+
+Summary of improvements over the agent’s attempt
+- Provide a clear, targeted fix by introducing is_six_guard and using it where Pylint currently recognizes guards.
+- Include a robust, dependency-free functional test to reproduce the issue.
+- Describe how to run tests and ensure they pass.
+- Align behavior with existing guard handling for sys.version_info and TYPE_CHECKING.
+
+Following these steps will make the coding agent pass the tests and properly handle conditional imports guarded by six.PY2/six.PY3.

@@ -1,0 +1,115 @@
+diff --git a/src/cfnlint/template/transforms/_language_extensions.py b/src/cfnlint/template/transforms/_language_extensions.py
+index e1e685022..5b62292fc 100644
+--- a/src/cfnlint/template/transforms/_language_extensions.py
++++ b/src/cfnlint/template/transforms/_language_extensions.py
+@@ -126,7 +126,7 @@ class _Transform:
+                     # only translate the foreach if its valid
+                     foreach = _ForEach(k, v, self._collections)
+                     # get the values will flatten the foreach
+-                    for collection_value in foreach.items(cfn):
++                    for collection_value in foreach.items(cfn, params):
+                         flattened = self._walk(
+                             v[2], {**params, **{v[0]: collection_value}}, cfn
+                         )
+@@ -523,12 +523,14 @@ class _ForEachCollection:
+         raise _TypeError("Collection must be a list or an object", obj)
+ 
+     def values(
+-        self, cfn: Any, collection_cache: MutableMapping[str, Any]
++        self, cfn: Any, collection_cache: MutableMapping[str, Any], params: Mapping[str, Any] | None = None
+     ) -> Iterator[str | dict[Any, Any]]:
++        if params is None:
++            params = {}
+         if self._collection:
+             for item in self._collection:
+                 try:
+-                    yield item.value(cfn, {}, False)
++                    yield item.value(cfn, params, False)
+                 except _ResolveError:
+                     v = "".join(random.choices(string.ascii_letters, k=_N))  # nosec
+                     collection_cache[item.hash] = v
+@@ -536,7 +538,7 @@ class _ForEachCollection:
+             return
+         if self._fn:
+             try:
+-                values = self._fn.value(cfn, {}, False)
++                values = self._fn.value(cfn, params, False)
+                 if values is not None:
+                     if isinstance(values, list):
+                         for value in values:
+@@ -594,6 +596,6 @@ class _ForEach:
+         self._collection = _ForEachCollection(value[1])
+         self._output = _ForEachOutput(value[2])
+ 
+-    def items(self, cfn: Any) -> Iterator[str | dict[str, str]]:
+-        items = self._collection.values(cfn, self._collection_cache)
++    def items(self, cfn: Any, params: Mapping[str, Any] | None = None) -> Iterator[str | dict[str, str]]:
++        items = self._collection.values(cfn, self._collection_cache, params)
+         yield from iter(items)
+diff --git a/test/unit/module/template/transforms/test_language_extensions.py b/test/unit/module/template/transforms/test_language_extensions.py
+index a1829d72f..ca2bed14e 100644
+--- a/test/unit/module/template/transforms/test_language_extensions.py
++++ b/test/unit/module/template/transforms/test_language_extensions.py
+@@ -1159,3 +1159,62 @@ class TestTransformValueOneEmpty(TestCase):
+                 self.result,
+                 template,
+             )
++
++
++class TestNestedForEachDependsOnOuter(TestCase):
++    def setUp(self) -> None:
++        # Template where inner collection depends on outer identifier via Ref
++        self.template_obj = convert_dict(
++            {
++                "Transform": ["AWS::LanguageExtensions"],
++                "Mappings": {
++                    "GroupToIds": {
++                        "Group1": {"Items": ["1", "2"]},
++                        "Group2": {"Items": ["3"]},
++                    }
++                },
++                "Conditions": {
++                    "ShouldCreateBucket3": {"Fn::Equals": ["3", "3"]}
++                },
++                "Resources": {
++                    "Fn::ForEach::Groups": [
++                        "Group",
++                        ["Group1", "Group2"],
++                        {
++                            "Fn::ForEach::Buckets": [
++                                "BucketId",
++                                {
++                                    "Fn::FindInMap": [
++                                        "GroupToIds",
++                                        {"Ref": "Group"},
++                                        "Items",
++                                    ]
++                                },
++                                {
++                                    "BucketGroup${Group}Bucket${BucketId}": {
++                                        "Type": "AWS::S3::Bucket",
++                                        "Condition": "ShouldCreateBucket3",
++                                        "Properties": {
++                                            "BucketName": {
++                                                "Fn::Sub": "bucket-${Group}-${BucketId}-${AWS::Region}"
++                                            }
++                                        },
++                                    }
++                                },
++                            ]
++                        },
++                    ]
++                },
++            }
++        )
++
++    def test_transform_nested_depends_on_outer(self):
++        cfn = Template(filename="", template=self.template_obj, regions=["us-east-2"])
++        matches, template = language_extension(cfn)
++        self.assertListEqual(matches, [])
++        resources = template.get("Resources", {})
++        self.assertIn("BucketGroupGroup2Bucket3", resources)
++        self.assertEqual(
++            resources["BucketGroupGroup2Bucket3"].get("Condition"),
++            "ShouldCreateBucket3",
++        )

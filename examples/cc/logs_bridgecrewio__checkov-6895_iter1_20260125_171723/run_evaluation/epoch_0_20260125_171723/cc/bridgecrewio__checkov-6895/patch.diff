@@ -1,0 +1,353 @@
+diff --git a/checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py b/checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py
+index 5b4bf0173..ad68d2710 100644
+--- a/checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py
++++ b/checkov/terraform/checks/resource/azure/MariaDBGeoBackupEnabled.py
+@@ -1,4 +1,6 @@
+-from checkov.common.models.enums import CheckCategories
++from typing import Any, Optional, List
++
++from checkov.common.models.enums import CheckCategories, CheckResult
+ from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
+ 
+ 
+@@ -6,12 +8,49 @@ class MariaDBGeoBackupEnabled(BaseResourceValueCheck):
+     def __init__(self) -> None:
+         name = "Ensure that MariaDB server enables geo-redundant backups"
+         id = "CKV_AZURE_129"
+-        supported_resources = ("azurerm_mariadb_server",)
++        supported_resources = ("azurerm_mariadb_server", "azurerm_mariadb_flexible_server")
+         categories = (CheckCategories.BACKUP_AND_RECOVERY,)
+         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
+ 
+     def get_inspected_key(self) -> str:
+         return "geo_redundant_backup_enabled"
+ 
++    def _extract_str(self, val: Any) -> Optional[str]:
++        v = None
++        if isinstance(val, list) and val:
++            v = val[0]
++        else:
++            v = val
++        return v if isinstance(v, str) else None
++
++    def _is_unresolved_reference(self, s: str) -> bool:
++        if not isinstance(s, str):
++            return True
++        s_strip = s.strip()
++        if s_strip.startswith("var.") or s_strip.startswith("local.") or s_strip.startswith("module."):
++            return True
++        if "${" in s_strip:
++            return True
++        return False
++
++    def scan_resource_conf(self, conf):
++        resource_type = conf.get('__resource_type__')
++        if resource_type == 'azurerm_mariadb_flexible_server' or resource_type is None:
++            raw_mode = conf.get("create_mode")
++            s = self._extract_str(raw_mode)
++            if s is not None:
++                s_norm = s.strip().lower()
++                if s_norm == "replica":
++                    return CheckResult.UNKNOWN
++                if self._is_unresolved_reference(s):
++                    return CheckResult.UNKNOWN
++            else:
++                if raw_mode is not None:
++                    return CheckResult.UNKNOWN
++        return super().scan_resource_conf(conf)
++
++    def get_evaluated_keys(self) -> List[str]:
++        return ["create_mode", self.get_inspected_key()]
++
+ 
+ check = MariaDBGeoBackupEnabled()
+diff --git a/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py b/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
+index 594b2d712..d0766fcb0 100644
+--- a/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
++++ b/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
+@@ -1,4 +1,6 @@
+-from checkov.common.models.enums import CheckCategories
++from typing import Any, Optional
++
++from checkov.common.models.enums import CheckCategories, CheckResult
+ from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
+ 
+ 
+@@ -13,5 +15,43 @@ class MySQLGeoBackupEnabled(BaseResourceValueCheck):
+     def get_inspected_key(self) -> str:
+         return 'geo_redundant_backup_enabled'
+ 
++    def _extract_str(self, val: Any) -> Optional[str]:
++        v = None
++        if isinstance(val, list) and val:
++            v = val[0]
++        else:
++            v = val
++        return v if isinstance(v, str) else None
++
++    def _is_unresolved_reference(self, s: str) -> bool:
++        if not isinstance(s, str):
++            return True
++        s_strip = s.strip()
++        if s_strip.startswith("var.") or s_strip.startswith("local.") or s_strip.startswith("module."):
++            return True
++        if "${" in s_strip:
++            return True
++        return False
++
++    def scan_resource_conf(self, conf):
++        # Only apply replica handling to flexible server
++        resource_type = conf.get('__resource_type__')
++        if resource_type == 'azurerm_mysql_flexible_server' or resource_type is None:
++            raw_mode = conf.get("create_mode")
++            s = self._extract_str(raw_mode)
++            if s is not None:
++                s_norm = s.strip().lower()
++                if s_norm == "replica":
++                    return CheckResult.UNKNOWN
++                if self._is_unresolved_reference(s):
++                    return CheckResult.UNKNOWN
++            else:
++                if raw_mode is not None:
++                    return CheckResult.UNKNOWN
++        return super().scan_resource_conf(conf)
++
++    def get_evaluated_keys(self) -> list[str]:
++        return ["create_mode", self.get_inspected_key()]
++
+ 
+ check = MySQLGeoBackupEnabled()
+diff --git a/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py b/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
+index c8ffbceb7..00693dfc2 100644
+--- a/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
++++ b/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
+@@ -1,4 +1,6 @@
+-from checkov.common.models.enums import CheckCategories
++from typing import Any, Optional, List
++
++from checkov.common.models.enums import CheckCategories, CheckResult
+ from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
+ 
+ 
+@@ -13,5 +15,44 @@ class PostgreSQLFlexiServerGeoBackupEnabled(BaseResourceValueCheck):
+     def get_inspected_key(self):
+         return 'geo_redundant_backup_enabled'
+ 
++    def _extract_str(self, val: Any) -> Optional[str]:
++        v = None
++        if isinstance(val, list) and val:
++            v = val[0]
++        else:
++            v = val
++        return v if isinstance(v, str) else None
++
++    def _is_unresolved_reference(self, s: str) -> bool:
++        if not isinstance(s, str):
++            return True
++        s_strip = s.strip()
++        # treat terraform style references as unresolved
++        if s_strip.startswith("var.") or s_strip.startswith("local.") or s_strip.startswith("module."):
++            return True
++        if "${" in s_strip:
++            return True
++        return False
++
++    def scan_resource_conf(self, conf):
++        # Special handling: replicas do not support geo-redundant backups
++        raw_mode = conf.get("create_mode")
++        s = self._extract_str(raw_mode)
++        if s is not None:
++            s_norm = s.strip().lower()
++            if s_norm == "replica":
++                return CheckResult.UNKNOWN
++            if self._is_unresolved_reference(s):
++                return CheckResult.UNKNOWN
++        else:
++            # if create_mode exists but can't be resolved to a string literal
++            if raw_mode is not None:
++                return CheckResult.UNKNOWN
++        return super().scan_resource_conf(conf)
++
++    def get_evaluated_keys(self) -> List[str]:
++        # include create_mode for better context
++        return ["create_mode", self.get_inspected_key()]
++
+ 
+ check = PostgreSQLFlexiServerGeoBackupEnabled()
+diff --git a/tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py b/tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+index ca4c4aee4..49e300277 100644
+--- a/tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
++++ b/tests/terraform/checks/resource/azure/test_MariaDBGeoBackupEnabled.py
+@@ -1,80 +1,46 @@
+ import unittest
++from pathlib import Path
+ 
+-import hcl2
+-
++from checkov.runner_filter import RunnerFilter
+ from checkov.terraform.checks.resource.azure.MariaDBGeoBackupEnabled import check
+-from checkov.common.models.enums import CheckResult
++from checkov.terraform.runner import Runner
+ 
+ 
+ class MariaDBGeoBackupEnabled(unittest.TestCase):
+ 
+-    def test_failure(self):
+-        hcl_res = hcl2.loads("""
+-            resource "azurerm_mariadb_server" "example" {
+-            name                = var.server_name
+-            location            = var.resource_group.location
+-            resource_group_name = var.resource_group.name
+-            administrator_login          = var.admin_login
+-            administrator_login_password = random_string.password.result
+-            sku_name   = "B_Gen5_2"
+-            storage_mb = 5120
+-            version    = "10.2"
+-            auto_grow_enabled             = true
+-            backup_retention_days         = 7
+-            geo_redundant_backup_enabled  = false
+-            public_network_access_enabled = true
+-            #test this i guess
+-            ssl_enforcement_enabled = false
++    def test(self):
++        # given
++        test_files_dir = Path(__file__).parent / "example_MariaDBGeoBackupEnabled"
++
++        # when
++        report = Runner().run(root_folder=str(test_files_dir), runner_filter=RunnerFilter(checks=[check.id]))
++
++        # then
++        summary = report.get_summary()
++
++        passing_resources = {
++            "azurerm_mariadb_server.pass",
+         }
+-                """)
+-        resource_conf = hcl_res['resource'][0]['azurerm_mariadb_server']['example']
+-        scan_result = check.scan_resource_conf(conf=resource_conf)
+-        self.assertEqual(CheckResult.FAILED, scan_result)
+-        
+-    def test_failure_empty(self):
+-        hcl_res = hcl2.loads("""
+-            resource "azurerm_mariadb_server" "example" {
+-            name                = var.server_name
+-            location            = var.resource_group.location
+-            resource_group_name = var.resource_group.name
+-            administrator_login          = var.admin_login
+-            administrator_login_password = random_string.password.result
+-            sku_name   = "B_Gen5_2"
+-            storage_mb = 5120
+-            version    = "10.2"
+-            auto_grow_enabled             = true
+-            backup_retention_days         = 7
+-            public_network_access_enabled = true
+-            #test this i guess
+-            ssl_enforcement_enabled = false
++        failing_resources = {
++            "azurerm_mariadb_server.fail",
+         }
+-                """)
+-        resource_conf = hcl_res['resource'][0]['azurerm_mariadb_server']['example']
+-        scan_result = check.scan_resource_conf(conf=resource_conf)
+-        self.assertEqual(CheckResult.FAILED, scan_result)
+-
+-    def test_success(self):
+-        hcl_res = hcl2.loads("""
+-        resource "azurerm_mariadb_server" "example" {
+-            name                = var.server_name
+-            location            = var.resource_group.location
+-            resource_group_name = var.resource_group.name
+-            administrator_login          = var.admin_login
+-            administrator_login_password = random_string.password.result
+-            sku_name   = "B_Gen5_2"
+-            storage_mb = 5120
+-            version    = "10.2"
+-            auto_grow_enabled             = true
+-            backup_retention_days         = 7
+-            geo_redundant_backup_enabled  = true
+-            public_network_access_enabled = false
+-            #test this i guess
+-            ssl_enforcement_enabled = true
++        unknown_resources = {
++            "azurerm_mariadb_flexible_server.replica",
+         }
+-                """)
+-        resource_conf = hcl_res['resource'][0]['azurerm_mariadb_server']['example']
+-        scan_result = check.scan_resource_conf(conf=resource_conf)
+-        self.assertEqual(CheckResult.PASSED, scan_result)
++
++        passed_check_resources = {c.resource for c in report.passed_checks}
++        failed_check_resources = {c.resource for c in report.failed_checks}
++        unknown_check_resources = {c.resource for c in report.unknown_checks}
++
++        self.assertEqual(summary["passed"], len(passing_resources))
++        self.assertEqual(summary["failed"], len(failing_resources))
++        self.assertEqual(summary["skipped"], 0)
++        self.assertEqual(summary["parsing_errors"], 0)
++        self.assertEqual(summary["unknown"], len(unknown_resources))
++
++        self.assertEqual(passing_resources, passed_check_resources)
++        self.assertEqual(failing_resources, failed_check_resources)
++        self.assertEqual(unknown_resources, unknown_check_resources)
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py b/tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+index acc611d44..713354936 100644
+--- a/tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
++++ b/tests/terraform/checks/resource/azure/test_MySQLGeoBackupEnabled.py
+@@ -27,17 +27,23 @@ class TestMySQLGeoBackupEnabled(unittest.TestCase):
+             "azurerm_mysql_server.fail",
+             "azurerm_mysql_server.fail2",
+         }
++        unknown_resources = {
++            "azurerm_mysql_flexible_server.replica",
++        }
+ 
+         passed_check_resources = {c.resource for c in report.passed_checks}
+         failed_check_resources = {c.resource for c in report.failed_checks}
++        unknown_check_resources = {c.resource for c in report.unknown_checks}
+ 
+         self.assertEqual(summary["passed"], len(passing_resources))
+         self.assertEqual(summary["failed"], len(failing_resources))
+         self.assertEqual(summary["skipped"], 0)
+         self.assertEqual(summary["parsing_errors"], 0)
++        self.assertEqual(summary["unknown"], len(unknown_resources))
+ 
+         self.assertEqual(passing_resources, passed_check_resources)
+         self.assertEqual(failing_resources, failed_check_resources)
++        self.assertEqual(unknown_resources, unknown_check_resources)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py b/tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+index 725fb02b2..1415d3d2c 100644
+--- a/tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
++++ b/tests/terraform/checks/resource/azure/test_PostgreSQLFlexiServerGeoBackupEnabled.py
+@@ -24,19 +24,25 @@ class TestPostgreSQLFlexiServerGeoBackupEnabled(unittest.TestCase):
+         failing_resources = {
+             "azurerm_postgresql_flexible_server.fail1",
+             "azurerm_postgresql_flexible_server.fail2",
+-
++        }
++        unknown_resources = {
++            "azurerm_postgresql_flexible_server.replica",
++            "azurerm_postgresql_flexible_server.unknown_mode",
+         }
+ 
+         passed_check_resources = {c.resource for c in report.passed_checks}
+         failed_check_resources = {c.resource for c in report.failed_checks}
++        unknown_check_resources = {c.resource for c in report.unknown_checks}
+ 
+         self.assertEqual(summary["passed"], 1)
+         self.assertEqual(summary["failed"], 2)
+         self.assertEqual(summary["skipped"], 0)
+         self.assertEqual(summary["parsing_errors"], 0)
++        self.assertEqual(summary["unknown"], 2)
+ 
+         self.assertEqual(passing_resources, passed_check_resources)
+         self.assertEqual(failing_resources, failed_check_resources)
++        self.assertEqual(unknown_resources, unknown_check_resources)
+ 
+ 
+ if __name__ == '__main__':

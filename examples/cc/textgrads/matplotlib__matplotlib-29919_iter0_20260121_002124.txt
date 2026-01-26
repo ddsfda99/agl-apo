@@ -1,0 +1,131 @@
+Here is a detailed review of the coding agent’s execution trace, why it failed to complete the task, and how it should be improved to actually fix the bug.
+
+What the task required
+- Reproduce the bug with a minimal test.
+- Locate the bug in the codebase using the error messages and stack context.
+- Implement a fix.
+- Run the reproduction to validate the fix (and ideally add a unit test).
+- Clean up any temp files. Do not commit.
+
+What the agent did
+- Grepped for “mollweide” and found the geographic projections in lib/matplotlib/projections/geo.py.
+- Examined contour code paths in lib/matplotlib/axes/_axes.py and, more importantly, lib/matplotlib/contour.py.
+- Cross-checked error message and found the reshape call in lib/matplotlib/cbook.py:simple_linear_interpolation with fps = a.reshape((len(a), -1)).
+
+Where the agent stopped short
+- The agent did not write or run a reproduction test (step 1).
+- The agent did not implement any fix (step 4).
+- The agent did not run the tests to validate any change (steps 5/6).
+- The agent did not connect the dots to the exact failure path: Path.interpolated() calls simple_linear_interpolation() for densification, and transform_path_non_affine on Geo transforms calls path.interpolated(). That crashes for empty paths due to the reshape((0, -1)) issue.
+- The agent did not propose the minimal, safe fix (short-circuit handling of empty arrays in simple_linear_interpolation, or early-return in Path.interpolated for empty vertices).
+- The agent did not analyze the secondary symptom (weird contourf rendering) beyond the crash; at least ensuring “no error thrown” should be verified.
+
+Root cause analysis
+- The stack in the bug report shows ValueError in numpy reshape at matplotlib/cbook.py: simple_linear_interpolation:
+  fps = a.reshape((len(a), -1))
+  ValueError: cannot reshape array of size 0 into shape (0,newaxis)
+- Where does this come from? Geographic projections use _GeoTransform.transform_path_non_affine (in lib/matplotlib/projections/geo.py) which does:
+  ipath = path.interpolated(self._resolution)
+  return Path(self.transform(ipath.vertices), ipath.codes)
+- Path.interpolated() (in lib/matplotlib/path.py) uses cbook.simple_linear_interpolation internally to densify vertices along path segments. If the input Path has zero vertices (empty), simple_linear_interpolation is called with an empty array a, and reshape((0, -1)) raises that exact ValueError.
+- On projected axes (like Mollweide), contouring can produce empty paths (e.g., clipping, masking, or paths outside the projection domain). The transform path code must gracefully handle empty paths instead of crashing.
+
+Minimal, safe fix
+- Make simple_linear_interpolation robust against empty input arrays. If len(a) == 0, return an array of the same shape (empty) without further processing.
+  - This central fix covers any code path that uses simple_linear_interpolation (not only geo projections). It is low risk and localized.
+  - Alternatively or additionally, Path.interpolated() could early-return the same Path when vertices are empty. But fixing simple_linear_interpolation is enough and simpler.
+
+Proposed code change
+- File: lib/matplotlib/cbook.py
+- Function: simple_linear_interpolation
+
+Add an early return for empty arrays:
+
+def simple_linear_interpolation(a, steps):
+    """
+    Resample an array with steps - 1 points between original point pairs.
+    ...
+    """
+    # Early return for empty input to avoid reshape errors.
+    if len(a) == 0:
+        # Return an array of the same shape (empty), preserving dtype
+        return np.asarray(a)[...].copy()
+
+    fps = a.reshape((len(a), -1))
+    xp = np.arange(len(a)) * steps
+    x = np.arange((len(a) - 1) * steps + 1)
+    return (np.column_stack([np.interp(x, xp, fp) for fp in fps.T])
+            .reshape((len(x),) + a.shape[1:]))
+
+Notes:
+- The copy() is optional; the important bit is to return an empty array with the same shape and dtype.
+- For len(a) == 1, existing code works fine: xp = [0], x = [0], interpolation yields the single row.
+
+Alternative/additional guard
+- You could also guard in Path.interpolated() to return self if there are zero vertices, but the cbook fix is sufficient and more generally robust.
+
+Reproduction tests to add
+1) Direct test for the interpolation bug:
+- File: lib/matplotlib/tests/test_cbook.py (or a new test file if none exists for cbook)
+- Test:
+
+def test_simple_linear_interpolation_empty():
+    import numpy as np
+    from matplotlib.cbook import simple_linear_interpolation
+    a = np.empty((0, 2))
+    out = simple_linear_interpolation(a, steps=10)
+    assert out.shape == a.shape
+    assert out.size == 0
+
+2) Integration test for mollweide contour no crash:
+- File: lib/matplotlib/tests/test_geo.py or test_axes.py (near other geo tests)
+- Test:
+
+def test_mollweide_contour_no_crash():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(subplot_kw={'projection': 'mollweide'})
+    lons, lats = np.meshgrid(
+        np.linspace(-np.pi, np.pi, 40),
+        np.linspace(-np.pi/2, np.pi/2, 20)
+    )
+    data = np.sin(lons) * np.cos(lons) * np.sin(lats) * np.cos(lats)
+    cs = ax.contour(lons, lats, data)
+    # Ensure a draw does not error.
+    fig.canvas.draw()
+
+Optionally, also test contourf (which shouldn’t error either):
+
+def test_mollweide_contourf_no_crash():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(subplot_kw={'projection': 'mollweide'})
+    lons, lats = np.meshgrid(
+        np.linspace(-np.pi, np.pi, 40),
+        np.linspace(-np.pi/2, np.pi/2, 20)
+    )
+    data = np.sin(lons) * np.cos(lons) * np.sin(lats) * np.cos(lats)
+    cs = ax.contourf(lons, lats, data)
+    fig.canvas.draw()
+
+Why this fixes the reported errors
+- The specific crash in the traceback is due to reshape on an empty array in simple_linear_interpolation; early return for len(a)==0 avoids the crash.
+- This situation can arise with contours on geographic projections that generate empty path segments; Path.interpolated (triggered by the projection’s transform_path_non_affine) must handle that.
+- After the fix, contour() on Mollweide should not crash. The “weird” visual artifact for contourf likely stems from how paths are transformed/densified across the projection seam, but at minimum this ensures no exceptions are thrown, restoring previous “it worked” behavior in terms of stability. If further visual issues remain, those would be separate rendering/seam issues.
+
+Additional suggestions (optional follow-ups)
+- Consider also guarding in Path.interpolated(self, steps) to return self unchanged when len(self.vertices) == 0. This provides an extra layer of safety at the API boundary and prevents similar issues even if other code calls Path.interpolated directly.
+- If you want to explicitly address the rendering artifacts in the contourf screenshot, you could investigate path interpolation resolution and seam handling for Mollweide; but that’s beyond the immediate crash fix and would require careful changes in geo transforms and possibly contour chunking.
+
+Summary of why the agent failed
+- Did not follow the instructed steps: no reproduction test, no fix implementation, no test run.
+- Stopped at identification of a likely culprit (reshape in simple_linear_interpolation) but didn’t carry through with a patch.
+- Missed the connection between Geo transform path interpolation and the empty-path reshape error.
+- Did not validate with a minimal unit test that would have quickly exposed the failing code path and verified the fix.
+
+What the agent should do now
+- Implement the one-line guard in cbook.simple_linear_interpolation (return early when len(a)==0).
+- Add the tests described above.
+- Run the tests (particularly the new ones) to confirm no crash.
+- Clean up any temporary files used in testing.
+- Do not commit (as per instruction), but present the patch and test results.

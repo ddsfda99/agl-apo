@@ -1,0 +1,35 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index dc7f0c433f..0bff78ee4f 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -5193,13 +5193,17 @@ class Axes(_AxesBase):
+ 
+         if xscale == 'log' or yscale == 'log':
+             polygons = np.expand_dims(polygon, 0) + np.expand_dims(offsets, 1)
++            # Compute centers in data coordinates for retrieval via get_offsets().
++            centers = offsets.copy()
+             if xscale == 'log':
+                 polygons[:, :, 0] = 10.0 ** polygons[:, :, 0]
++                centers[:, 0] = 10.0 ** centers[:, 0]
+                 xmin = 10.0 ** xmin
+                 xmax = 10.0 ** xmax
+                 self.set_xscale(xscale)
+             if yscale == 'log':
+                 polygons[:, :, 1] = 10.0 ** polygons[:, :, 1]
++                centers[:, 1] = 10.0 ** centers[:, 1]
+                 ymin = 10.0 ** ymin
+                 ymax = 10.0 ** ymax
+                 self.set_yscale(yscale)
+@@ -5208,6 +5212,12 @@ class Axes(_AxesBase):
+                 edgecolors=edgecolors,
+                 linewidths=linewidths,
+                 )
++            # Ensure get_offsets() returns hexagon centers in data coordinates
++            # even when using log scales.
++            collection.set_offsets(centers)
++            # Offset transform is not used for drawing in this branch, but set
++            # to IdentityTransform to avoid unintended autoscale effects.
++            collection.set_offset_transform(mtransforms.IdentityTransform())
+         else:
+             collection = mcoll.PolyCollection(
+                 [polygon],

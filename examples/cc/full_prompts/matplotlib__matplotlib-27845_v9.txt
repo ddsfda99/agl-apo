@@ -1,0 +1,106 @@
+You are an expert in fixing Matplotlib issues. Your task is to fix a bug where PathCollection using alpha (scalar or per-element) causes facecolors set to 'none' to be filled instead of remaining transparent.
+
+Context and goal
+- Issue: In Matplotlib 3.8.3, when creating a PathCollection with facecolors that include 'none' and also providing alpha (either a scalar or a list), the 'none' entries get filled instead of staying fully transparent.
+- Expected behavior: Any facecolor that is 'none' should always remain fully transparent, regardless of alpha being supplied.
+- Root cause location: In most collections, facecolors are computed via matplotlib.colors.to_rgba_array(c, alpha). The override of alpha currently applies indiscriminately to all entries, causing 'none' to be ignored.
+
+Reproduction example to understand the bug
+Use this minimal script to observe the problem:
+- It should render one filled blue square and one unfilled polygon with black edge only.
+- Actual (buggy) behavior fills the second polygon when alpha is provided.
+
+Script to reproduce:
+import matplotlib.pyplot as plt
+from matplotlib.collections import PathCollection
+from matplotlib.path import Path
+
+paths = [
+    Path(
+        [(1, 1), (1, 2), (2, 2), (2, 1), (0, 0)],
+        [Path.MOVETO] + [Path.LINETO] * 3 + [Path.CLOSEPOLY]
+    ),
+    Path(
+        [(4, 4), (5, 5), (5, 4), (0, 0)],
+        [Path.MOVETO] + [Path.LINETO] * 2 + [Path.CLOSEPOLY]
+    ),
+]
+
+fig, ax = plt.subplots()
+collection = PathCollection(
+    paths,
+    edgecolors='black',
+    facecolors=['blue', 'none'],
+    alpha=[1, 1],  # also try alpha=1
+)
+collection.set_transform(ax.transData)
+ax.add_artist(collection)
+ax.set(xlim=(0, 5), ylim=(0, 5))
+plt.show()
+
+Plan of action
+1) Understand the relevant code paths:
+- Collection.set_facecolor forwards to matplotlib.colors.to_rgba_array(facecolors, self._alpha).
+- Collection.set_alpha triggers recomputation using original facecolors via the same function.
+- Therefore, the correct place to fix is matplotlib/colors.py in to_rgba_array, specifically the handling of the alpha parameter when c is a sequence containing 'none'.
+
+2) Write targeted tests to reproduce and validate the fix:
+Create a new temporary test file for local validation (you will delete it at the end):
+- tests/test_alpha_none_facecolors.py with the following tests:
+  - Test to_rgba_array with scalar alpha and a list of colors containing 'none':
+      - Input: c = ['blue', 'none'], alpha = 1
+      - Expect: First rgba alpha == 1, second rgba alpha == 0
+  - Test to_rgba_array with per-element alpha and a list of colors containing 'none':
+      - Input: c = ['blue', 'none'], alpha = [0.3, 0.9]
+      - Expect: First rgba alpha == 0.3, second rgba alpha == 0 (still zero despite 0.9)
+  - Test PathCollection with scalar alpha:
+      - Construct a PathCollection with facecolors ['blue', 'none'], alpha = 1
+      - Verify collection.get_facecolors() alphas are [1, 0]
+  - Test PathCollection with per-element alpha:
+      - Construct PathCollection with facecolors ['blue', 'none'], alpha = [1, 1]
+      - Verify collection.get_facecolors() alphas are [1, 0]
+  - Optional: Test that a numeric RGBA input with zero alpha (e.g., [(1, 0, 0, 0)]) remains zero alpha after set_alpha(1) via Collection (regression safety).
+
+3) Implement the fix:
+- In matplotlib/colors.py, inside to_rgba_array(c, alpha=None), adjust alpha application to avoid overriding entries that are 'none'.
+- Guidance for implementation:
+  - If c is a sequence of colors (strings/tuples) and alpha is provided (scalar or array-like), compute a boolean mask identifying which entries of c are the literal string 'none' (case-insensitive). Use cbook._str_lower_equal to robustly identify 'none' on string inputs while ignoring non-strings.
+  - Apply the alpha override only to entries where mask_none is False.
+  - Preserve current behavior for numeric Nx3 or Nx4 fast paths (arrays of floats), where 'none' strings will not appear. No change needed there.
+  - Single-color inputs should already behave: to_rgba('none', alpha) returns fully transparent. Ensure you do not break that behavior.
+  - Do not change the meaning of alpha for non-'none' entries.
+
+4) Run only the targeted tests to validate the change:
+Important: Do not run the full test suite. There is a known unrelated flaky test using subprocess pickling that may fail due to version string mismatch; it is unrelated to this bug.
+- Run:
+  - pytest -q tests/test_alpha_none_facecolors.py
+  - Optionally also run a couple of existing relevant tests if needed: e.g., pytest -q lib/matplotlib/tests/test_colors.py -k "rgba_array" and pytest -q lib/matplotlib/tests/test_collections.py -k "PathCollection" but avoid running the whole suite.
+- Also manually run the provided reproduction script and visually confirm that the polygon with facecolor 'none' is not filled when alpha is provided.
+
+5) Edge cases to consider and verify:
+- alpha is None and facecolors include 'none' -> unchanged behavior, 'none' stays transparent.
+- alpha is scalar and c contains 'none' and normal colors -> 'none' stays alpha 0, others get scalar alpha.
+- alpha is array-like, same length as c -> 'none' entries stay alpha 0, others get corresponding alpha value.
+- c is a numeric Nx4 array (already RGBA) -> current behavior preserved; alpha override applies, no 'none' present.
+- c is a single color 'none' and alpha is provided -> remains transparent.
+- c contains non-string colors mixed with strings; mask must not crash on non-string entries.
+
+6) Do not change or suppress unrelated tests in the repository. Avoid running flaky tests. If you accidentally run the entire suite and see a failure like test_pickle_load_from_subprocess[…], ignore it; it is unrelated to your changes.
+
+7) Clean up:
+- After validating the fix locally, remove any temporary test files you added (e.g., tests/test_alpha_none_facecolors.py), as we will not commit them.
+- Do not commit any changes; just prepare the patch.
+
+Acceptance criteria
+- The fix is implemented in a centralized way (in matplotlib/colors.py: to_rgba_array) so all collections benefit from it.
+- New local tests pass, verifying that 'none' stays fully transparent for both scalar and per-element alpha.
+- The reproduction script renders as expected: the second path remains unfilled with only an edge, regardless of alpha being provided.
+- No regressions for numeric array inputs or single-color conversions.
+
+Hints on code locations and utilities
+- File likely to change: lib/matplotlib/colors.py (function to_rgba_array).
+- Reference usages: lib/matplotlib/collections.py (Collection.set_facecolor, set_alpha).
+- Use helper: from matplotlib import cbook; cbook._str_lower_equal(value, 'none') works for strings and safely returns False for non-strings.
+- Be careful with broadcasting and shapes when alpha is array-like; ensure lengths match and only override non-'none' entries.
+
+Execute the steps above and stop after validation; do not commit your edits.

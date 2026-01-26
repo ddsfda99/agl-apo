@@ -1,0 +1,87 @@
+You are working in the current repository. Your goal is to fix the failing tests by updating the BaseCommand data_path creation behavior to match the test expectations.
+
+Important context:
+- Ignore the PySide6/macOS pip platform tag discussion; that is unrelated to the failing tests in this repo.
+- The single failing test is tests/commands/base/test_paths.py::test_data_path_creation_failure.
+- The test suite expects BaseCommand to create the Briefcase data_path via subprocess.run, and to raise BriefcaseCommandError with a specific message on failure. Currently, BaseCommand uses direct filesystem calls (e.g., Path.mkdir), so the test’s monkeypatch of subprocess.run has no effect, and the directory is created successfully (often because CI runs as root), causing the test to fail.
+
+Your task:
+Follow these steps precisely and do not commit your edits.
+
+1) Run tests and confirm the failure.
+- Run: pytest -q
+- Observe that tests/commands/base/test_paths.py::test_data_path_creation_failure fails.
+- Open tests/commands/base/test_paths.py and read all tests to understand the expected behavior and exact error messages. Pay special attention to:
+  - test_data_path_creation_failure
+  - test_space_in_path
+  - test_empty_custom_path
+  - test_custom_path_does_not_exist
+  - test_path_is_realpath
+
+2) Extract the expected behavior from the tests.
+- data_path must be created using subprocess.run so it can be monkeypatched to simulate failure.
+- On creation failure, raise BriefcaseCommandError with a message that starts with:
+  "Failed to create the Briefcase directory to store tools and support files:"
+- Reject paths containing spaces with an error message containing:
+  "contains spaces. This will cause problems with some tools"
+- Respect BRIEFCASE_HOME:
+  - If BRIEFCASE_HOME is set and empty, raise an error indicating an empty custom path.
+  - If BRIEFCASE_HOME points to a non-existent path, raise an error indicating it does not exist.
+- Use platform-specific defaults for data_path when BRIEFCASE_HOME is not provided:
+  - macOS: ~/Library/Caches/org.beeware.briefcase
+  - Windows: ~/AppData/Local/BeeWare/briefcase/Cache
+  - Linux: ~/.cache/briefcase
+- On Windows, ensure data_path is a real path (bypass Windows Store sandboxing), e.g., by using os.path.realpath, as asserted in test_path_is_realpath.
+
+3) Locate the implementation to change.
+- Search for where data_path is set up:
+  - grep -R "data_path" src/briefcase
+  - Open src/briefcase/commands/base.py (BaseCommand).
+- Also grep for error strings to find any existing handling:
+  - grep -R "Failed to create the Briefcase directory" src/briefcase
+  - grep -R "contains spaces" src/briefcase
+
+4) Implement the fix in src/briefcase/commands/base.py.
+- In BaseCommand initialization (or wherever data_path is finalized):
+  - Compute the intended data_path:
+    - If an explicit path or BRIEFCASE_HOME is provided, validate it:
+      - If BRIEFCASE_HOME is set but empty, raise BriefcaseCommandError with the message expected by tests for empty custom path.
+      - If BRIEFCASE_HOME points to a non-existent path, raise BriefcaseCommandError with the message expected by tests for non-existent custom path.
+    - Otherwise, use the platform-specific default paths listed above.
+  - If the chosen path contains spaces, raise BriefcaseCommandError with a message containing:
+    "contains spaces. This will cause problems with some tools"
+  - On Windows, ensure data_path is a real path using os.path.realpath (or equivalent) before creation.
+  - Create the directory using subprocess.run (not Path.mkdir or os.makedirs). Prefer using the briefcase tools abstraction if available; otherwise call subprocess.run directly. Example commands:
+    - POSIX (macOS/Linux): ["mkdir", "-p", str(self.data_path)]
+    - Windows: ["cmd", "/c", "mkdir", str(self.data_path)]
+    - Use check=True.
+  - Catch subprocess.CalledProcessError (or the wrapper’s exception) and raise BriefcaseCommandError with a user-friendly message. The message must start with:
+    "Failed to create the Briefcase directory to store tools and support files:"
+    and include the original error text for context.
+  - If the directory already exists, skip creation without error.
+
+Notes on subprocess usage:
+- The tests monkeypatch subprocess.run; they only care that you invoke subprocess.run to create the directory so the failure can be simulated. If a tools abstraction exists (self.tools.subprocess.run) that delegates to subprocess.run, you can use it; otherwise call subprocess.run directly.
+
+5) Run the tests again to validate.
+- Run: pytest -q
+- If any tests fail, re-open tests/commands/base/test_paths.py to verify the exact expected strings and behavior, and adjust your implementation accordingly.
+
+6) Clean up any temporary files you created during testing.
+- Remove any scratch scripts or test files you added.
+- Do not commit changes.
+
+Implementation checklist:
+- Call subprocess.run to create data_path.
+- On failure, raise BriefcaseCommandError with the message prefix:
+  "Failed to create the Briefcase directory to store tools and support files:"
+- Enforce "no spaces in path" with the exact wording expected by tests:
+  "contains spaces. This will cause problems with some tools"
+- Respect BRIEFCASE_HOME semantics for empty/non-existent paths.
+- Use platform-specific default paths for macOS, Windows, and Linux as listed.
+- Ensure Windows uses a real path (os.path.realpath) as asserted by the tests.
+
+Process tips:
+- If opening src/briefcase/commands/base.py fails due to a transient API error, retry immediately or use grep to locate the relevant code snippets and re-open.
+- Do not spend time on macOS CreateCommand or PySide-specific modules; they are unrelated to this failing test.
+- Keep the fix minimal and targeted to BaseCommand’s data_path logic to avoid regressing other tests.

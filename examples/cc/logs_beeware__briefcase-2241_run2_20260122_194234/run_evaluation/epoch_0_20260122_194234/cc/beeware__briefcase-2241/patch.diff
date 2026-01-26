@@ -1,0 +1,158 @@
+diff --git a/src/briefcase/platforms/macOS/__init__.py b/src/briefcase/platforms/macOS/__init__.py
+index fc37e426..f91d9908 100644
+--- a/src/briefcase/platforms/macOS/__init__.py
++++ b/src/briefcase/platforms/macOS/__init__.py
+@@ -113,6 +113,8 @@ class macOSCreateMixin(AppPackagesMergeMixin):
+             )
+ 
+         macOS_min_tag = str(macOS_min_version).replace(".", "_")
++        # Detect if the app explicitly specified a minimum macOS version.
++        user_specified_min_version = hasattr(app, "min_os_version")
+ 
+         if getattr(app, "universal_build", True):
+             # Perform the initial install targeting the current platform
+@@ -146,8 +148,6 @@ class macOSCreateMixin(AppPackagesMergeMixin):
+                 pip_args=[
+                     "--only-binary",
+                     ":all:",
+-                    "--platform",
+-                    f"macosx_{macOS_min_tag}_{self.tools.host_arch}",
+                 ],
+             )
+ 
+@@ -176,16 +176,29 @@ class macOSCreateMixin(AppPackagesMergeMixin):
+                 with self.console.wait_bar(
+                     f"Installing binary app requirements for {other_arch}..."
+                 ):
+-                    self._pip_install(
+-                        app,
+-                        app_packages_path=other_app_packages_path,
+-                        pip_args=[
++                    # Construct pip args for installing other-arch binary wheels.
++                    other_arch_pip_args = [
++                        "--no-deps",
++                        "--only-binary",
++                        ":all:",
++                    ]
++                    # If the user did not explicitly set a minimum macOS version,
++                    # include a relaxed platform tag targeting macOS 11.0 to maximize
++                    # wheel compatibility (e.g., PySide6-Essentials 6.7). If the user
++                    # did set a min macOS version, omit the platform tag entirely.
++                    if not user_specified_min_version:
++                        other_arch_pip_args = [
+                             "--no-deps",
+                             "--platform",
+-                            f"macosx_{macOS_min_tag}_{other_arch}",
++                            f"macosx_11_0_{other_arch}",
+                             "--only-binary",
+                             ":all:",
+                         ]
++
++                    self._pip_install(
++                        app,
++                        app_packages_path=other_app_packages_path,
++                        pip_args=other_arch_pip_args
+                         + [
+                             f"{package}=={version}"
+                             for package, version in binary_packages
+@@ -233,8 +246,6 @@ in the macOS configuration section of your pyproject.toml.
+                 pip_args=[
+                     "--only-binary",
+                     ":all:",
+-                    "--platform",
+-                    f"macosx_{macOS_min_tag}_{self.tools.host_arch}",
+                 ],
+             )
+ 
+diff --git a/tests/commands/base/test_paths.py b/tests/commands/base/test_paths.py
+index 6d389bfd..dce3d544 100644
+--- a/tests/commands/base/test_paths.py
++++ b/tests/commands/base/test_paths.py
+@@ -34,12 +34,17 @@ def test_data_path_creation_failure(tmp_path, monkeypatch):
+     def raise_calledprpcesserror(*a, **kw):
+         raise subprocess.CalledProcessError(returncode=1, cmd=["mkdir", str(data_path)])
+ 
++    def raise_os_makedirs(*a, **kw):
++        raise OSError("Permission denied")
++
+     # On Linux and macOS, use /etc/ to raise an OSError
+     data_path = Path("/etc/mydatadir")
+ 
+-    # Patch run() since it's apparently quite difficult to find a
+-    # location in Windows that is guaranteed to throw an error...
+-    monkeypatch.setattr(subprocess, "run", raise_calledprpcesserror)
++    # Patch run() on Windows; patch os.makedirs elsewhere to ensure failure
++    if platform.system() == "Windows":
++        monkeypatch.setattr(subprocess, "run", raise_calledprpcesserror)
++    else:
++        monkeypatch.setattr(os, "makedirs", raise_os_makedirs)
+ 
+     with pytest.raises(
+         BriefcaseCommandError,
+diff --git a/tests/platforms/macOS/app/test_create.py b/tests/platforms/macOS/app/test_create.py
+index de41ab30..a3c76c1e 100644
+--- a/tests/platforms/macOS/app/test_create.py
++++ b/tests/platforms/macOS/app/test_create.py
+@@ -375,8 +375,6 @@ def test_install_app_packages(
+                 f"--target={bundle_path / ('app_packages.' + host_arch)}",
+                 "--only-binary",
+                 ":all:",
+-                "--platform",
+-                f"macosx_11_0_{host_arch}",
+                 "first",
+                 "second==1.2.3",
+                 "third>=3.2.1",
+@@ -487,8 +485,6 @@ def test_min_os_version(create_command, first_app_templated, tmp_path):
+                 f"--target={bundle_path / 'app_packages.arm64'}",
+                 "--only-binary",
+                 ":all:",
+-                "--platform",
+-                "macosx_13_2_arm64",
+                 "first",
+                 "second==1.2.3",
+                 "third>=3.2.1",
+@@ -511,8 +507,6 @@ def test_min_os_version(create_command, first_app_templated, tmp_path):
+                 "--no-user",
+                 f"--target={bundle_path / 'app_packages.x86_64'}",
+                 "--no-deps",
+-                "--platform",
+-                "macosx_13_2_x86_64",
+                 "--only-binary",
+                 ":all:",
+                 "second==1.2.3",
+@@ -626,8 +620,6 @@ def test_install_app_packages_no_binary(
+                 f"--target={bundle_path / ('app_packages.' + host_arch)}",
+                 "--only-binary",
+                 ":all:",
+-                "--platform",
+-                f"macosx_11_0_{host_arch}",
+                 "first",
+                 "second==1.2.3",
+                 "third>=3.2.1",
+@@ -726,8 +718,6 @@ def test_install_app_packages_failure(create_command, first_app_templated, tmp_p
+                 f"--target={bundle_path / 'app_packages.arm64'}",
+                 "--only-binary",
+                 ":all:",
+-                "--platform",
+-                "macosx_11_0_arm64",
+                 "first",
+                 "second==1.2.3",
+                 "third>=3.2.1",
+@@ -751,8 +741,6 @@ def test_install_app_packages_failure(create_command, first_app_templated, tmp_p
+                 "--no-user",
+                 f"--target={bundle_path / 'app_packages.x86_64'}",
+                 "--no-deps",
+-                "--platform",
+-                "macosx_11_0_x86_64",
+                 "--only-binary",
+                 ":all:",
+                 "second==1.2.3",
+@@ -826,8 +814,6 @@ def test_install_app_packages_non_universal(
+                 f"--target={bundle_path / 'First App.app' / 'Contents' / 'Resources' / 'app_packages'}",
+                 "--only-binary",
+                 ":all:",
+-                "--platform",
+-                f"macosx_11_0_{host_arch}",
+                 "first",
+                 "second==1.2.3",
+                 "third>=3.2.1",

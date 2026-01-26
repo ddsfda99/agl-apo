@@ -1,0 +1,69 @@
+diff --git a/reflex/vars.py b/reflex/vars.py
+index 98118b1d..3c81ba73 100644
+--- a/reflex/vars.py
++++ b/reflex/vars.py
+@@ -585,7 +585,24 @@ class Var:
+ 
+             # Get the type of the indexed var.
+             if types.is_generic_alias(self._var_type):
+-                type_ = types.get_args(self._var_type)[0]
++                inner_args = types.get_args(self._var_type)
++                origin = get_origin(self._var_type) if types.is_generic_alias(self._var_type) else None
++                # Handle tuple indexing with precise element types when possible.
++                if origin in (tuple, Tuple):
++                    if len(inner_args) == 2 and inner_args[1] is Ellipsis:
++                        # Homogeneous tuple e.g., Tuple[int, ...]
++                        type_ = inner_args[0]
++                    else:
++                        # Fixed-length tuple e.g., Tuple[str, int, int]
++                        if isinstance(i, int):
++                            idx = i if i >= 0 else len(inner_args) + i
++                            type_ = inner_args[idx] if 0 <= idx < len(inner_args) else Any
++                        else:
++                            # Unknown index (e.g., Var[int]) -> fallback to Any
++                            type_ = Any
++                else:
++                    # For lists and other generics, use the single inner arg.
++                    type_ = inner_args[0] if inner_args else Any
+             elif types._issubclass(self._var_type, str):
+                 type_ = str
+ 
+diff --git a/tests/test_var.py b/tests/test_var.py
+index df9b7453..2b037e39 100644
+--- a/tests/test_var.py
++++ b/tests/test_var.py
+@@ -475,6 +475,34 @@ def test_var_indexing_str():
+     assert str(str_var[-1]) == "{str.at(-1)}"
+ 
+ 
++def test_tuple_indexing_infers_element_type():
++    """Test that tuple indexing infers correct element types and supports comparisons."""
++    tuple_var = BaseVar(_var_name="word", _var_type=Tuple[str, int, int])
++
++    # Index 0 should be str
++    idx0 = tuple_var[0]
++    assert isinstance(idx0, Var)
++    assert idx0._var_type == str
++
++    # Index 2 should be int and allow comparisons with int vars
++    idx2 = tuple_var[2]
++    assert isinstance(idx2, Var)
++    assert idx2._var_type == int
++
++    end_time = BaseVar(_var_name="end", _var_type=int)
++    # Should not raise TypeError
++    comp = idx2 <= end_time
++    assert isinstance(comp, Var)
++
++    # Negative indexing should also infer correctly
++    idx_neg1 = tuple_var[-1]
++    assert idx_neg1._var_type == int
++
++    # Homogeneous tuple with ellipsis
++    homo_tuple = BaseVar(_var_name="t", _var_type=Tuple[int, ...])
++    assert homo_tuple[0]._var_type == int
++
++
+ @pytest.mark.parametrize(
+     "var, index",
+     [

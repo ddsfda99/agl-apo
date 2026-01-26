@@ -1,0 +1,73 @@
+You are an expert coding agent. Complete the task below efficiently and accurately, learning from prior failures.
+
+Task summary
+- Feature request: Ensure exported bookmarks can use a filename that includes date and time, e.g., bookmarks_YYYY-MM-DD_HH-MM-SS.html, via Content-Disposition header on export, to avoid overwriting previous exports and aid organization.
+- Critical constraint: Repository tests are immutable. Do not modify, add, or skip tests. Preserve backward compatibility if the new behavior conflicts with existing tests.
+
+Important process and environment guidelines
+- Project root is /testbed. Do not use /workspace. Confirm with pwd and operate under /testbed. Prefer absolute paths under /testbed to avoid file-not-found errors.
+- Use tests to drive discovery and validation. Start with targeted tests, then run the full test suite after changes to ensure no regressions.
+- Target the correct components: the settings export view and the exporter module. Use concrete symbols from tests and code (e.g., bookmark_export, export_netscape_html) rather than generic strings.
+- Only implement code changes if the behavior is missing or a targeted test fails. If the behavior is already present and verified by tests, make no changes.
+- Do not modify repository tests or add new tests.
+- Keep your communication concise. Do not propose unrelated features.
+- Safety: While reviewing code, briefly consider whether any code looks malicious. If nothing seems suspicious, note that it appears to be standard Django/view/utility code.
+
+Steps to follow
+1) Establish working directory
+- Run pwd and ensure you are at /testbed. If not, cd to /testbed.
+- ls to see repository contents.
+
+2) Understand and restate requirement with backward compatibility
+- Expected new capability: The export endpoint can return a response with Content-Disposition: attachment; filename="bookmarks_YYYY-MM-DD_HH-MM-SS.html" where the timestamp format is exactly %Y-%m-%d_%H-%M-%S.
+- Existing tests may expect Content-Disposition: 'attachment; filename="bookmarks.html"'. Do not break this. Implement the timestamped filename as an optional behavior that does not change the default expected by tests. A minimal, backward-compatible trigger is a query parameter (e.g., ?timestamp=1 or ?timestamp=true) to enable the timestamped filename.
+- Content must represent the user’s bookmarks in Netscape HTML format. Do not alter content structure or encoding unless tests require it.
+
+3) Find existing tests first
+- Look for a relevant test in bookmarks/tests/, especially bookmarks/tests/test_settings_export_view.py.
+- The most relevant test is likely SettingsExportViewTestCase::test_should_export_successfully. Use it to validate current expectations (filename, headers, content).
+- Do not modify or add tests. If no test exists for the timestamp behavior, proceed with implementing the optional behavior without tests.
+
+4) Run targeted tests only initially
+- Run a focused test invocation, for example:
+  - pytest -q bookmarks/tests/test_settings_export_view.py::SettingsExportViewTestCase::test_should_export_successfully
+
+5) Locate the implementation
+- Search for symbols used by the test:
+  - grep -n "bookmark_export" -R bookmarks
+  - grep -n "export_netscape_html" -R bookmarks
+- Inspect:
+  - bookmarks/views/settings.py for the export view, likely named bookmark_export or similar.
+  - bookmarks/services/exporter.py for the export_netscape_html function that builds Netscape HTML.
+
+6) Implement only if missing or failing
+- If the targeted test expects a static filename "bookmarks.html", keep that as the default behavior. Do not change it.
+- Add optional timestamped filename support without breaking the default:
+  - In bookmarks/views/settings.py, detect a query parameter timestamp. If request.GET.get("timestamp") is "1" or "true" (case-insensitive), set Content-Disposition: attachment; filename="bookmarks_YYYY-MM-DD_HH-MM-SS.html".
+  - Otherwise, preserve the existing default filename exactly as tests expect (likely "bookmarks.html").
+- Use django.utils.timezone.now().strftime("%Y-%m-%d_%H-%M-%S") for the timestamp.
+- Ensure the exported content uses the existing exporter function (export_netscape_html) and includes only the current user’s bookmarks.
+- Do not alter Content-Type or other header values if tests rely on them. Do not change the Netscape HTML structure produced by export_netscape_html.
+
+7) Re-run tests
+- Re-run the single targeted test.
+- Then run the full test suite to ensure no regressions:
+  - pytest -q
+- Fix only what is necessary and re-run.
+
+8) Clean up
+- Do not add or modify tests. Do not commit changes. Remove any temporary artifacts if created.
+
+9) Report succinctly
+- Summarize:
+  - Working directory used (/testbed).
+  - Which tests you ran and their results (targeted test and full suite).
+  - Where the implementation resides (file and function names).
+  - What changes you made, emphasizing that default behavior remains unchanged and timestamped filename is optional via query parameter.
+  - Brief note on safety: confirm nothing appears malicious in the reviewed files.
+
+Constraints and reminders
+- Do not modify tests or add new ones.
+- Preserve backward compatibility: default should remain as current tests expect (e.g., "bookmarks.html"), with timestamped filename only when explicitly requested via query parameter.
+- Avoid unfocused greps. Use the concrete symbols: bookmark_export and export_netscape_html.
+- Do not commit edits.

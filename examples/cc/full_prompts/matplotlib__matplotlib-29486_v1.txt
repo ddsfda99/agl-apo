@@ -1,0 +1,87 @@
+Goal
+Fix the bug where ax.stem on a polar Axes with a non-zero bottom draws a straight red chord connecting the first and last stem bottoms, instead of an arc at constant radius. Implement a minimal, targeted change and add a reproduction test that verifies the fix. Follow the required workflow steps and do not commit changes.
+
+Background and root cause
+- In Axes.stem (lib/matplotlib/axes/_axes.py), the baseline is drawn via self.plot(baseline_x, baseline_y, ...). On polar axes, these are interpreted as (theta, r) pairs.
+- The polar transform (PolarTransform.transform_path_non_affine in lib/matplotlib/projections/polar.py) only turns constant-radius segments into circular arcs if the path’s _interpolation_steps > 1. Otherwise, it renders the baseline as a straight chord between the min and max theta.
+- Therefore, the unwanted straight red line is the stem baseline being rendered without interpolation.
+
+Plan
+1) Reproduce the bug with a test on a polar Axes.
+2) Implement a fix that sets interpolation steps on the baseline path when the Axes is polar, so the baseline is rendered as an arc at constant radius rather than a straight chord.
+3) Run tests to validate the fix.
+4) If failures occur, debug and adjust.
+5) Do not commit changes; clean up any temporary artifacts (none expected beyond the added test file).
+
+Step-by-step instructions
+
+1) Write a reproduction test case
+Create a new test that verifies the baseline path used by stem on polar axes has interpolation enabled. Place it under lib/matplotlib/tests/. You can either add it to an existing polar test file (e.g., test_polar.py) or create a new file (e.g., test_polar_stem.py). Use the following content:
+
+- File: lib/matplotlib/tests/test_polar.py
+- Append the test function below (or create lib/matplotlib/tests/test_polar_stem.py with the same function):
+
+def test_polar_stem_baseline_arc():
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    rng = np.random.default_rng(19680801)
+    N = 50
+    theta = 2 * np.pi * rng.random(N)
+    r = 2 * rng.random(N)
+
+    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'})
+    cont = ax.stem(theta, r + 4, bottom=4)
+
+    baseline = cont.baseline
+    # On polar axes, the baseline should have interpolation enabled so that
+    # constant-radius segments render as circular arcs, not straight chords.
+    assert baseline.get_path()._interpolation_steps > 1
+
+This test is property-based (no image comparison), fast, and robust. It matches existing usage of _interpolation_steps in polar tests (e.g., test_polar_interpolation_steps_variable_r).
+
+2) Locate and implement the fix
+- Open lib/matplotlib/axes/_axes.py and locate the Axes.stem method.
+- Find where the baseline Line2D object is created. It is typically created via self.plot with baseline_x = [min(locs), max(locs)] and baseline_y = [bottom, bottom] for orientation='vertical'.
+- Immediately after the baseline Line2D is created, add code to enable interpolation when on a polar Axes. Use self.name == 'polar' to avoid potential circular imports.
+
+Add these lines:
+
+# Ensure polar stem baseline renders as an arc at constant radius.
+# PolarTransform draws arcs only when the path's _interpolation_steps > 1.
+if getattr(self, 'name', None) == 'polar':
+    baseline_path = baseline.get_path()
+    # Use a reasonably high number to make the arc smooth.
+    baseline_path._interpolation_steps = max(baseline_path._interpolation_steps, 100)
+
+Notes:
+- This change is scoped to the baseline line only and only applies on polar Axes.
+- For orientation='horizontal', baseline has constant theta; setting interpolation steps is harmless.
+- Using self.name == 'polar' avoids importing PolarAxes here and potential circular imports.
+
+3) Run the reproduction test and the test suite
+- Run only the new test first to quickly validate the fix:
+  - pytest lib/matplotlib/tests/test_polar.py::test_polar_stem_baseline_arc
+- Then run the polar tests to ensure no regressions:
+  - pytest -k polar
+- Optionally run the full test suite if time permits:
+  - pytest
+
+4) Debug if necessary
+- If the test fails, ensure you placed the interpolation code after the baseline Line2D is created and that you are correctly selecting the polar Axes via self.name == 'polar'.
+- Verify that baseline is indeed present (do not pass basefmt='' in the test; rely on defaults).
+- If interpolation is still not applied, double-check that baseline is the Line2D returned for the baseline in the StemContainer.
+
+5) Clean up
+- No temporary files should be left behind. The added test is permanent and part of the test suite.
+- Do not commit your edits as per instructions.
+
+Additional considerations
+- This fix improves rendering without changing the semantics of the baseline extent (it still spans min(theta) to max(theta)). Users who want no baseline can pass basefmt='' or basefmt=' '.
+- The interpolation value 100 aligns with other polar tests and ensures a smooth arc.
+- We are not changing behavior for non-polar axes.
+
+Deliverables
+- Modified lib/matplotlib/axes/_axes.py with the interpolation steps set for the baseline on polar Axes.
+- New test in lib/matplotlib/tests/test_polar.py (or a new file lib/matplotlib/tests/test_polar_stem.py) that asserts baseline interpolation is enabled on polar stem.
+- Successful local test runs verifying the fix.

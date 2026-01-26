@@ -1,0 +1,86 @@
+You are working in the current repository. Your goal is to reproduce and fix a bug in matplotlib’s hexbin where get_offsets() returns array([[0., 0.]]) when xscale='log' and yscale='log', and to add a regression test. Do not commit your edits.
+
+Follow this plan:
+
+1) Understand the issue and expected behavior
+- The bug: For hexbin plots with xscale='log' and yscale='log', calling get_offsets() on the returned PolyCollection yields array([[0., 0.]]) instead of the bin centers.
+- Expected behavior: get_offsets() should return the centers of the hexagonal bins in data coordinates regardless of whether the scales are linear or logarithmic.
+- Root cause: In the log-scale code path of Axes.hexbin, the PolyCollection is created with explicit polygon vertices and no per-hexagon offsets. When offsets are not set, PolyCollection.get_offsets() falls back to array([[0., 0.]]). In the linear branch, offsets are set and returned correctly.
+
+2) Add a reproduction test (it should fail before your fix)
+- Add a new test to lib/matplotlib/tests/test_axes.py that demonstrates the bug and encodes the expected behavior.
+
+Proposed test function:
+
+def test_hexbin_get_offsets_loglog():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    x = [1, 10, 100]
+    y = [1, 10, 100]
+    h = ax.hexbin(x, y, mincnt=1, xscale='log', yscale='log')
+    off = h.get_offsets()
+    # Expect bin centers in data coordinates, not zeros.
+    assert off.ndim == 2 and off.shape[1] == 2
+    assert not np.allclose(off, 0.0)
+    assert np.all(np.isfinite(off))
+    assert np.all(off > 0)
+
+- Run just this test to see it fail before implementing the fix:
+  pytest lib/matplotlib/tests/test_axes.py -k hexbin_get_offsets_loglog -q
+
+3) Locate the relevant code
+- The hexbin implementation lives in lib/matplotlib/axes/_axes.py, in the method Axes.hexbin.
+- In the linear branch, a PolyCollection is created with a base hexagon and per-hexagon offsets (offsets=..., offset_transform=...), so get_offsets() reflects the bin centers.
+- In the log branch (if xscale == 'log' or yscale == 'log'), the code builds explicit polygon vertices in data space and does not set offsets on the collection. Consequently, get_offsets() returns array([[0., 0.]]) by design.
+
+4) Implement the fix
+- Goal: Make get_offsets() return the bin centers for log-scale hexbin, without changing the rendered result.
+- Approach: Keep the existing explicit polygon path for rendering. Additionally, compute bin centers in data coordinates and attach them to the PolyCollection via set_offsets(). Neutralize these offsets during rendering by setting an offset_transform that maps offsets to zero (Affine2D().scale(0.0)), so the visual output is unchanged.
+
+Detailed steps inside Axes.hexbin, in the log-scale branch:
+- Ensure you have access to the final filtered offsets array that matches the polygons, i.e., after bins with no data are removed. In the existing code, this is the same offsets array used to build polygons (after masking/good index selection).
+- Compute centers as a copy of that filtered offsets array (these are in log space per-axis).
+- Convert the centers to data coordinates per axis:
+  - If xscale == 'log': centers[:, 0] = 10.0 ** centers[:, 0]
+  - If yscale == 'log': centers[:, 1] = 10.0 ** centers[:, 1]
+- After creating the PolyCollection(polygons, ...), set:
+  - collection.set_offsets(centers)
+  - collection.set_offset_transform(mtransforms.Affine2D().scale(0.0))
+- Do not change the linear-scale branch.
+- Make sure matplotlib.transforms is imported as mtransforms in this module (it typically is already). If not present at the top of lib/matplotlib/axes/_axes.py, add:
+  import matplotlib.transforms as mtransforms
+
+Pseudo-code guidance (to insert in the log-scale branch after polygons creation and PolyCollection instantiation):
+
+# offsets is the filtered Nx2 array of hex centers in log space that matches polygons
+centers = offsets.copy()
+if xscale == 'log':
+    centers[:, 0] = 10.0 ** centers[:, 0]
+if yscale == 'log':
+    centers[:, 1] = 10.0 ** centers[:, 1]
+
+collection = mcoll.PolyCollection(polygons, ...existing kwargs...)
+collection.set_offsets(centers)
+collection.set_offset_transform(mtransforms.Affine2D().scale(0.0))
+
+- This ensures:
+  - Rendering is unaffected (offsets are effectively zeroed by the offset_transform).
+  - get_offsets() returns meaningful bin centers in data coordinates.
+  - Autoscaling and picking continue to rely on polygons; no regressions expected.
+
+5) Run tests to validate
+- Re-run the reproduction test:
+  pytest lib/matplotlib/tests/test_axes.py -k hexbin_get_offsets_loglog -q
+- Run the broader test suite or at least hexbin-related tests to ensure no regressions:
+  pytest -k hexbin -q
+
+6) Clean up
+- No temporary files were created beyond the new permanent regression test. Do not remove the test.
+- Do not commit your edits; leave the working tree with your changes.
+
+Notes and cautions
+- The documentation issue mentioned in the original bug (get_offset vs get_offsets) appears to be corrected in recent versions. No doc changes are required here.
+- Be careful to use the filtered offsets (after removing empty bins) so that centers length matches the number of polygons and accumulation bins.
+- The centers must be in data coordinates (not log coordinates) when you set them on the collection.
+- Do not attempt to rework the rendering path to use offsets for log scales; that is a larger refactor and unnecessary for this fix. The zero-scale offset_transform approach is minimal and safe.

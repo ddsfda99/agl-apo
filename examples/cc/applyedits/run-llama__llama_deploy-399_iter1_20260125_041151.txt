@@ -1,0 +1,148 @@
+You are working in a code repository in the current directory.
+
+Goal
+Implement per-service environment variables in the deployment definition and ensure the Control plane propagates these variables only to the spawned service process. The YAML should support an env mapping under each service, for example:
+services:
+  test-workflow:
+    name: Test Workflow
+    env:
+      OPENAI_API_KEY: "secret!"
+    source:
+      type: git
+      name: https://github.com/run-llama/llama_deploy.git
+    path: tests/apiserver/data/workflow:my_workflow
+
+Critical constraints and guardrails
+- Do not add or modify permanent tests in the repository. Use only temporary tests or scripts for reproduction and validation, and clean them up after.
+- Make minimal changes aligned with existing code and tests. Do not change existing test behavior or assumptions.
+- Do not set environment variables globally via os.environ during service loading. Propagate env only to the specific service process when it is spawned, to avoid cross-service leakage.
+- Keep existing behavior intact, especially:
+  - SourceType must remain an Enum subclass of str such that wf_config.source.type == "git" comparisons remain valid.
+  - Dependency installation subprocess error handling and message formatting should not change.
+  - Control plane host and port assignment behavior must remain unchanged.
+
+Learnings from prior failures and what to avoid
+- Do not implement “env” handling as dead code. The previous attempt computed child_env but never applied it, leading to a non-functional feature.
+- Do not add fields to service classes that are not consumed or stored; ensure any new env field is actually carried through to spawn-time.
+- Do not change uvicorn launch behavior unless you can safely scope environment variables without polluting global os.environ.
+- Do not rely on tests to validate env since existing tests don’t cover it; use temporary scripts and mocks to assert correct behavior.
+- Do not break existing config parsing, message queue selection, dependency install, or host/port assignment.
+
+Plan and steps
+1) Understand requirements and repository structure
+- The feature: Allow env variables per service via YAML and have the Control plane propagate them when spinning up the service.
+- Read and understand these files:
+  - apiserver/config_parser.py: pydantic models for config parsing.
+  - control_plane/config.py: control plane config or models and any request/response schemas for service spawn.
+  - apiserver/deployment.py: deployment manager, service loading, dependency installation, control plane address assignment.
+  - control_plane/server.py: control plane management and service spawning logic.
+  - services/workflow.py: workflow service specifics and server launch behavior.
+  - tests/apiserver/test_config_parser.py and tests/apiserver/test_deployment.py: understand what current tests assert and ensure your changes do not break them.
+
+2) Prepare a temporary reproduction check (do not commit this)
+- Create a minimal temporary YAML config in a temp directory that includes a service with an env mapping.
+- Create a temporary script or test that:
+  - Parses the YAML into Config.
+  - Navigates the code path that spins up a service. If the service is spawned via subprocess.Popen or subprocess.run, monkeypatch or mock that function to capture the env argument. If the architecture runs services in-process, identify the exact code path where the service server is started and mock that point or use a context manager to assert env scoping.
+  - Assert that the env passed to the child process includes the provided mapping merged with the current environment.
+- Delete these temporary files after validation.
+
+3) Locate the spawn point and implement the feature
+- Search for where services are spawned:
+  - Grep for subprocess usage: grep -R "subprocess" -n
+  - Grep for process start calls: grep -R "Popen|run|start" -n control_plane apiserver services
+  - Look for functions/methods in control_plane/server.py or apiserver/deployment.py that start service processes or containers.
+- Do not set env globally when loading services. Instead:
+  - Parse env in the service config and store it on the model.
+  - When spawning the service process, pass env to the subprocess via the env parameter:
+    - child_env = os.environ.copy()
+    - child_env.update(service.env) only if service.env is present
+    - subprocess.Popen(cmd, env=child_env, ...) or subprocess.run(..., env=child_env, ...)
+  - If the architecture uses docker or another container runtime, add the environment mapping into the container definition accordingly, scoped to that service only.
+  - If services are run in-process (for example via uvicorn.Server inside services/workflow.py without spawning a separate process), you must avoid global os.environ pollution. In that case, implement a small scoped environment context right inside the spawn/start function:
+    - Before launching, save previous values for keys in service.env and set new ones in os.environ.
+    - Launch the server.
+    - In a finally block, restore the previous environment values and unset any keys that were newly added.
+    - Do not apply this at service loading time; only at the moment the server starts.
+  - Do not change how the server is started beyond passing env or using a scoped environment; keep behavior and error messages identical otherwise.
+
+4) Implement parsing support without breaking existing tests
+- In apiserver/config_parser.py, add an optional env field to the Service model:
+  - env: Optional[Dict[str, str]] = None
+  - Import Optional and Dict from typing, keeping existing imports intact.
+- Ensure that adding env does not change existing parsing behavior. Do not modify other fields, aliases, defaults, or validations.
+- Do not change how SourceType works; it should continue to compare equal to a string like "git" in tests.
+
+5) Wire env through the control plane and service spawn
+- Identify how the Control plane receives the service specification and starts the service.
+- If there is a schema or message type used to communicate service start parameters (e.g., a pydantic model in control_plane/config.py), add env as an optional field and ensure it is propagated end-to-end to the spawn point.
+- At the point of spawning:
+  - If using subprocess.Popen or subprocess.run, pass the merged env mapping via the env parameter exactly as described.
+  - If services are run in-process, implement the scoped env context manager at the server start call, not during initial config load.
+- Do not modify or rely on global os.environ beyond the scoped env context; no leakage across services.
+
+6) Validate against existing tests and behavior
+- Run the existing test suite if available: pytest -q. If pytest is not installed, perform careful code review and execute targeted scripts to confirm:
+  - config parsing still works; Service.source.type comparisons to "git" are valid.
+  - _install_dependencies builds the exact pip command and does not alter error handling or messages.
+  - _load_message_queue_client behavior matches tests:
+    - Default simple returns a SimpleRemoteClientMessageQueue with port 8001 and host "127.0.0.1", and sets self._simple_message_queue appropriately.
+    - For AWS and Redis types, factories should be called with kwargs via model_dump() (not passing the object).
+    - For Kafka and RabbitMQ types, factories should be called with the config object itself (not kwargs).
+  - Control plane host and port assignment remains unchanged.
+- Fix any regressions introduced by your changes.
+
+7) Clean up
+- Remove any temporary test files or scripts you created for reproduction.
+- If previous attempts added repository test files unrelated to the existing suite, remove them:
+  - tests/apiserver/test_env_vars.py
+  - tests/apiserver/data/git_service_with_env.yaml
+- Do not commit your temporary tests or artifacts.
+
+Implementation hints
+- apiserver/config_parser.py:
+  - class Service(BaseModel):
+      name: str
+      source: Source
+      path: str
+      env: Optional[Dict[str, str]] = None
+- control_plane/server.py or wherever the service process is started:
+  - If starting a subprocess:
+      child_env = os.environ.copy()
+      if service.env:
+          child_env.update(service.env)
+      subprocess.Popen(cmd, env=child_env, ...)
+  - If launching in-process:
+      Implement a small helper:
+        def _apply_scoped_env(env_map):
+            prev = {}
+            for k, v in env_map.items():
+                prev[k] = os.environ.get(k, None)
+                os.environ[k] = v
+            return prev
+        def _restore_scoped_env(prev):
+            for k, v in prev.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+      Use it immediately around the server launch call in a try/finally block. Do not modify global env outside this scope.
+- apiserver/deployment.py:
+  - Do not set os.environ during _load_services.
+  - Keep existing behavior intact for dependencies, message queue, and control plane address assignment.
+
+Checklist before finishing
+- Optional env field is parsed in Service without affecting existing tests.
+- Env is propagated to the spawn point only and applied to that service process (subprocess env parameter) or scoped to the server launch if in-process.
+- No global environment pollution across services or during loading.
+- SourceType behavior remains unchanged and comparable to strings.
+- Dependency install error handling and formatting unchanged.
+- Message queue client selection and argument passing unchanged.
+- Control plane host/port assignment unchanged.
+- Temporary reproduction script exists and is removed before finishing.
+- No permanent tests or unrelated files added.
+
+Acceptance criteria
+- Code changes that parse env per service and propagate them to the service process at spawn time, without introducing global environment pollution or breaking existing tests.
+- Temporary reproduction artifacts used only during development, deleted before finishing.
+- No committed tests or unrelated changes.

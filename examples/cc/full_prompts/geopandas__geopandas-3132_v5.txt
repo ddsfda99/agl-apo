@@ -1,0 +1,83 @@
+You are working in the repository at /testbed.
+
+Goal
+Make GeoDataFrame._to_geo public by adding a new GeoDataFrame.to_geo method that returns a GeoJSON-like FeatureCollection dictionary. This enables users to get the dict representation directly, not just the JSON string via GeoDataFrame.to_json.
+
+Important constraints
+- Do not refactor or change existing behavior of _to_geo, to_json, __geo_interface__, or iterfeatures unless strictly necessary.
+- Implement to_geo as a thin wrapper around _to_geo with the same parameters and behavior.
+- Avoid brittle, large “exact string replacement” edits. Use small, targeted insertions near the relevant code (e.g., right next to _to_geo).
+- Write minimal, focused tests to capture the intended public API and behavior differences.
+- Run the tests. If they fail, fix and rerun.
+- After validating the fix, delete the tests you added.
+- Do not commit any edits.
+
+What to do
+1) Write tests to reproduce the bug and specify the intended behavior:
+   - Create a new test file, for example tests/test_to_geo_public_api.py.
+   - Build a small GeoDataFrame with a geometry column using shapely (Point), plus a non-geometry property column and an id column to exercise drop_id behavior.
+   - Tests to include:
+     - A GeoDataFrame instance has a callable method to_geo.
+     - to_geo returns a dict with type="FeatureCollection" and a features list whose length equals len(gdf).
+     - The features contain valid geometry dicts (e.g., Point) and properties that match the DataFrame columns.
+     - show_bbox=True causes the top-level dict to include bbox (list), and each feature includes a bbox where appropriate; show_bbox=False does not include bbox.
+     - drop_id=True omits the 'id' key from each feature; drop_id=False includes 'id' when the GeoDataFrame has an index or id column mapped to feature ids.
+     - CRS handling:
+       - Set gdf.crs to a non-WGS84 CRS (e.g., EPSG:3857). json.loads(gdf.to_json()) may include a "crs" entry; to_geo must not include "crs".
+       - For a GeoDataFrame with no CRS set, normalize and compare to_json vs to_geo:
+         - Compare json.loads(gdf.to_json()) to json.loads(json.dumps(gdf.to_geo())) to account for tuple/list differences. They should match except for any CRS-related differences (which should be absent in this case).
+     - Basic type checks: to_geo returns a dict, features is a list.
+
+   Notes:
+   - Normalize structural differences by comparing json.loads(json.dumps(...)) rather than raw dicts, since bbox or coordinates may be tuples internally.
+   - Use small data and simple points to keep tests fast and deterministic.
+   - Do not rely on __geo_interface__ behavior; just test to_geo and to_json interplay.
+
+2) Explore the source to locate the bug:
+   - Search for the GeoDataFrame class (likely in geopandas/geodataframe.py or similar).
+   - Find existing methods: to_json, _to_geo, __geo_interface__, iterfeatures.
+   - Confirm that _to_geo produces a GeoJSON-like FeatureCollection dict and that to_json calls _to_geo and may inject CRS for non-WGS84.
+
+3) Implement the fix with a targeted edit:
+   - Add a new public method GeoDataFrame.to_geo(self, na="null", show_bbox=False, drop_id=False) that simply delegates to self._to_geo with the same parameters and returns the dict.
+   - Place the new method adjacent to _to_geo or near to_json for discoverability, using a small, surgical insertion rather than replacing large blocks.
+   - Include a concise docstring explaining that to_geo returns a GeoJSON-like FeatureCollection dict and mirrors _to_geo behavior. Make clear that CRS is not included here; only to_json may include CRS for non-WGS84.
+
+   Example implementation to insert:
+   def to_geo(self, na="null", show_bbox=False, drop_id=False):
+       """
+       Return a GeoJSON-like FeatureCollection dictionary representation of this GeoDataFrame.
+
+       This is a public wrapper around the internal _to_geo method.
+       Parameters:
+           na: How to serialize missing values in properties, passed through to _to_geo.
+           show_bbox: Whether to include bbox in the top-level collection and features.
+           drop_id: If True, omit feature 'id' fields.
+       Returns:
+           dict: GeoJSON-like FeatureCollection.
+       """
+       return self._to_geo(na=na, show_bbox=show_bbox, drop_id=drop_id)
+
+   - Do not change to_json or _to_geo. The public method should not add CRS; leave CRS injection to to_json as currently implemented.
+
+4) Run your tests and validate:
+   - Execute the test suite, focusing on the new tests first.
+   - If any tests fail, re-check the method placement and parameters, and ensure there are no typos or signature mismatches.
+   - Avoid modifying unrelated code. Keep the change minimal and behavior-preserving.
+
+5) Clean up:
+   - After confirming the fix, delete the test file(s) you added.
+   - Do not commit any changes.
+
+Additional guidance based on prior failures
+- Be prepared for the first test run to fail before you add the new method; this is expected and helps validate your test coverage.
+- Do not attempt large textual replacements that can fail due to small whitespace or comment differences. Instead, insert the new method using anchors like “def _to_geo(” or placing it right after the “to_json” method.
+- Keep internal behavior untouched unless necessary. Adding a thin public wrapper avoids duplication and minimizes risk.
+- If you consider refactoring __geo_interface__ to call to_geo, do not proceed unless you can guarantee that existing documented differences (bbox defaults, CRS handling) remain intact. For this fix, it is sufficient to add the public wrapper only.
+
+Success criteria
+- GeoDataFrame.to_geo exists and is callable.
+- to_geo returns the expected FeatureCollection dict with correct features, optional bbox, and no CRS injection.
+- to_json continues to work unchanged and may include CRS for non-WGS84.
+- Your tests pass, and then you remove them per instructions.
+- No commits are made.

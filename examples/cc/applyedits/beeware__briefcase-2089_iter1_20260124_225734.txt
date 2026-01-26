@@ -1,0 +1,109 @@
+You are working in the current repository to implement and/or verify the feature: during “briefcase convert”, ask the user if the existing app is a console app and configure pyproject.toml appropriately. This revised prompt incorporates lessons from prior failures so you avoid breaking existing behavior and tests.
+
+Goals
+- Ensure that “briefcase convert” prompts the user to confirm whether the app is a console app.
+- If the user selects “Yes”, inject console_app = true into the appropriate Briefcase app configuration in pyproject.toml via the cookiecutter context key pyproject_table_briefcase_app_extra_content.
+- If the existing pyproject.toml for the specific app already contains console_app, skip the prompt and do not duplicate or override existing settings.
+- Preserve existing behavior of build_gui_context when called with minimal context: do not prompt, return {"gui_framework": "None"}, and do not mutate overrides.
+- Validate behavior with targeted tests. If the full suite has unrelated failures due to environment, do not change tests to make them pass; investigate and report the environment issue.
+
+Strict constraints
+- Do not edit or remove any existing tests unless you are adding a new test specifically for the console-app prompt behavior. Do not change tests unrelated to this feature.
+- Do not claim to have implemented a behavior if the repository already implements it; instead, verify and, if needed, refine it.
+- Do not broadly catch exceptions; prefer narrow, explicit handling, with logging where appropriate.
+- Do not commit your changes. Make edits locally only.
+- Do not change project_overrides in build_gui_context; keep it untouched.
+
+Key acceptance criteria
+- build_gui_context({}, overrides) must not prompt. It must return {"gui_framework": "None"} and leave overrides unchanged, satisfying tests/commands/convert/test_build_gui_context.py.
+- During convert, if [tool.briefcase.app.{app_name}].console_app is present in pyproject.toml, do not prompt and do not inject extra content.
+- If console_app is absent, prompt the user with a default of “No”. If the user selects “Yes”, set pyproject_table_briefcase_app_extra_content to "console_app = true\n" (with a trailing newline). Do not duplicate the setting if it’s already present.
+- Behavior only applies to the convert command; no impact on unrelated commands.
+
+Step-by-step plan
+1) Confirm the project root:
+   - Print the current working directory and list files to ensure you’re in the repository’s root.
+   - Verify presence of key paths: src/briefcase, tests, pyproject.toml.
+
+2) Understand the requirements and current implementation:
+   - Grep the repository for relevant identifiers: input_console_app, console_app, pyproject_table_briefcase_app_extra_content, convert, build_gui_context.
+   - Review src/briefcase/commands/convert.py, especially build_gui_context(). Identify whether any prompt currently exists and how pyproject_table_briefcase_app_extra_content is populated.
+   - Identify any existing configuration loader utilities in the codebase; if none, plan to use tomllib (Python 3.11+).
+
+3) Preserve existing behavior of build_gui_context with minimal context:
+   - Ensure an early return when the provided context does not include app_name. In that case:
+     - Do not prompt.
+     - Return {"gui_framework": "None"}.
+     - Do not mutate project_overrides.
+   - This is required by tests/commands/convert/test_build_gui_context.py.
+
+4) Implement or refine the console-app prompt and injection:
+   - In the convert command flow (likely within build_gui_context in src/briefcase/commands/convert.py):
+     - Obtain app_name from the provided context. If missing, perform the early return above.
+     - Parse pyproject.toml to check for [tool.briefcase.app.{app_name}].console_app:
+       - Prefer the repository’s existing config loader; if none, use tomllib to read pyproject.toml and inspect tool.briefcase.app.{app_name}.console_app.
+       - Use narrow exception handling (e.g., KeyError) where keys are missing; do not use bare except.
+     - If console_app is already present for the app, log an informational message and skip prompting and injection.
+     - If console_app is absent:
+       - Prompt the user: “Is your existing app a console app?” with options Yes/No, default to No, using the project’s standard select_option helper.
+       - If the user selects Yes, set context["pyproject_table_briefcase_app_extra_content"] = "console_app = true\n".
+       - Ensure a trailing newline and that the injection is idempotent (no duplication if already present).
+     - Do not mutate project_overrides.
+     - Keep this logic scoped to convert; do not affect other commands.
+
+   - Pseudocode outline for the convert flow:
+     - If "app_name" not in context: return {"gui_framework": "None"}.
+     - Read pyproject.toml.
+     - Check tool.briefcase.app.{app_name}.console_app:
+       - If present: skip prompt, do not set pyproject_table_briefcase_app_extra_content.
+       - If absent: prompt Yes/No (default No); if Yes, set pyproject_table_briefcase_app_extra_content = "console_app = true\n".
+
+5) Write or identify reproduction tests:
+   - Reuse existing tests, especially tests/commands/convert/test_build_gui_context.py.
+   - If missing, add small, isolated tests under tests/commands/convert/ to cover:
+     - When pyproject.toml already contains console_app (true or false) for the app, the prompt is skipped and no duplicate console_app is injected.
+     - When the user selects “Yes”, pyproject_table_briefcase_app_extra_content is set to "console_app = true\n".
+     - When the user selects “No” or cancels, no injection occurs.
+   - Use the project’s DummyConsole with queued responses to simulate user interaction.
+   - Because you must not commit, create temporary test files, run them, and then delete them during cleanup.
+
+6) Run tests:
+   - Run targeted tests for the convert feature:
+     - pytest tests/commands/convert/test_build_gui_context.py -q
+     - pytest tests/commands/convert/test_console_app_prompt.py -q (if you added temporary tests)
+   - Then run the full test suite: pytest -q
+   - If you encounter failures unrelated to the console app feature:
+     - For example, tests/commands/base/test_paths.py::test_data_path_creation_failure can fail if tests run as root because /etc/mydatadir is writable, so no error is raised.
+     - Do not modify production code or tests to accommodate running as root. Instead, run pytest as a non-root user or document the environment issue clearly in your report.
+
+7) Debug and fix issues only within the scope of the console app prompt feature:
+   - If your new tests fail due to your changes, fix your implementation accordingly.
+   - Do not alter unrelated code or tests purely to make the suite pass.
+
+8) Cleanup:
+   - Remove any temporary test files you created for local verification.
+   - Leave the repository clean and ready for maintainers to review the focused changes.
+
+Deliverables in your final report
+- Current working directory and repository root confirmation.
+- Files and functions you inspected (paths and function names).
+- Summary of whether the feature was already implemented and any refinements you made.
+- Exact changes (file paths and function names) you implemented, with a brief rationale for each change.
+- Test results:
+  - Output for targeted tests related to the convert console prompt.
+  - Output for full test suite, noting any unrelated environmental failures (e.g., root environment causing /etc/mydatadir to be writable) without modifying those tests.
+- Confirmation that you did not commit changes and that temporary test files were cleaned up.
+
+Implementation tips
+- For parsing pyproject.toml, prefer the project’s existing configuration loader; if none is available, use tomllib (Python 3.11+).
+- When injecting extra content, ensure you don’t duplicate console_app if it’s already present for the app.
+- Keep user interaction consistent with existing helpers like select_option; default the prompt to “No”.
+- Provide a concise info log when skipping the prompt due to an existing console_app setting to aid traceability during conversion.
+- Maintain narrow exception handling; catch only specific errors you expect (e.g., KeyError), not Exception.
+
+Do and don’t summary
+- Do: early return from build_gui_context when app_name is missing; return {"gui_framework": "None"}; do not prompt; do not change overrides.
+- Do: check pyproject for tool.briefcase.app.{app_name}.console_app and skip prompting if present.
+- Do: inject "console_app = true\n" into pyproject_table_briefcase_app_extra_content only when the user answers Yes and console_app is absent.
+- Don’t: modify unrelated tests or code; don’t broadly catch exceptions; don’t commit any changes.
+- Don’t: mutate project_overrides in build_gui_context.

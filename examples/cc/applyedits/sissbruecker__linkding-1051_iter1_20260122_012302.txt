@@ -1,0 +1,74 @@
+You are given a code repository in the current directory.
+
+Task goal
+Enable automatic linkification of plain-text URLs in notes/description so that strings like https://github.com become clickable anchors without requiring Markdown link syntax.
+
+Important constraints
+- Do not modify, add, or commit any permanent changes to the existing test suite. If you need a reproduction test, create it temporarily for local validation and delete it before finishing.
+- Keep production code changes minimal, focused, and well-documented.
+- Prefer running targeted tests to avoid long execution times and timeouts.
+- Do not change templates, fixtures, translations, or the test suite in the repository.
+
+What to implement
+- Plain URLs in user-entered notes/description should be clickable in rendered HTML even when not wrapped in Markdown link syntax.
+- Do not linkify inside inline code or code blocks.
+- Implement this within the markdown rendering pipeline used for notes/description, preserving the existing sanitization and security model.
+
+Process and steps
+
+1) Understand and plan
+- The feature belongs in the markdown parsing/rendering stage used for notes/description. It should require no template changes.
+- The correct processing order is: convert markdown to HTML, then linkify plain URLs, then sanitize the HTML.
+- Linkification must not occur inside a, code, or pre tags.
+
+2) Locate the markdown rendering code
+- Search within the project’s own code (avoid node_modules and vendored directories). Likely location: bookmarks/templatetags/shared.py.
+- Find the function/filter that converts notes/description from markdown to sanitized HTML (often named render_markdown or similar).
+- Identify the allowlists used for sanitization, e.g., variables like markdown_tags and markdown_attrs, and confirm the project uses bleach.clean for sanitization.
+
+3) Verify allowlists and minimally adjust if necessary
+- Ensure the allowed tags include the anchor tag: a.
+- Ensure the allowed attributes include href for a. Use the project’s existing allowlist structure; only add a and href if they are currently missing.
+- Do not broaden the allowlist beyond what is required to preserve security and current behavior.
+
+4) Implement linkification with minimal changes
+- After markdown conversion to HTML and before sanitization, call bleach.linkify on the HTML.
+- Explicitly set skip_tags to ['a', 'code', 'pre'] to avoid linkifying inside existing anchors or code/pre blocks.
+- Then sanitize the output with bleach.clean using the existing tag and attribute allowlists.
+- Do not introduce target attributes or modify rel attributes. If bleach.linkify adds rel attributes by default and they are not allowed, bleach.clean will strip them; that is acceptable.
+- Add a brief code comment explaining the processing order and why skip_tags includes a, code, and pre.
+
+Implementation outline
+- In the markdown rendering function:
+  - Convert the input markdown to HTML as currently done.
+  - Apply bleach.linkify(html, skip_tags=['a', 'code', 'pre']).
+  - Sanitize with bleach.clean(html, tags=markdown_tags, attributes=markdown_attrs).
+- If the repository’s bleach version requires different parameters, adapt accordingly, but keep the same intent and ordering.
+
+5) Temporary local validation (do not commit any tests)
+- Create a temporary test file locally (for example bookmarks/tests/test_autolink_tmp.py) to validate:
+  - Rendering a note containing “Visit https://example.com for docs” yields HTML containing an anchor: <a href="https://example.com">https://example.com</a>.
+  - A URL inside inline code (`https://example.com`) or inside a fenced/indented code block is not linkified.
+- Use the same code path production uses to render notes/description (e.g., call the render_markdown function or render the template that displays notes/description).
+- Run only targeted tests to avoid timeouts:
+  - pytest -q -k autolink_tmp
+  - pytest -q -k bookmarks
+- Confirm your temporary test passes and that existing tests still pass without changes.
+- Delete the temporary test file before finishing so the repository test suite remains unchanged.
+
+6) Security considerations
+- Linkify first, sanitize second ensures disallowed protocols and attributes are removed by bleach.clean, preserving the security model.
+- Do not broaden allowed tags or attributes beyond adding a and href only if they are missing.
+- Do not add target="_blank" or modify rel attributes; keep behavior consistent with current sanitization policy.
+
+7) Cleanup and final checks
+- Remove any temporary files you created for local validation.
+- Keep production code changes minimal and include a short explanatory comment.
+- Perform a final targeted test run (for example pytest -q -k bookmarks) to confirm behavior without running the entire suite.
+
+Acceptance criteria
+- Plain URLs in notes/description are converted into clickable anchors in rendered HTML.
+- URLs inside inline code or code blocks are not linkified.
+- Sanitization still applies and the security model is preserved.
+- No permanent changes to tests, templates, or unrelated code.
+- Changes are minimal, focused, and documented with a short comment.

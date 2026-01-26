@@ -1,0 +1,126 @@
+You are working in /testbed. Your goal is to fix the false-positive “no-name-in-module” when imports are conditionally guarded by six.PY2 or six.PY3, following a test-driven workflow. The repository already skips imports guarded by sys.version_info, via pylint/checkers/utils.py:is_sys_guard, which is used by pylint/checkers/variables.py. The missing piece is support for six guards.
+
+Follow these steps carefully. Write and run tests first, implement a minimal fix, validate, then remove the tests at the end. Do not commit any changes.
+
+Bug summary
+- Repro code (executed under Python 2):
+  - import six
+  - if six.PY3: from urllib.parse import urlparse
+  - else: from urlparse import urlparse
+- Pylint incorrectly reports E0611 on the non-executed branch.
+- Under Python 3, the inverse happens: if six.PY2: from urlparse import urlparse should not be checked, but currently is.
+
+Plan overview
+- Add tests that reproduce the bug under Python 3 without depending on an external six installation by creating a local six.py stub.
+- Extend pylint/checkers/utils.py:is_sys_guard to recognize six.PY2/three guards (both attribute form and name-import form).
+- Rely on existing logic in pylint/checkers/variables.py that already skips imports guarded by is_sys_guard.
+- Validate by running the tests.
+- Remove the added tests.
+
+Step 1: Add tests to reproduce the bug
+Create two temporary pytest tests under tests/ (you can name the file tests/test_six_guard.py) that verify:
+- Functional behavior: no E0611 for imports inside an if six.PY2 (false under Python 3) or if six.PY3 (true).
+- Utility behavior: is_sys_guard returns True for both “if six.PY2” and “if PY2” where PY2 was imported from six.
+
+Details:
+- Use a local six stub by writing a six.py into a temporary directory with content:
+  - PY2 = False
+  - PY3 = True
+- Functional test: create a sample module next to the stub that does:
+  - import six
+  - if six.PY2:
+      from urlparse import urlparse
+    else:
+      from urllib.parse import urlparse
+- Also test the name-import variant:
+  - from six import PY2, PY3
+  - if PY2:
+      from urlparse import urlparse
+    else:
+      from urllib.parse import urlparse
+- Run Pylint programmatically against the sample files and assert that no E0611 is reported.
+  - You can use pylint.lint.Run([...], exit=False) with a custom reporter, or invoke it via subprocess, capturing stdout/stderr, and ensure the string “E0611” does not appear.
+- Unit test is_sys_guard:
+  - Use astroid.parse to build an AST for the two guarded if statements and assert is_sys_guard(if_node) is True for both attribute and name-import forms.
+
+Skeletons you can adapt:
+- six.py stub content:
+  - PY2 = False
+  - PY3 = True
+- Sample module content (attribute form):
+  - import six
+  - if six.PY2:
+      from urlparse import urlparse
+    else:
+      from urllib.parse import urlparse
+- Sample module content (name-import form):
+  - from six import PY2, PY3
+  - if PY2:
+      from urlparse import urlparse
+    else:
+      from urllib.parse import urlparse
+
+For the unit test of is_sys_guard, parse strings like:
+- "import six\nif six.PY2:\n    pass"
+- "from six import PY2\nif PY2:\n    pass"
+Then locate the If node and assert utils.is_sys_guard(if_node) is True.
+
+Run tests:
+- Use: python -m pytest -q
+
+Step 2: Locate the code to change
+- Guard detection lives in pylint/checkers/utils.py, function is_sys_guard(node: nodes.If) -> bool.
+- Import checking lives in pylint/checkers/variables.py, methods visit_import and visit_importfrom. They already skip checks if the immediate parent is an If and utils.is_sys_guard(parent) is True. You generally won’t need to change variables.py.
+
+Step 3: Implement the fix in is_sys_guard
+Extend is_sys_guard to also return True for six-based version guards. Handle both forms:
+- Attribute form: if the test is an Attribute referring to six.PY2 or six.PY3.
+- Name-import form: if the test is a Name “PY2” or “PY3” that was imported from the “six” module via “from six import PY2/PY3”.
+
+Implementation guidance:
+- Keep the existing sys.version_info logic intact.
+- Add detection for six guards:
+
+Algorithm outline:
+- If isinstance(node.test, nodes.Attribute):
+  - If node.test.as_string() is "six.PY2" or "six.PY3", return True.
+- If isinstance(node.test, nodes.Name) and node.test.name in {"PY2", "PY3"}:
+  - Check whether that name was imported from six:
+    - Use astroid’s lookup to retrieve the defining node(s) for the name within the current scope, and verify that the origin is an ImportFrom with modname == "six".
+    - This is similar to how utils.in_type_checking_block recognizes “TYPE_CHECKING” imported from “typing”. Mirror that pattern here.
+  - If the origin is from six, return True.
+
+Notes:
+- Prefer origin-aware detection for Name imports over raw string matching to avoid false positives if a local variable named PY2/PY3 is used.
+- Do not change the contract of is_sys_guard; just expand its recognition.
+
+Sketch of the added logic in utils.is_sys_guard (expressed conceptually; use actual astroid APIs already used in this file for lookup, similar to in_type_checking_block):
+- if isinstance(test, nodes.Attribute) and test.as_string() in {"six.PY2", "six.PY3"}: return True
+- if isinstance(test, nodes.Name) and test.name in {"PY2", "PY3"}:
+    - origin_nodes = definition lookup for test.name in current scope
+    - if any origin is nodes.ImportFrom with modname == "six": return True
+
+Step 4: Rerun the tests
+- Run: python -m pytest -q
+- Ensure your functional tests pass (no E0611 in guarded imports) and unit tests for is_sys_guard pass.
+
+If tests fail:
+- Re-check your is_sys_guard implementation, especially the Name-import origin detection. Use the same lookup pattern that the codebase uses in utils for detecting typing.TYPE_CHECKING to maintain consistency and robustness.
+
+Step 5: Clean up
+- Delete the test files you created (e.g., tests/test_six_guard.py and any temporary test data).
+- Do not commit any changes.
+
+Additional cautions and tips
+- The tests and fix should run under Python 3. Your six.py stub sets PY2=False and PY3=True to simulate the common case under Python 3 where the PY2 branch is not taken; Pylint must skip checking imports in that branch.
+- Ensure you only skip checks when the import node is directly inside an If whose test is the guard; variables.py already guards on node.parent being an If and calling is_sys_guard on that parent.
+- Avoid introducing external dependencies; rely on the local stub for six in tests.
+- Keep the change minimal: only adjust utils.is_sys_guard; do not alter broader import checking logic.
+
+Deliverables before cleanup
+- Passing tests that would have failed prior to the fix.
+- Source changes limited to pylint/checkers/utils.py:is_sys_guard to recognize six.PY2/PY3 guards in both attribute and name-import forms.
+
+Final action
+- After validation, remove your temporary tests as required by the task.
+- Do not commit any code.

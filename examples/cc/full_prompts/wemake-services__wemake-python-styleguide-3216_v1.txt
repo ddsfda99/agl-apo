@@ -1,0 +1,53 @@
+You are working in a code repository in the current directory. Your task is to implement support for Python’s match-case in the cognitive complexity logic and add a corresponding test without breaking compatibility with older Python versions.
+
+Follow this plan strictly:
+
+1) Understand the requirements
+- Goal: Count match-case branches toward cognitive complexity by treating each case like an if/elif decision. Concretely, include ast.match_case in the control flow breakers used to compute cognitive complexity.
+- Important: Guard any reference to ast.match_case so the code imports cleanly on Python versions where match-case doesn’t exist (Python < 3.10).
+- Testing: Add a new test case (do not modify or change expectations of existing tests) to tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py that verifies match/case increases cognitive complexity as intended.
+- Reference: The implementation center is wemake_python_styleguide/logic/complexity/cognitive.py around lines 25–31 (as per the issue link). The tests for cognitive complexity are in tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py.
+
+2) Write a reproduction test case first (additive only)
+- Do not edit or change existing tests; only add new test function(s).
+- Add a new test function that:
+  - Is skipped on Python < 3.10 using pytest.skipif or a similar mechanism, for example: pytest.mark.skipif(sys.version_info < (3, 10), reason="match-case requires Python 3.10+").
+  - Uses the same testing patterns already used in that file to compute cognitive complexity (inspect how existing tests parse code and call the cognitive complexity calculator; reuse the same fixtures/helpers like parse_ast_tree or whatever this file uses).
+  - Provides a simple function containing a match statement with multiple case blocks and asserts that the score increases by 1 per case (including a default case if present), consistent with adding ast.match_case to the control flow breakers. Keep the snippet minimal, for example a function with a match over a variable and 2–3 case clauses.
+  - Ensure the expected number matches “number of case clauses,” since we are counting ast.match_case nodes. To align with the project’s conventions, first inspect how the test file asserts complexity for if/elif to verify the assertion style. Then apply the same assertion approach for match-case.
+
+3) Locate where to implement the change
+- Open wemake_python_styleguide/logic/complexity/cognitive.py.
+- Find the definition of _CONTROL_FLOW_BREAKERS (or similarly named constant/tuple) which currently includes nodes like ast.If and other control-flow constructs.
+- Do not unconditionally reference ast.match_case, as that will break on Python < 3.10.
+
+4) Implement the change with proper guarding
+- Modify the definition of _CONTROL_FLOW_BREAKERS so that:
+  - It remains a tuple of AST node classes.
+  - It conditionally includes ast.match_case only if it exists:
+    - For example, define the base tuple as before, then if hasattr(ast, 'match_case'), extend it with (ast.match_case,).
+  - Keep naming and code style consistent with the project.
+- Do not change any other complexity rules or existing control flow breakers.
+
+5) Validate by running tests
+- Run the full test suite with pytest. If pytest is not installed in this environment, try python -m pytest. If this still is not possible, at least run the specific new test file or directory (python -m pytest tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py) to verify your changes locally.
+- All imports must succeed on Python < 3.10; your guarded reference ensures this.
+- The new test should be skipped on Python < 3.10 and should pass on Python ≥ 3.10.
+- Do not modify or weaken existing tests; your change should not break any unrelated tests.
+
+6) Clean up
+- Remove any temporary code or scripts you created for debugging.
+- Do not commit your edits; just leave the working tree with your changes.
+
+Implementation notes and constraints
+- Backward compatibility: The code must import and run on Python versions without match-case support by using hasattr(ast, 'match_case') to include it conditionally in _CONTROL_FLOW_BREAKERS.
+- Testing style: Match the style and fixtures already present in tests/test_logic/test_complexity/test_cognitive/test_cognitive_complexity.py. Do not change existing tests; add a new test function only. Skip it on older Python versions.
+- Semantics: Per the requirement, each case clause should add 1 to cognitive complexity. Using ast.match_case in _CONTROL_FLOW_BREAKERS achieves exactly that.
+- Keep changes minimal and localized: Only modify wemake_python_styleguide/logic/complexity/cognitive.py and add the new test function in the specified tests file.
+
+Acceptance criteria
+- The project imports cleanly on Python < 3.10 and on 3.10+.
+- The new test is added and is skipped on Python < 3.10.
+- On Python 3.10+, the new test passes, and match-case contributes to cognitive complexity by counting each case clause.
+- No existing tests are modified or broken.
+- No additional functionality is changed beyond adding match-case counting.

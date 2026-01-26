@@ -1,0 +1,108 @@
+Objective
+Fix a hang where closing an HTTPResponse from one thread does not interrupt a concurrent blocking read in another thread. The underlying cause is the order and manner in which HTTPResponse.close() cleans up the underlying connection and file-like object. The fix should ensure that closing the response interrupts any active blocking read on the socket, allowing the reading thread to exit promptly, while preserving existing invariants relied upon by urllib3’s tests (especially read_chunked generator semantics).
+
+Important constraints
+- Do not commit any changes. Make local edits only; we will commit later.
+- Avoid modifying upstream tests unless absolutely necessary. Use a local reproduction harness to validate the fix.
+- Ensure determinism in any local concurrency testing (use threading events for synchronization).
+- Do not add debug prints to core library code.
+- Preserve HTTPResponse invariants used by read_chunked(): do not set self._fp to None in close(); allow the underlying http.client.HTTPResponse to be closed so its internal fp becomes None.
+
+Deliverables
+- A robust local reproduction harness that demonstrates the hang and verifies the fix.
+- A minimal, surgical code change to urllib3 that resolves the hang without introducing regressions.
+- Passing full pytest suite. If time-based tests fail (e.g., RECENT_DATE), update the constant appropriately.
+- Cleanup of any temporary files created during reproduction.
+
+Key invariants and behaviors to preserve
+- HTTPResponse.supports_chunked_reads() checks hasattr(self._fp, "fp"). This must remain true after close(). Do not set self._fp = None.
+- read_chunked() is a generator function. When the response is closed, it should short-circuit such that next(response.read_chunked()) raises StopIteration, not BodyNotHttplibCompatible.
+- close() must be idempotent and best-effort. Suppress or safely handle exceptions during close to avoid hanging or masking original errors.
+- Do not attempt to drain or consume remaining bytes in close(); draining can cause blocking and reintroduce the hang.
+
+Steps
+1) Establish a baseline by running the full test suite
+- Run pytest for the repository before making any changes.
+- If the suite fails due to time-based maintenance tests (commonly test_connection/test_recent_date refers to RECENT_DATE being too old), update the RECENT_DATE constant to a recent value.
+  - Location: src/urllib3/util/ssl_.py (constant RECENT_DATE).
+  - Choose a date within the last 12–18 months relative to the current environment date so the test passes.
+- Re-run pytest to confirm a clean baseline with no unrelated failures.
+- Do not commit any changes.
+
+2) Create a local, deterministic reproduction harness (do not add an upstream test)
+- Create a temporary script at the repo root, e.g., tmp_close_hang_repro.py. You will remove it later.
+- The harness should:
+  - Start a simple TCP server in a daemon thread that speaks HTTP/1.1 with Transfer-Encoding: chunked.
+  - Send response headers, then one valid chunk (“a\r\n0123456789\r\n”) and then stall without sending the terminating 0-length chunk or additional data.
+  - On the client side, use urllib3.PoolManager to GET the server endpoint with preload_content=False to get a streaming HTTPResponse.
+  - Spawn a client thread that reads from the HTTPResponse such that it:
+    - Reads and consumes the first chunk.
+    - Attempts to read the next chunk and blocks.
+  - Use threading.Event objects to ensure determinism:
+    - Signal when the client has consumed the first chunk and is about to block on the next read.
+    - Only after that signal, the main thread should call response.close().
+  - Verify behavior:
+    - Before the fix, response.close() should hang or take significantly longer than expected because the underlying read is blocking.
+    - After the fix, response.close() returns promptly and the client thread exits with an exception (ProtocolError wrapping OSError or IncompleteRead are typical). It’s sufficient to assert that an exception occurred and the thread terminates.
+
+Implementation hints for the local harness
+- Server: Use socketserver or raw socket to emit:
+  - “HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\n\r\n”
+  - “a\r\n0123456789\r\n”
+  - Then pause (sleep) and avoid sending “0\r\n\r\n”.
+- Client: PoolManager().request("GET", url, preload_content=False) to get a streaming HTTPResponse.
+  - Read in a loop (response.read(amt) or iterate with response.stream(amt)), set an event after reading the first chunk, then attempt another read which should block until the connection is interrupted.
+
+3) Locate the code to change and implement the fix
+- Target: src/urllib3/response.py, class HTTPResponse, method close().
+- Goal: Proactively interrupt any concurrent blocking read at the OS/socket level by shutting down the socket and then closing the connection before closing the file-like object. Preserve read_chunked semantics by not setting self._fp to None.
+- Implementation details:
+  - Determine the underlying socket from self._connection if possible:
+    - sock = getattr(self._connection, "sock", None)
+    - If sock is present, call sock.shutdown(socket.SHUT_RDWR) in a try/except OSError block to ensure any blocked read is interrupted immediately on all platforms.
+  - After shutdown, call self._connection.close() if present, in a try/except to suppress errors.
+  - Then close the file-like object self._fp best-effort:
+    - If self._fp is not None, call self._fp.close() in a try/except to suppress errors.
+    - Do not set self._fp = None; allow the underlying http.client.HTTPResponse to set its internal fp to None. This keeps hasattr(self._fp, "fp") true while self._fp.fp becomes None, allowing read_chunked() to short-circuit and next(response.read_chunked()) to raise StopIteration.
+  - Ensure idempotency: multiple calls to close() should not raise errors.
+  - Do not attempt to drain/consume remaining bytes; avoid any code that reads from the socket during close.
+  - Maintain the closed property semantics: after both actions, HTTPResponse.closed should reflect that the response is closed.
+  - Add a brief comment explaining the rationale:
+    - “Shutdown and close the underlying connection before closing the file-like object to interrupt any concurrent blocking read on another thread. Closing the file-like object first can hang if it attempts to drain remaining bytes. Preserve _fp for read_chunked generator semantics.”
+
+4) Validate the fix with the local harness
+- Run tmp_close_hang_repro.py before the fix to confirm the hang or delayed close.
+- Apply the fix and re-run the script:
+  - Confirm that response.close() returns promptly.
+  - Confirm that the reading client thread exits due to a read error (exception raised) and does not hang.
+  - Optionally assert that the exception is a urllib3.exceptions.ProtocolError or similar, but it’s acceptable to check that an exception occurred and the thread terminated.
+- Additionally, verify read_chunked generator semantics locally:
+  - Perform response = PoolManager().request(..., preload_content=False)
+  - Call response.close()
+  - Ensure that calling next(response.read_chunked()) raises StopIteration, not BodyNotHttplibCompatible.
+
+5) Run the full test suite
+- Run pytest to ensure your change doesn’t introduce regressions.
+- Pay attention to TestConnectionPool.test_read_chunked_on_closed_response to ensure it passes and that next(response.read_chunked()) raises StopIteration.
+- If any time-based test failures occur (e.g., RECENT_DATE), update the constant to an appropriately recent value and re-run.
+- Confirm that all tests pass or that only known and allowed xfail/skipped tests remain.
+
+6) Cleanup
+- Remove tmp_close_hang_repro.py and any other temporary files created for reproduction.
+- Do not commit changes.
+
+Notes and cautions
+- Avoid modifying upstream tests unless explicitly requested. The local harness is sufficient to reproduce and validate the behavior.
+- Do not set self._fp to None in close(); this breaks supports_chunked_reads() and causes read_chunked() to raise BodyNotHttplibCompatible rather than StopIteration.
+- Preserve generator semantics: read_chunked() returning early should produce a generator that immediately raises StopIteration on next().
+- Interrupting blocking reads cleanly:
+  - sock.shutdown(socket.SHUT_RDWR) before closing is a robust way to ensure any blocked socket read is interrupted immediately.
+  - Suppress exceptions during shutdown/close to keep close() best-effort and idempotent.
+- Keep the change minimal and focused; do not refactor unrelated parts of HTTPResponse or the pooling logic.
+
+Success criteria
+- The local reproduction harness demonstrates the original hang and verifies that the fix interrupts the blocking read and avoids hanging.
+- The fix is implemented in src/urllib3/response.py by shutting down and closing the underlying connection before closing the file-like object, while preserving self._fp for read_chunked semantics.
+- next(response.read_chunked()) after close raises StopIteration as in upstream tests.
+- The full pytest suite passes after addressing any time-based test failures.
+- No upstream tests are modified, and all temporary files are cleaned up.

@@ -1,0 +1,68 @@
+diff --git a/src/briefcase/commands/convert.py b/src/briefcase/commands/convert.py
+index 5d408a8a..e1c63d05 100644
+--- a/src/briefcase/commands/convert.py
++++ b/src/briefcase/commands/convert.py
+@@ -598,12 +598,57 @@ class ConvertCommand(NewCommand):
+         context: dict[str, str],
+         project_overrides: dict[str, str],
+     ) -> dict[str, str]:
+-        # We must set the GUI-framework to None here since the convert-command uses the new-command
+-        # template. This template includes dependencies for the GUI-frameworks. However, if a project
+-        # already is set up for a GUI-framework, then those dependencies should already be listed.
+-        # To prevent the same dependency being listed twice (once in the PEP621-section and once in the
+-        # briefcase-section), possibly with different versions, we set the GUI-framework to None here.
+-        return {"gui_framework": "None"}
++        """Build GUI-related context for convert.
++
++        - Always default GUI framework to None for convert.
++        - If minimal context is provided (no app_name), do not prompt and do not
++          mutate overrides; just return the default.
++        - If the existing pyproject already contains a console_app setting for the
++          specific app, skip prompting and do not inject extra content.
++        - Otherwise, prompt the user whether the existing app is a console app,
++          with a default of "No". If the user selects "Yes", inject
++          "console_app = true\n" via the cookiecutter context key
++          ``pyproject_table_briefcase_app_extra_content``.
++        """
++        # Always default to no GUI bootstrap during convert
++        if "app_name" not in context:
++            return {"gui_framework": "None"}
++
++        gui_ctx: dict[str, str] = {"gui_framework": "None"}
++
++        # If the existing pyproject already contains console_app for this app,
++        # skip prompting and do not inject extra content.
++        try:
++            existing_console = (
++                self.pyproject["tool"]["briefcase"]["app"][context["app_name"]][
++                    "console_app"
++                ]
++            )
++        except KeyError:
++            existing_console = None
++
++        if existing_console is not None:
++            # Provide an informational log for traceability during conversion.
++            self.logger.info(
++                "Existing Briefcase configuration defines console_app; skipping console app prompt.",
++                prefix=context["app_name"],
++            )
++            return gui_ctx
++
++        # No existing console_app; prompt the user (default: No)
++        answer = self.select_option(
++            intro="Is your existing app a console app?",
++            variable="Console App",
++            default="No",
++            options=("No", "Yes"),
++            override_value=None,
++        )
++        if answer == "Yes":
++            gui_ctx["pyproject_table_briefcase_app_extra_content"] = (
++                "console_app = true\n"
++            )
++
++        return gui_ctx
+ 
+     def merge_or_copy_pyproject(self, briefcase_config_file: Path) -> None:
+         """Merge pyproject.toml file made by the cookiecutter with the one in the

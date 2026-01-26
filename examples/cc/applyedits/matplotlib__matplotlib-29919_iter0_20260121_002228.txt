@@ -1,0 +1,144 @@
+You are an expert developer tasked with reproducing and fixing a crash in contour/contourf on a Mollweide projection in this repository. Follow the plan below end-to-end and do not skip steps. Do not commit your edits; we will commit later.
+
+Goal
+- Reproduce the bug with a minimal test and the provided snippet.
+- Implement a robust fix so that contours on geographic projections do not crash.
+- Add regression tests to prevent reintroduction.
+- Validate by running tests and drawing.
+- Clean up any temporary files you create that are not part of the permanent fix/tests.
+
+Background and root cause (based on traceback and code structure)
+- The crash occurs when transforming contour paths on geo projections (e.g., Mollweide) because empty paths are passed through interpolation/reshaping.
+- The traceback points to matplotlib/cbook.py in simple_linear_interpolation at the line doing reshape((len(a), -1)). When a has zero length (empty path), reshape raises: ValueError: cannot reshape array of size 0 into shape (0,newaxis).
+- Geo projections call transform_path_non_affine in lib/matplotlib/projections/geo.py, which densifies paths via Path.interpolated, which in turn uses cbook.simple_linear_interpolation. Empty paths can legitimately occur (e.g., clipping/masking or data outside the projection domain), and must be handled gracefully.
+
+High-level fix
+- Make simple_linear_interpolation robust to empty input: if there are zero points, return an empty array of the same shape and dtype without attempting reshape/interpolation.
+- Optional extra safety: early-return in Path.interpolated when there are zero vertices. The central fix in cbook is sufficient and preferred for minimal change.
+
+Step-by-step instructions
+
+1) Reproduce the bug manually
+- Create and run a quick script (or Jupyter cell) using the exact code from the issue:
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+lons, lats = np.meshgrid(np.linspace(-np.pi, np.pi, 40),
+                         np.linspace(-np.pi/2, np.pi/2, 20))
+data = np.sin(lons) * np.cos(lons) * np.sin(lats) * np.cos(lats)
+
+fig, ax = plt.subplots(subplot_kw={'projection': 'mollweide'})
+ax.contour(lons, lats, data)
+fig.canvas.draw()  # This should currently crash
+
+- Confirm you hit a ValueError in simple_linear_interpolation reshape.
+
+2) Write minimal regression tests
+Add two new tests (use existing directories; if files already exist, append tests; otherwise create them):
+
+a) Unit test for the interpolation helper
+- File: lib/matplotlib/tests/test_cbook.py (create if absent)
+- Add:
+
+def test_simple_linear_interpolation_empty():
+    import numpy as np
+    from matplotlib.cbook import simple_linear_interpolation
+    a = np.empty((0, 2))
+    out = simple_linear_interpolation(a, steps=10)
+    assert out.shape == a.shape
+    assert out.size == 0
+    assert out.dtype == a.dtype
+
+b) Integration tests for geo contour no crash
+- File: lib/matplotlib/tests/test_geo.py (or lib/matplotlib/tests/test_axes.py; place near other geo tests)
+- Add:
+
+def test_mollweide_contour_no_crash():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(subplot_kw={'projection': 'mollweide'})
+    lons, lats = np.meshgrid(
+        np.linspace(-np.pi, np.pi, 40),
+        np.linspace(-np.pi/2, np.pi/2, 20)
+    )
+    data = np.sin(lons) * np.cos(lons) * np.sin(lats) * np.cos(lats)
+    ax.contour(lons, lats, data)
+    fig.canvas.draw()
+
+def test_mollweide_contourf_no_crash():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(subplot_kw={'projection': 'mollweide'})
+    lons, lats = np.meshgrid(
+        np.linspace(-np.pi, np.pi, 40),
+        np.linspace(-np.pi/2, np.pi/2, 20)
+    )
+    data = np.sin(lons) * np.cos(lons) * np.sin(lats) * np.cos(lats)
+    ax.contourf(lons, lats, data)
+    fig.canvas.draw()
+
+- Run these tests now to see the failure before fixing:
+pytest -q lib/matplotlib/tests/test_cbook.py::test_simple_linear_interpolation_empty
+pytest -q -k "mollweide_contour_no_crash or mollweide_contourf_no_crash"
+
+3) Implement the fix
+Modify lib/matplotlib/cbook.py in the function simple_linear_interpolation to short-circuit empty inputs. Insert the following at the top of the function:
+
+- Ensure a is an ndarray, then early return for empty along the first dimension.
+
+Example patch (adjust to match existing code style):
+
+def simple_linear_interpolation(a, steps):
+    """
+    Resample an array with steps - 1 points between original point pairs.
+    """
+    import numpy as np
+    a = np.asarray(a)
+    # Early return for empty input to avoid reshape/interpolation errors.
+    if a.shape[0] == 0:
+        return a.copy()
+    fps = a.reshape((len(a), -1))
+    xp = np.arange(len(a)) * steps
+    x = np.arange((len(a) - 1) * steps + 1)
+    return (np.column_stack([np.interp(x, xp, fp) for fp in fps.T])
+            .reshape((len(x),) + a.shape[1:]))
+
+Notes:
+- Using a.shape[0] == 0 is robust for arrays like shape (0, 2). Returning a.copy() preserves shape and dtype.
+- Do not alter behavior for non-empty input.
+
+Optional extra safety (not required if above is implemented):
+- In lib/matplotlib/path.py, in Path.interpolated, add a guard to return self if self.vertices.shape[0] == 0. Only do this if you confirm there’s no side effect elsewhere.
+
+4) Re-run the tests
+- Run unit test:
+pytest -q lib/matplotlib/tests/test_cbook.py::test_simple_linear_interpolation_empty
+- Run geo integration tests:
+pytest -q -k "mollweide_contour_no_crash or mollweide_contourf_no_crash"
+- Also sanity check the original reproduction script and ensure fig.canvas.draw() and plt.show() no longer raise.
+
+5) Validate no regressions
+- If possible, run a focused subset of existing tests around cbook and path/geo:
+pytest -q lib/matplotlib/tests/test_cbook.py
+pytest -q -k "geo or projection or path or contour"
+- Confirm there are no new failures related to interpolation.
+
+6) Clean up
+- Remove any temporary scripts you created for manual reproduction outside of the tests directory.
+- Leave the added tests and the cbook fix in place.
+- Do not commit changes.
+
+Acceptance criteria
+- The new unit test for empty interpolation passes.
+- The integration tests for mollweide contour and contourf both pass (no crash on fig.canvas.draw()).
+- The original reproduction code runs without raising exceptions.
+- No unintended regressions are introduced by the change.
+
+Troubleshooting tips
+- If file paths differ from the above, grep for:
+  - simple_linear_interpolation in lib/matplotlib/cbook.py
+  - class Path and interpolated in lib/matplotlib/path.py
+  - _GeoTransform or transform_path_non_affine in lib/matplotlib/projections/geo.py
+- If tests cannot find matplotlib modules, ensure you are running pytest from the repo root and that the local package is importable (e.g., pip install -e . or PYTHONPATH set accordingly).
+- If you still see visual artifacts in contourf after the fix, that is a separate seam/rendering issue; it is out of scope for this crash fix. The acceptance criterion is “no exceptions on draw.”

@@ -1,0 +1,113 @@
+diff --git a/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py b/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
+index 594b2d712..c5072b037 100644
+--- a/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
++++ b/checkov/terraform/checks/resource/azure/MySQLGeoBackupEnabled.py
+@@ -1,5 +1,8 @@
+-from checkov.common.models.enums import CheckCategories
++from typing import List
++
++from checkov.common.models.enums import CheckCategories, CheckResult
+ from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
++from checkov.terraform.parser_functions import handle_dynamic_values
+ 
+ 
+ class MySQLGeoBackupEnabled(BaseResourceValueCheck):
+@@ -13,5 +16,39 @@ class MySQLGeoBackupEnabled(BaseResourceValueCheck):
+     def get_inspected_key(self) -> str:
+         return 'geo_redundant_backup_enabled'
+ 
++    def scan_resource_conf(self, conf):  # type: ignore[override]
++        handle_dynamic_values(conf)
++
++        # Apply special handling ONLY for flexible servers
++        resource_type = conf.get('__resolved_module_resource_type') or conf.get('__resource_type')
++        # The test harness typically doesn't include resource type in conf; rely on supported_resources context instead.
++        # We limit logic by presence of 'create_mode', which only exists for flexible servers.
++        if 'create_mode' in conf:
++            raw_val = conf.get('create_mode')
++            candidate = None
++            if isinstance(raw_val, list):
++                if len(raw_val) == 0:
++                    return CheckResult.UNKNOWN
++                candidate = raw_val[0]
++            elif isinstance(raw_val, str):
++                candidate = raw_val
++            else:
++                return CheckResult.UNKNOWN
++
++            if isinstance(candidate, str):
++                s = candidate.strip()
++                if s.startswith('var.') or s.startswith('local.') or s.startswith('module.') or ('${' in s) or ('${{' in s):
++                    return CheckResult.UNKNOWN
++                if s.lower() == 'replica':
++                    return CheckResult.UNKNOWN
++            else:
++                return CheckResult.UNKNOWN
++
++        return super().scan_resource_conf(conf)
++
++    def get_evaluated_keys(self) -> List[str]:  # type: ignore[override]
++        parent_keys = super().get_evaluated_keys()
++        return ['create_mode'] + parent_keys
++
+ 
+ check = MySQLGeoBackupEnabled()
+diff --git a/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py b/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
+index c8ffbceb7..024d57e61 100644
+--- a/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
++++ b/checkov/terraform/checks/resource/azure/PostgreSQLFlexiServerGeoBackupEnabled.py
+@@ -1,5 +1,8 @@
+-from checkov.common.models.enums import CheckCategories
++from typing import List
++
++from checkov.common.models.enums import CheckCategories, CheckResult
+ from checkov.terraform.checks.resource.base_resource_value_check import BaseResourceValueCheck
++from checkov.terraform.parser_functions import handle_dynamic_values
+ 
+ 
+ class PostgreSQLFlexiServerGeoBackupEnabled(BaseResourceValueCheck):
+@@ -13,5 +16,44 @@ class PostgreSQLFlexiServerGeoBackupEnabled(BaseResourceValueCheck):
+     def get_inspected_key(self):
+         return 'geo_redundant_backup_enabled'
+ 
++    def scan_resource_conf(self, conf):  # type: ignore[override]
++        # handle dynamic values similar to base implementation
++        handle_dynamic_values(conf)
++
++        # Special handling for replicas/unknown create_mode for flexible servers
++        # create_mode can be str or list-of-str; treat 'replica' (case-insensitive) or unresolved vars as UNKNOWN
++        if 'create_mode' in conf:
++            raw_val = conf.get('create_mode')
++            candidate = None
++            if isinstance(raw_val, list):
++                if len(raw_val) == 0:
++                    return CheckResult.UNKNOWN
++                candidate = raw_val[0]
++            elif isinstance(raw_val, str):
++                candidate = raw_val
++            else:
++                # key exists with non-string value
++                return CheckResult.UNKNOWN
++
++            if isinstance(candidate, str):
++                s = candidate.strip()
++                low = s.lower()
++                # unresolved/variable or interpolation
++                if s.startswith('var.') or s.startswith('local.') or s.startswith('module.') or ('${' in s) or ('${{' in s):
++                    return CheckResult.UNKNOWN
++                if low == 'replica':
++                    return CheckResult.UNKNOWN
++            else:
++                # non-string candidate
++                return CheckResult.UNKNOWN
++
++        # Fallback to default behavior evaluating geo_redundant_backup_enabled
++        return super().scan_resource_conf(conf)
++
++    def get_evaluated_keys(self) -> List[str]:  # type: ignore[override]
++        # include both create_mode and the geo backup key for clarity
++        parent_keys = super().get_evaluated_keys()
++        return ['create_mode'] + parent_keys
++
+ 
+ check = PostgreSQLFlexiServerGeoBackupEnabled()

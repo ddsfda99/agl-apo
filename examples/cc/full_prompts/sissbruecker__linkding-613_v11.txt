@@ -1,0 +1,91 @@
+You are fixing a bug in the repository at /testbed.
+
+Goal
+- The tag cloud currently groups tags alphabetically by first character, which forces one-tag-per-line for languages like Chinese.
+- Add an option to disable alphabetical grouping so all tags render in a single line (no line breaks between groups), controlled by a per-user preference.
+
+Repository context
+- Tag cloud template: bookmarks/templates/bookmarks/tag_cloud.html
+- Tag cloud context logic: bookmarks/views/partials/contexts.py
+- Styles: bookmarks/styles/bookmark-page.scss
+- User preferences model: bookmarks/models.py uses a JSONField search_preferences for per-user preferences.
+- Existing tests for the tag cloud: bookmarks/tests/test_tag_cloud_template.py (contains a helper method assertTagGroups you will copy into the new test).
+
+Strict workflow. Do not commit any changes.
+
+1) Add a failing test to reproduce the issue
+- Create a new test file: bookmarks/tests/test_tag_cloud_grouping_preference.py.
+- Important: Copy the assertTagGroups helper from bookmarks/tests/test_tag_cloud_template.py directly into this new file. Do not import it from the other test module.
+- In the new test:
+  - Create a user and attach a profile with search_preferences = {"group_tag_cloud": False}.
+  - Prepare a set of tags including Chinese characters and Roman alphabet tags (e.g., "书", "测试", "alpha", "Beta", "中文", "gamma"). Keep them all unselected.
+  - Build the request/context the same way the existing tag cloud tests do in bookmarks/tests/test_tag_cloud_template.py. Follow their approach for:
+    - Creating a RequestFactory request.
+    - Ensuring the request has user_profile populated (use the same middleware or utilities the existing tests use, e.g., UserProfileMiddleware, if applicable).
+    - Rendering the template the same way (they include bookmarks/tag_cloud.html).
+  - Construct the TagCloudContext the same way as in existing tests and pass it to the template.
+  - Assert that when group_tag_cloud is False, the tag cloud produces a single group containing all unselected tags sorted case-insensitively by tag name. Use your copied assertTagGroups helper to assert the structure as a list of lists of tag names.
+    - Expected: a single list containing all tag names sorted using casefold() (i.e., sorted(names, key=lambda s: s.casefold())).
+- Run the full test suite (pytest). This new test should fail initially because grouping is currently unconditional.
+
+2) Understand the current implementation
+- Open bookmarks/views/partials/contexts.py and inspect TagCloudContext.
+- Find where unselected tags are collected and where groups are created. It likely calls TagGroup.create_tag_groups(unselected_tags) unconditionally.
+- Verify which attribute the template uses to render groups by reading bookmarks/templates/bookmarks/tag_cloud.html. It iterates over tag cloud groups using the attribute named groups on the TagCloudContext (not tag_groups). Confirm this in the code and respect it.
+
+3) Implement the fix to respect the user preference
+- In TagCloudContext (in bookmarks/views/partials/contexts.py), after computing unselected_tags, read the preference safely from request.user_profile.search_preferences:
+  - Use a safe chain that defaults to grouping enabled when the preference or user_profile is missing:
+    - prefs = getattr(getattr(self.request, "user_profile", None), "search_preferences", {}) or {}
+    - grouping_enabled = bool(prefs.get("group_tag_cloud", True))
+- Branch based on the preference:
+  - If grouping_enabled is True:
+    - Keep existing behavior unchanged: TagGroup.create_tag_groups(unselected_tags)
+    - Do not change sorting logic used by create_tag_groups to avoid breaking existing tests.
+  - If grouping_enabled is False:
+    - Sort unselected_tags case-insensitively by name using t.name.casefold() (fallback to lower() only if casefold is unavailable in the environment).
+    - Create a single TagGroup instance, e.g., TagGroup(""), and assign the entire sorted list to single_group.tags.
+    - Set the TagCloudContext attribute used by the template (groups) to [single_group].
+- Preserve backward compatibility:
+  - Default to grouping enabled if the preference is missing.
+  - Do not modify the template.
+  - Do not alter grouping behavior or sorting when grouping is enabled.
+
+Example sketch (adapt to actual class/variable names and imports in contexts.py):
+- After computing unselected_tags:
+  - prefs = getattr(getattr(self.request, "user_profile", None), "search_preferences", {}) or {}
+  - grouping_enabled = bool(prefs.get("group_tag_cloud", True))
+  - if grouping_enabled:
+      groups = TagGroup.create_tag_groups(unselected_tags)
+    else:
+      sorted_unselected = sorted(unselected_tags, key=lambda t: t.name.casefold())
+      single_group = TagGroup("")
+      single_group.tags = list(sorted_unselected)
+      groups = [single_group]
+  - self.groups = groups
+
+4) Validate the fix
+- Run pytest.
+- The newly added test should now pass.
+- All existing tests (including those in bookmarks/tests/test_tag_cloud_template.py) must also pass unchanged.
+
+5) Clean up the temporary test
+- Delete bookmarks/tests/test_tag_cloud_grouping_preference.py.
+- Run pytest again to ensure the repository’s original tests still pass.
+
+Important details and pitfalls to avoid
+- Do not commit any changes.
+- Confirm the attribute name used by the template is groups. Set self.groups accordingly; do not introduce or use a different attribute name like self.tag_groups.
+- Do not change the template.
+- Read the preference safely to avoid AttributeError/KeyError:
+  - Handle missing request.user_profile and missing search_preferences gracefully by defaulting to grouping enabled.
+- Sorting when grouping is disabled must be case-insensitive and Unicode-friendly:
+  - Prefer t.name.casefold(). If that’s not available for some reason in the environment, t.name.lower() is acceptable.
+- Do not change the behavior or sorting when grouping is enabled; keep using TagGroup.create_tag_groups as-is to preserve existing tests and behavior.
+- Ensure your test copies the assertTagGroups helper code directly from bookmarks/tests/test_tag_cloud_template.py. Do not import it.
+- Keep the test simple: no selected tags; assert a single group containing all tag names in casefold()-sorted order.
+
+Run order summary
+- Add test file, run pytest to see it fail.
+- Implement fix in contexts.py, run pytest to see all tests pass including your new one.
+- Delete your new test file, run pytest to ensure original tests still pass.

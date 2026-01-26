@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Claude CLI retry settings (can be overridden by env).
+: "${CC_CLAUDE_MAX_RETRIES:=8}"
+: "${CC_CLAUDE_RETRY_BASE_DELAY:=8}"
+: "${CC_CLAUDE_RETRY_MAX_DELAY:=120}"
+export CC_CLAUDE_MAX_RETRIES CC_CLAUDE_RETRY_BASE_DELAY CC_CLAUDE_RETRY_MAX_DELAY
+
+# Rate limit retry settings for runner-level retries (0 = unlimited retries).
+: "${CC_RATE_LIMIT_MAX_RETRIES:=0}"
+: "${CC_RATE_LIMIT_BASE_WAIT:=15}"
+: "${CC_RATE_LIMIT_MAX_WAIT:=300}"
+export CC_RATE_LIMIT_MAX_RETRIES CC_RATE_LIMIT_BASE_WAIT CC_RATE_LIMIT_MAX_WAIT
+
 usage() {
   cat <<'USAGE'
 Usage: run_cc_iterative_step.sh --case_id ID --iter 1|2 [--dataset_path PATH] [--skip_textgrad]

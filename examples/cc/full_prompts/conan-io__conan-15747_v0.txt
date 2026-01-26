@@ -1,0 +1,69 @@
+You are given a code repository in the current directory.
+The task description is:
+[bug] conan profile show crashes when showing profilse with per-package conf variables
+### Environment details
+
+* Operating System+version: Windows 11 Pro 23H2
+* Compiler+version: msvc 193
+* Conan version: 2.1.0
+* Python version: 3.12.2
+
+
+### Steps to reproduce
+
+I'm migrating my company to Conan V2, but need `conan profile show` to work to replace usages of `conan profile get` in our CI and justfiles where it is used to determine the name of the build directories and CMake presets. 
+
+1. Create a profile which contains per-package conf settings like the following snippet.
+
+```
+[conf]
+libiconv/*:tools.env.virtualenv:powershell=False
+libgettext/*:tools.env.virtualenv:powershell=False
+libffi/*:tools.env.virtualenv:powershell=False
+```
+
+Yes, these packages don't build correctly using Powershell and this configuration fixes building them when running conan install. Refer to conan-io/conan-center-index#21823.
+
+2. Run the `conan profile show` command on this profile.
+
+```
+conan profile show --format json --profile:host "windows/msvc/2022/debug"
+```
+
+### Logs
+
+```
+ERROR: Traceback (most recent call last):
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\cli.py", line 281, in main
+    cli.run(args)
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\cli.py", line 191, in run
+    command.run(self._conan_api, args[0][1:])
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\command.py", line 158, in run
+    sub.run(conan_api, parser, *args)
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\command.py", line 174, in run
+    self._format(parent_parser, info, *args)
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\command.py", line 98, in _format
+    formatter(info)
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conan\cli\commands\profile.py", line 28, in json_profiles
+    result = {"host": host.serialize(),
+                      ^^^^^^^^^^^^^^^^
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conans\model\profile.py", line 44, in serialize
+    "conf": self.conf.serialize(),
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Quickemu\AppData\Local\Programs\Python\Python312\Lib\site-packages\conans\model\conf.py", line 648, in serialize
+    for k, v in conf.serialize():
+        ^^^^
+ValueError: too many values to unpack (expected 2)
+
+ERROR: too many values to unpack (expected 2)
+```
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

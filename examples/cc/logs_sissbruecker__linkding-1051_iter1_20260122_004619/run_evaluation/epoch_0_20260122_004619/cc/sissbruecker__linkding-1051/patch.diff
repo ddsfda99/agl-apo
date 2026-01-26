@@ -1,0 +1,33 @@
+diff --git a/bookmarks/templatetags/shared.py b/bookmarks/templatetags/shared.py
+index 5da3c1c..df4ae78 100644
+--- a/bookmarks/templatetags/shared.py
++++ b/bookmarks/templatetags/shared.py
+@@ -141,6 +141,9 @@ def render_markdown(context, markdown_text):
+         renderer = context["markdown_renderer"]
+ 
+     as_html = renderer.convert(markdown_text)
++    # Autolink plain URLs after markdown conversion but before sanitization.
++    # Skip linkifying inside anchor/code/pre to avoid altering code snippets.
++    as_html = bleach.linkify(as_html, skip_tags=["a", "code", "pre"])
+     sanitized_html = bleach.clean(as_html, markdown_tags, markdown_attrs)
+ 
+     return mark_safe(sanitized_html)
+diff --git a/package-lock.json b/package-lock.json
+index ea5f9ee..fdb80ea 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "linkding",
+-  "version": "1.36.0",
++  "version": "1.39.1",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "linkding",
+-      "version": "1.36.0",
++      "version": "1.39.1",
+       "license": "MIT",
+       "dependencies": {
+         "@hotwired/turbo": "^8.0.6",

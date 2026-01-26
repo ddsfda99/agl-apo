@@ -1,0 +1,139 @@
+You are working in the current repository. Your goal is to reproduce and fix a bug in matplotlib’s hexbin where get_offsets() returns array([[0., 0.]]) when xscale='log' and/or yscale='log', and to add regression tests. Do not commit your edits.
+
+Follow this plan precisely, with careful attention to locating and editing only the relevant code slices and running targeted tests.
+
+1) Understand the issue and expected behavior
+- The bug: For hexbin plots with xscale='log' and yscale='log', calling get_offsets() on the returned PolyCollection yields array([[0., 0.]]) instead of the bin centers. The same problem occurs if only one axis is log (x-only or y-only), due to the same code path.
+- Expected behavior: get_offsets() should return the centers of the hexagonal bins in data coordinates regardless of whether the scales are linear or logarithmic.
+- Root cause: In the log-scale code path of Axes.hexbin, the PolyCollection is created with explicit polygon vertices and no per-hexagon offsets. When offsets are not set, PolyCollection.get_offsets() falls back to array([[0., 0.]]). In the linear branch, offsets are set and returned correctly.
+
+2) Add regression tests that fail before the fix
+Create tests in lib/matplotlib/tests/test_axes.py. Add these three tests to cover log-log, x-only-log, and y-only-log:
+
+- Log-log case:
+
+def test_hexbin_get_offsets_loglog():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    x = [1, 10, 100]
+    y = [1, 10, 100]
+    h = ax.hexbin(x, y, mincnt=1, xscale='log', yscale='log')
+    off = h.get_offsets()
+    # Expect bin centers in data coordinates, not zeros.
+    assert off.ndim == 2 and off.shape[1] == 2
+    assert not np.allclose(off, 0.0)
+    assert np.all(np.isfinite(off))
+    assert np.all(off > 0)
+
+- X-log, Y-linear:
+
+def test_hexbin_get_offsets_xlog():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    x = [1, 10, 100]
+    y = [1, 2, 3]
+    h = ax.hexbin(x, y, mincnt=1, xscale='log', yscale='linear')
+    off = h.get_offsets()
+    assert off.ndim == 2 and off.shape[1] == 2
+    assert not np.allclose(off, 0.0)
+    assert np.all(np.isfinite(off))
+    assert np.all(off[:, 0] > 0)
+
+- X-linear, Y-log:
+
+def test_hexbin_get_offsets_ylog():
+    import numpy as np
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    x = [1, 2, 3]
+    y = [1, 10, 100]
+    h = ax.hexbin(x, y, mincnt=1, xscale='linear', yscale='log')
+    off = h.get_offsets()
+    assert off.ndim == 2 and off.shape[1] == 2
+    assert not np.allclose(off, 0.0)
+    assert np.all(np.isfinite(off))
+    assert np.all(off[:, 1] > 0)
+
+- Run just these tests to see them fail before the fix:
+  pytest lib/matplotlib/tests/test_axes.py -k "hexbin_get_offsets_loglog or hexbin_get_offsets_xlog or hexbin_get_offsets_ylog" -q
+
+Notes on test strength:
+- These assertions ensure that offsets exist, are finite, and reflect positive data coordinates (appropriate for the provided positive inputs), and catch the regression where get_offsets() returns [[0, 0]].
+- We avoid over-coupling to internal grid computations to keep the test robust across minor algorithmic changes.
+
+3) Locate the relevant code efficiently (avoid reading huge files at once)
+- Use grep to find the hexbin implementation:
+  - grep -n "def hexbin" lib/matplotlib/axes/_axes.py
+- Read a small slice around the function definition and the log-scale branch:
+  - For example, read ~200–400 lines around the def hexbin line number and search within that slice for the conditions handling xscale/yscale == 'log'.
+- You are looking for:
+  - In the linear branch: creation of a PolyCollection with a base hexagon Path, and offsets passed via offsets=... and offset_transform=...
+  - In the log branch: explicit construction of per-hexagon polygon vertices (e.g., polygons = ... + offsets) and creation of PolyCollection without setting offsets, which leads to get_offsets() returning default zeros.
+
+4) Implement the fix minimally and safely
+Goal:
+- Keep rendering unchanged.
+- Ensure get_offsets() returns bin centers in data coordinates for log-scale cases (both axes log and mixed).
+
+Approach:
+- In the log-scale branch, after you have:
+  - Computed the final filtered centers array (often named offsets or similar) that matches the polygons after masking empty bins.
+  - Built polygons and instantiated the PolyCollection from these polygons.
+- Also attach the bin centers (in data coordinates) to the PolyCollection via set_offsets().
+- Neutralize any effect of these offsets on rendering by setting a degenerate offset_transform that maps all offsets to zero using an Affine2D().scale(0.0). This keeps the visual output unchanged but makes get_offsets() meaningful.
+
+Detailed steps:
+- Identify the final N x 2 array of bin centers used to build polygons in the log branch (post-masking). It is typically the same array added to the base hexagon vertices to form polygons. It is in log space on the log axis or axes.
+- Create a copy of that array and convert it to data coordinates per axis:
+  - If xscale == 'log': centers[:, 0] = 10.0 ** centers[:, 0]
+  - If yscale == 'log': centers[:, 1] = 10.0 ** centers[:, 1]
+  - Leave linear axes unchanged.
+- After instantiating the PolyCollection with explicit polygons, set:
+  - collection.set_offsets(centers)
+  - collection.set_offset_transform(mtransforms.Affine2D().scale(0.0))
+
+Pseudo-code to insert in the log branch after polygons and collection creation:
+
+# offsets_log is the filtered Nx2 array of hex centers in log space that matches polygons
+centers = offsets_log.copy()
+if xscale == 'log':
+    centers[:, 0] = 10.0 ** centers[:, 0]
+if yscale == 'log':
+    centers[:, 1] = 10.0 ** centers[:, 1]
+
+collection = mcoll.PolyCollection(polygons, ...existing kwargs...)
+# Attach data-coordinate centers for API correctness, but neutralize them for rendering.
+collection.set_offsets(centers)
+collection.set_offset_transform(mtransforms.Affine2D().scale(0.0))
+
+Important cautions:
+- Use the filtered centers that correspond exactly to the polygons actually in the collection (i.e., after removing empty bins via masks such as good).
+- Do not change the linear-scale branch.
+- Do not refactor rendering to use offsets for log scales; keep the polygon-based rendering in the log branch intact.
+- Ensure you have matplotlib.transforms imported as mtransforms in this module. If not present near the top of lib/matplotlib/axes/_axes.py, add:
+  import matplotlib.transforms as mtransforms
+- Add a brief comment explaining why set_offsets is used with a zero-scale transform:
+  - For example: "Store bin centers in data coordinates for get_offsets() without affecting rendering; polygons already encode positions."
+
+5) Validate the fix
+- Re-run the targeted tests:
+  pytest lib/matplotlib/tests/test_axes.py -k "hexbin_get_offsets_loglog or hexbin_get_offsets_xlog or hexbin_get_offsets_ylog" -q
+- They should now pass.
+- Run additional related tests to check for regressions:
+  pytest -k hexbin -q
+
+6) Notes on implementation quality and performance
+- The added set_offsets with a degenerate transform is intentional and minimal. It avoids altering rendering while making get_offsets() useful. Document this in a code comment to avoid confusion for future maintainers.
+- Using 10** to invert the log transform matches the log10 usage typical in the hexbin log branch. If the code explicitly uses base-10 logs, this is correct for all three cases (log-log, x-only, y-only).
+- Autoscaling, picking, and artists’ paths continue to rely on polygons, so behavior remains unchanged.
+- Keep edits tightly scoped to the log-scale branch. Do not introduce unrelated changes.
+
+7) Clean up
+- Leave the regression tests in place.
+- Do not commit your edits; leave the working tree with your changes.
+
+Process tips to avoid previous pitfalls
+- Do not try to read entire large source files at once. First grep for "def hexbin" and then read small slices around the function and the log-branch code. This avoids tool size limits and speeds up navigation.
+- When making changes, prefer minimal diffs and add concise comments where the degenerate offset_transform is set to justify the approach.

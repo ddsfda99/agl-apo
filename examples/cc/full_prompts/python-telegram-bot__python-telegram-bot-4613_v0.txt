@@ -1,0 +1,48 @@
+You are given a code repository in the current directory.
+The task description is:
+Filter jobs with an optional parameter use_regex
+### What kind of feature are you missing? Where do you notice a shortcoming of PTB?
+
+I want be able to filter the jobs with a partial match of the job names, but the function `get_jobs_by_name` doesn't allow it, since it does an absolute comparison between the provided name and the job's name.
+
+### Describe the solution you'd like
+
+It would be nice to be able to filter the jobs by their names with the support of regular expressions, so developers can use the same function (`get_jobs_by_name`), extending its functionality to find jobs matching the pattern in their names.
+
+### Describe alternatives you've considered
+
+I considered to use another approach, like getting the list of jobs first, and then filter it with regular expressions, but that's redundant, since everytime this logic has to be applied, a filter step has to be inserted.
+
+### Additional context
+
+I've already implemented the functionality in my project, and it seems that it's doing its job:
+```python
+from re import compile # To put at the top of the module
+
+def get_jobs_by_name(self, name: str, use_regex: bool = False) -> Tuple["Job[CCT]", ...]:
+    '''Returns a tuple of all *pending/scheduled* jobs with the given name that are currently
+    in the :class:`JobQueue`.
+        
+    If :obj:`use_regex` parameter is set to :obj:`True`, re.search() function is used to look for
+    a match with the provided :obj:`name` as pattern on the :obj:`job.name`.
+
+    Returns:
+        Tuple[:class:`Job`]: Tuple of all *pending* or *scheduled* jobs matching the name.
+    '''
+    if use_regex:
+        pattern = compile(str(name))
+        return tuple(job for job in self.jobs() if pattern.search(job.name))
+        
+    return tuple(job for job in self.jobs() if job.name == name)
+```
+Since the new parameter `use_regex` is set to False as default, the behaviour of this function for actual uses doesn't change, therefore is not a breaking change.
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.

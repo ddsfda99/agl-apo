@@ -1,0 +1,98 @@
+You are working in the code repository under /testbed. Your objective is to fix a bug where load_kube_config does not match kubectl behavior when KUBECONFIG is a colon-separated list of files. The current implementation takes current-context only from the first file instead of merging and using the last-defined current-context as kubectl does.
+
+Requirements and constraints
+- Demonstrate the failing behavior before the fix.
+- Implement a minimal fix that preserves existing list merge behavior and adds correct scalar merge behavior for current-context.
+- Verify the fix by running tests.
+- Remove any temporary test files you created.
+- Do not commit any changes.
+
+Background and root cause
+- Symptom: When KUBECONFIG contains multiple files and only a later file defines current-context, load_kube_config raises “Invalid kube-config file. Expected key current-context in <first-file-path>”.
+- Expected: Mimic kubectl. Merge all files first; for conflicts the last file wins. The merged config’s current-context should come from the last file that defines it. Order should not matter.
+- Root cause: In KubeConfigMerger.load_config, only list fields (clusters, contexts, users) are merged. Scalar top-level keys such as current-context are not updated based on later files. KubeConfigLoader.__init__ calls set_active_context(), which immediately reads current-context from the merged config. If the first file does not have current-context, it raises with the first file’s path.
+
+Step-by-step plan
+1) Confirm which kube_config.py is used by load_kube_config in this repository
+- Run a short script in this environment to print the module path:
+  - python -c "import kubernetes.config as kc; print(kc.kube_config.__file__)"
+- In prior runs, kubernetes/config/kube_config.py was the file imported during tests. Verify that path in your environment and patch that exact file.
+
+2) Create a failing test that reliably reproduces the bug
+- Add a temporary test file: tests/test_kubeconfig_current_context_merge.py following existing repo test style and using pytest.
+- Important: Use minimally valid kubeconfig structures to avoid unrelated loader errors. Specifically:
+  - clusters entries must have cluster: with at least server.
+  - contexts entries must have context: with cluster and user.
+  - users entries must have user: sub-dict (an empty dict {} is sufficient).
+- Use tmp_path and monkeypatch to create three YAML files:
+  - cluster.yaml:
+    apiVersion: v1
+    kind: Config
+    clusters:
+      - name: kube.example.com
+        cluster:
+          server: https://kube.example.com:6443
+  - context.yaml:
+    apiVersion: v1
+    kind: Config
+    contexts:
+      - name: kube.example.com
+        context:
+          cluster: kube.example.com
+          user: kube.example.com
+          namespace: kube-system
+    current-context: kube.example.com
+  - user.yaml:
+    apiVersion: v1
+    kind: Config
+    users:
+      - name: kube.example.com
+        user: {}
+- Construct a colon-separated KUBECONFIG string in the order cluster:context:user so that the first file lacks current-context.
+- Write two tests:
+  - Test 1 (pre-fix demonstration): monkeypatch os.environ['KUBECONFIG'] to the colon-separated paths and call kubernetes.config.load_kube_config(). Assert that it raises ConfigException and that the message mentions missing current-context in the first file’s path.
+  - Test 2 (desired behavior post-fix): with the same KUBECONFIG order, call load_kube_config and assert success. Validate that the merged config’s current-context is kube.example.com. You can obtain the loader via load_kube_config and check loader._config['current-context'], or use public accessors if available.
+- Note: The second test will fail before the fix. That’s expected.
+
+3) Run the tests to confirm the failure
+- Execute pytest -q and capture:
+  - The failing “should succeed” test.
+  - The pre-fix error message: “Invalid kube-config file. Expected key current-context in <cluster.yaml path>”.
+- This verifies the red step (failing behavior) with a valid test setup that does not trip on unrelated schema issues.
+
+4) Implement the minimal fix with kubectl-like precedence for current-context
+- Edit the confirmed kube_config.py file (likely /testbed/kubernetes/config/kube_config.py).
+- Locate KubeConfigMerger.load_config. Keep the existing logic that merges list fields (clusters, contexts, users) intact.
+- After merging the lists from each individual file, add logic to merge scalar top-level keys for current-context with last-wins semantics:
+  - If the current file defines current-context and it is non-empty, set self.config_merged.value['current-context'] to that value. This ensures that later files override earlier ones and that an empty or missing current-context does not accidentally clear a previously valid value.
+  - Example logic to add inside the per-file merge loop:
+    - val = config.get('current-context')
+    - if val:  # only update when non-empty
+        self.config_merged.value['current-context'] = val
+- Do not refactor broader merge behavior. Do not change clusters/contexts/users merge semantics. Keep the fix minimal and focused on current-context.
+
+5) Re-run the tests to verify the fix
+- Run pytest -q again.
+- The “should succeed” test should now pass, and the pre-fix failure test will also pass because it asserts a failure only before the fix.
+- To complete the workflow per the instructions, update or remove the failure-demonstration test now that the fix is in place:
+  - Option A: Modify the first test to assert success (same as the second test), then keep only one success test.
+  - Option B: Remove the first test entirely, leaving only the success test.
+- Ensure all existing tests in the repository continue to pass.
+
+6) Clean up the temporary test files
+- Delete tests/test_kubeconfig_current_context_merge.py.
+- Re-run the full test suite to confirm no regressions:
+  - pytest -q
+
+Additional cautions and tips
+- Use the platform path separator for KUBECONFIG. On POSIX it is “:”. If the repository provides an ENV_KUBECONFIG_PATH_SEPARATOR constant, adhere to it.
+- Avoid certificate-authority-data in the test configs to prevent unrelated decoding or validation issues.
+- Ensure user.yaml includes a user sub-dict (user: {}) to avoid “Expected key user in …” errors from KubeConfigLoader.set_active_context.
+- Scope the fix to current-context only to avoid breaking existing list merge behavior. Broader kubectl parity for list items (last-wins overrides) is out of scope for this task.
+- If future parity is required for clearing current-context, consider whether an explicit empty current-context in a later file should clear a previously set value. For this bug, non-empty last-wins is sufficient and avoids changing loader behavior when current-context is empty.
+
+Success criteria
+- Before the fix, a test using KUBECONFIG=cluster:context:user fails due to current-context missing in the first file and shows the expected error message pointing to the first file path.
+- After the fix, load_kube_config succeeds with the same KUBECONFIG order, and the active context resolves to kube.example.com from the later file. Order of files should not matter for current-context.
+- All pre-existing tests in the repository pass after the fix.
+- The temporary test file you added is deleted before finishing.

@@ -1,0 +1,73 @@
+Here’s what went wrong in the agent’s attempt, why it failed, and how to fix and improve it.
+
+What the bug is and where it lives
+- The reported bug “Failed to create HTML snapshot if URL too long” is due to generating an output filename that includes the entire sanitized URL. This can exceed filesystem filename limits and cause ENAMETOOLONG.
+- The offending code is in bookmarks/services/tasks.py in _generate_snapshot_filename(). It returns:
+  snapshot_<timestamp>_<sanitized_url>.html.gz
+  with no length cap on the sanitized_url portion.
+
+Why it fails at runtime
+- For very long URLs, the generated filename itself exceeds the OS limit (commonly 255 bytes for a filename).
+- Additionally, singlefile.create_snapshot writes to a temporary path by appending “.tmp” to the final filepath. Even if you cap the final filename at 255 chars, adding “.tmp” makes it longer (e.g., 259), which can still trigger ENAMETOOLONG on the temp file. You must reserve room for the .tmp suffix too.
+
+Review of the agent’s steps and shortcomings
+- They ran the full test suite and confirmed no coverage for this bug (679 passing). Good initial validation.
+- They wrote new tests to assert:
+  - Long URLs produce a filename ≤ 255 and include a short hash.
+  - Short URLs produce a filename ≤ 255, include the sanitized URL, and no hash.
+- Initial mistake: class name SnapshotFilenameLengthTest did not start with “Test” and did not subclass TestCase, so pytest didn’t discover it (no tests ran). They fixed it by inheriting from django.test.TestCase, which is enough for pytest to collect unittest.TestCase subclasses. However:
+  - They didn’t rerun the tests after that edit, so they never observed the expected failing tests that should drive the implementation.
+  - They did not implement the actual fix in _generate_snapshot_filename. They stopped after writing tests.
+  - They didn’t delete the test cases at the end as required by the task.
+  - They used an unrelated tool (TaskOutput) erroneously, then moved on without executing the tests again.
+
+Gaps in the test design
+- The new tests enforce a 255-char limit for the final filename, but they don’t account for the “.tmp” suffix used by singlefile.create_snapshot. To be robust, the generator should keep the base filename ≤ 255 - len(".tmp") = 251 to ensure the temp variant also remains valid. The tests should ideally enforce this (or the code should explicitly reserve room for the temp suffix).
+- That said, the tests do help catch the core problem (uncapped long URLs) and set a clear expectation for a hash-based truncation.
+
+How to fix the code correctly
+Implement a length cap and a hash for long URLs in _generate_snapshot_filename(). Key points:
+- Keep the existing sanitization logic.
+- Compose prefix and extension separately:
+  - prefix = f"{asset.asset_type}_{formatted_datetime}_"
+  - ext = ".html.gz"
+- Account for the tmp suffix used by singlefile: temp_extra = ".tmp"
+- Use a max filename length for the base (before .tmp is added), e.g. max_len = 255 - len(temp_extra) so the temp filename also stays within 255.
+- Compute the allowed length for the URL part: max_url_len = max_len - len(prefix) - len(ext)
+- If sanitized_url length ≤ max_url_len: use it as-is.
+- Else:
+  - Compute a stable short hash of the original URL, e.g. hash8 = sha1(url).hexdigest()[:8] (fast, deterministic, avoids collisions).
+  - Reserve room for “_” + hash8: reserved = 1 + len(hash8)
+  - Truncate sanitized_url to max_url_len - reserved.
+  - Build filename: prefix + truncated + "_" + hash8 + ext
+- This ensures both the final filename and the temporary filename are within limits.
+
+Concrete example implementation logic (not heavy formatting):
+- formatted_datetime = asset.date_created.strftime("%Y-%m-%d_%H%M%S")
+- sanitized_url = "".join(char if char.isalnum() or char in "-_." else "_" for char in asset.bookmark.url)
+- prefix = f"{asset.asset_type}_{formatted_datetime}_"
+- ext = ".html.gz"
+- tmp_extra = ".tmp"
+- max_len = 255 - len(tmp_extra)
+- max_url_len = max_len - len(prefix) - len(ext)
+- If len(sanitized_url) <= max_url_len: return prefix + sanitized_url + ext
+- Else: hash8 = sha1(asset.bookmark.url.encode("utf-8")).hexdigest()[:8]
+  - truncated = sanitized_url[: max_url_len - 1 - len(hash8)]
+  - return prefix + truncated + "_" + hash8 + ext
+
+After that:
+- Rerun the new tests (they should pass).
+- Optionally add a test that asserts the base filename length leaves room for “.tmp” and also that the temp path length is valid. Or keep the current tests and rely on the code to reserve the .tmp room as described.
+- Run the full test suite to ensure no regressions for existing tests.
+- Finally, delete the new test file you created to follow the instruction “remember to delete the test cases you write at last.”
+
+Other minor observations
+- The log message in _create_html_snapshot_task uses “Failed to HTML snapshot…” which is grammatically off; it should read “Failed to create HTML snapshot…” This is cosmetic and unrelated to the bug.
+- No changes to singlefile.create_snapshot are necessary once filename generation is safe; it will no longer attempt to create an overlong temp file.
+
+Summary of the agent’s main failures
+- Didn’t fully follow the five-step loop: they created tests but didn’t implement the fix, didn’t rerun tests after fixing the collection issue, and didn’t delete the tests at the end.
+- The initial test class wasn’t collected by pytest due to naming/inheritance; they partially fixed this but stopped before continuing.
+- They missed the subtlety that the temp file suffix .tmp increases filename length and must be accounted for in the generator.
+
+If the agent applies the above fix to _generate_snapshot_filename, reruns the tests, and cleans up the ad-hoc tests per the user request, the bug will be properly resolved.

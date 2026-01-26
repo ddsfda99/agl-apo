@@ -1,0 +1,197 @@
+You are working in the repository at /testbed. Your goal is to fix a Pylint bug where conditional imports guarded by six.PY2 or six.PY3 still trigger import errors or no-name-in-module, even though such imports are meant to be version-specific and should be ignored like sys.version_info and typing.TYPE_CHECKING guards.
+
+Follow this exact workflow and do not skip steps:
+1) Write failing tests that reproduce the bug.
+2) Explore the source to locate the bug.
+3) Implement the fix.
+4) Re-run your tests to verify the fix. Iterate if needed.
+5) Delete the tests you added at the end.
+Do not commit your edits.
+
+Context and expected behavior
+- Many codebases write:
+  - if six.PY3: from urllib.parse import urlparse
+  - else: from urlparse import urlparse
+- Pylint should not report E0611 (no-name-in-module) or import-error for imports inside branches guarded by version flags that are not meant for the current runtime.
+- Pylint already handles guards like sys.version_info and typing.TYPE_CHECKING. It should analogously handle six.PY2 and six.PY3.
+- The bug: Pylint analyzes imports under six guards and emits errors (e.g., on Python 2, it flags urllib.parse as missing; on Python 3, it flags urlparse; or in our tests, from sys import stdoout inside a six guard).
+
+Where to change
+- The variables checker emits E0611; it currently skips imports in TYPE_CHECKING and sys guards, but not six guards.
+  - pylint/checkers/variables.py: visit_import and visit_importfrom
+- ImportError handling also needs to skip under six guards.
+  - pylint/checkers/imports.py: function _ignore_import_failure
+- Guard helper utilities live here:
+  - pylint/checkers/utils.py: function is_sys_guard and related utilities. Add a new function for six guards.
+
+Plan
+A) Add tests that reproduce the error using a dummy local six class to avoid external dependency.
+B) Add a guard detector is_six_guard in pylint/checkers/utils.py.
+C) Use is_six_guard anywhere imports are skipped for guards: variables.py and imports.py.
+D) Run tests, ensure they fail before the fix and pass after the fix.
+E) Remove the tests you added.
+
+Step-by-step instructions
+
+1) Create failing tests
+- Add a pytest test file at tests/test_six_guard.py with two tests. These tests will:
+  - Create a temporary module that simulates six with PY3/PY2 flags.
+  - Place invalid imports in branches guarded by six.PY2 or not six.PY3 to ensure that, without the fix, Pylint emits E0611; with the fix, Pylint should emit no messages for E0611 or import-error.
+
+Use this content for tests/test_six_guard.py:
+
+import os
+from pathlib import Path
+
+def run_pylint(path):
+    from pylint.lint import Run
+    # Only enable E0611 and import-error to avoid noise
+    result = Run([str(path), "--disable=all", "--enable=E0611,import-error"], do_exit=False)
+    return result.linter.msg_status
+
+def test_six_py2_guard_ignores_invalid_import(tmp_path):
+    code = """
+# pylint: disable=unused-import
+class six:
+    PY3 = True
+    PY2 = False
+
+if six.PY2:
+    from sys import stdoout  # misspelled on purpose
+else:
+    from sys import stdout
+"""
+    p = tmp_path / "m.py"
+    p.write_text(code)
+    status = run_pylint(p)
+    # Should be zero if no E0611 or import-error were reported
+    assert status == 0
+
+def test_not_six_py3_guard_ignores_invalid_import(tmp_path):
+    code = """
+# pylint: disable=unused-import
+class six:
+    PY3 = True
+    PY2 = False
+
+if not six.PY3:
+    from sys import stdoout  # misspelled on purpose
+else:
+    from sys import stdout
+"""
+    p = tmp_path / "m.py"
+    p.write_text(code)
+    status = run_pylint(p)
+    assert status == 0
+
+- Run the tests now to confirm they fail with the current code:
+  - python -m pytest -q tests/test_six_guard.py
+
+2) Locate code to change
+- Search for existing guard logic:
+  - grep -R "is_sys_guard" -n pylint/checkers
+- Open these files:
+  - pylint/checkers/utils.py (contains is_sys_guard)
+  - pylint/checkers/variables.py (visit_import, visit_importfrom)
+  - pylint/checkers/imports.py (_ignore_import_failure)
+- Note the patterns already used for TYPE_CHECKING and sys guards. You will replicate that for six guards.
+
+3) Implement the fix
+3.1) In pylint/checkers/utils.py, add a new function is_six_guard and a small helper to recognize six version flags. Place it near is_sys_guard and ensure astroid nodes are imported (from astroid import nodes).
+
+Add:
+
+def _is_six_version_flag(expr):
+    # Recognize six.PY2 / six.PY3 or imported names PY2/PY3
+    # This is syntactic; we do not import six.
+    if isinstance(expr, nodes.Attribute) and expr.attrname in ("PY2", "PY3"):
+        return True
+    if isinstance(expr, nodes.Name) and expr.name in ("PY2", "PY3"):
+        return True
+    return False
+
+def is_six_guard(node):
+    """Return True if the IF statement is guarded by six.PY2 or six.PY3.
+    Covers:
+      - if six.PY3:
+      - if six.PY2:
+      - if not six.PY3:
+      - if PY3:  (from six import PY3)
+      - if six.PY3 is True / == True
+    """
+    if not isinstance(node, nodes.If):
+        return False
+    test = node.test
+    # Direct flag
+    if _is_six_version_flag(test):
+        return True
+    # Negation
+    if isinstance(test, nodes.UnaryOp) and getattr(test, "op", None) == "not":
+        if _is_six_version_flag(test.operand):
+            return True
+    # Comparisons like "six.PY3 is True" or "== True"
+    if isinstance(test, nodes.Compare) and len(test.ops) == 1:
+        op, right = test.ops[0]
+        if op in ("is", "==") and _is_six_version_flag(test.left):
+            if isinstance(right, nodes.Const) and isinstance(right.value, bool):
+                return True
+    return False
+
+3.2) In pylint/checkers/variables.py, import and use is_six_guard alongside is_sys_guard to skip E0611 checks inside six guards.
+- At the top where is_sys_guard is imported, also import is_six_guard:
+  - from pylint.checkers.utils import in_type_checking_block, is_sys_guard, is_six_guard
+- In visit_import, find the early-return guard that currently checks for in_type_checking_block or is_sys_guard and extend it to also check is_six_guard. For example:
+
+def visit_import(self, node):
+    if in_type_checking_block(node) or (
+        isinstance(node.parent, nodes.If)
+        and (is_sys_guard(node.parent) or is_six_guard(node.parent))
+    ):
+        return
+    ...
+
+- In visit_importfrom, do the same:
+
+def visit_importfrom(self, node):
+    if in_type_checking_block(node) or (
+        isinstance(node.parent, nodes.If)
+        and (is_sys_guard(node.parent) or is_six_guard(node.parent))
+    ):
+        return
+    ...
+
+3.3) In pylint/checkers/imports.py, use is_six_guard in _ignore_import_failure so import-error is ignored under six guards, similar to sys.version_info and TYPE_CHECKING.
+- Import is_six_guard:
+  - from pylint.checkers.utils import in_type_checking_block, is_sys_guard, is_six_guard
+- In _ignore_import_failure, extend the guard:
+
+def _ignore_import_failure(self, node):
+    if in_type_checking_block(node):
+        return True
+    if isinstance(node.parent, nodes.If) and (is_sys_guard(node.parent) or is_six_guard(node.parent)):
+        return True
+    return False
+
+4) Run tests
+- Run only your new tests to verify behavior:
+  - python -m pytest -q tests/test_six_guard.py
+- Then run the full test suite to ensure no regressions:
+  - python -m pytest -q
+
+5) Clean up
+- After verifying the fix, delete the test file you added:
+  - rm tests/test_six_guard.py
+
+Acceptance criteria
+- Before the fix, tests/test_six_guard.py fails due to E0611 being reported from imports inside six-guarded branches.
+- After the fix, tests/test_six_guard.py passes: Pylint reports no E0611 or import-error for imports under six.PY2 or six.PY3 guards, including negation form.
+- The full test suite passes.
+- The new helper is_six_guard is used in both variables.py and imports.py, ensuring consistent behavior across checkers.
+- The change does not require the six package to be installed and works purely via AST pattern matching.
+
+Notes and considerations
+- We intentionally do not require the base name to be exactly six; this keeps detection flexible and also supports from six import PY3, used under if PY3:. The attribute names PY2/PY3 are distinctive and unlikely to clash in guard contexts.
+- We skip analyzing imports in any branch of a six guard, mirroring existing behavior for sys.version_info guards. This avoids false positives on cross-version compatibility code paths.
+- Keep code style and imports consistent with surrounding code. Use existing utility patterns from utils.py.
+
+Do not commit your edits.

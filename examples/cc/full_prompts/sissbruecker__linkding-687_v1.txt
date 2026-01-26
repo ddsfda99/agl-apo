@@ -1,0 +1,145 @@
+You are working in /testbed. Fix the bug “Failed to create HTML snapshot if URL too long” by following a tight red-green-refactor loop with concrete, verifiable steps. The previous attempt stalled after writing tests, did not implement the fix, didn’t rerun tests, and didn’t account for the “.tmp” suffix that singlefile uses. This time, write failing tests first, implement the fix in the correct place, ensure the filename limit also leaves room for “.tmp”, rerun tests until green, and finally delete the ad-hoc tests.
+
+Context and root cause
+- The error ENAMETOOLONG occurs because the snapshot filename includes the entire sanitized URL without a cap. This is built in bookmarks/services/tasks.py in the helper _generate_snapshot_filename.
+- The generated filename looks like: snapshot_YYYY-MM-DD_HHMMSS_<sanitized_url>.html.gz
+- singlefile.create_snapshot writes a temporary file by appending “.tmp” to this name. On many filesystems the max filename length is 255 bytes. If you cap the base filename at 255 but don’t account for “.tmp”, the temporary filename can still exceed the limit.
+- The correct fix is to cap the base filename length at 255 - len(".tmp") = 251 characters, and for long URLs, append a short, deterministic hash to avoid collisions.
+
+Your tasks
+1) Add targeted tests that reproduce the bug and assert the correct behavior:
+- Put this test file at bookmarks/tests/test_snapshot_filename_long_url.py
+- These tests should:
+  - For a very long URL, ensure _generate_snapshot_filename returns a filename that:
+    - Ends with .html.gz
+    - Has total length ≤ 251 (leaving room for “.tmp”)
+    - When adding “.tmp”, the length ≤ 255
+    - Includes a short 8-hex-digit hash suffix separated by an underscore before the extension
+  - For a short URL, ensure:
+    - Ends with .html.gz
+    - Length ≤ 251
+    - Does not include the hash suffix
+    - Contains the fully sanitized URL
+
+Use this exact test content:
+
+- File: bookmarks/tests/test_snapshot_filename_long_url.py
+- Contents:
+  import re
+  from datetime import datetime, timezone
+  from bookmarks.services import tasks
+
+  class FakeBookmark:
+      def __init__(self, url):
+          self.url = url
+
+  class FakeAsset:
+      def __init__(self, url, asset_type="snapshot"):
+          self.asset_type = asset_type
+          self.bookmark = FakeBookmark(url)
+          self.date_created = datetime(2024, 4, 3, 14, 40, 4, tzinfo=timezone.utc)
+
+  def _sanitize(url: str) -> str:
+      return "".join(c if c.isalnum() or c in "-_." else "_" for c in url)
+
+  def test_generate_snapshot_filename_long_url_is_capped_and_hashed():
+      long_url = "https://github.com/sissbruecker/linkding?url=" + "0" * 800
+      asset = FakeAsset(long_url)
+      name = tasks._generate_snapshot_filename(asset)
+
+      assert name.endswith(".html.gz")
+      # Reserve room for the temporary suffix that singlefile uses
+      assert len(name) <= 251
+      # Also verify the temp variant would be valid
+      assert len(name + ".tmp") <= 255
+
+      # Expect a short hash suffix before the extension
+      base_without_ext = name[:-8]  # len(".html.gz") == 8
+      assert re.search(r"_[0-9a-f]{8}$", base_without_ext)
+
+  def test_generate_snapshot_filename_short_url_is_verbatim_without_hash():
+      short_url = "https://example.com/abc?x=1"
+      asset = FakeAsset(short_url)
+      name = tasks._generate_snapshot_filename(asset)
+
+      assert name.endswith(".html.gz")
+      assert len(name) <= 251
+      base_without_ext = name[:-8]
+      # Should not end with _<8-hex> for short URLs
+      assert not re.search(r"_[0-9a-f]{8}$", base_without_ext)
+
+      # Full sanitized URL should be present
+      sanitized = _sanitize(short_url)
+      assert sanitized in name
+
+2) Run just the new tests and observe failure (red):
+- Command: pytest -q bookmarks/tests/test_snapshot_filename_long_url.py
+
+3) Implement the fix in bookmarks/services/tasks.py:
+- Edit the helper _generate_snapshot_filename to:
+  - Sanitize the URL as it currently does.
+  - Compose prefix and extension explicitly:
+    - prefix = f"{asset.asset_type}_{formatted_datetime}_"
+    - ext = ".html.gz"
+  - Reserve room for the temporary suffix used by singlefile: tmp_suffix = ".tmp"
+  - Enforce a maximum filename length for the base filename (without tmp): max_filename_len = 255 - len(tmp_suffix)  # 251
+  - Compute the maximum allowed length for the URL part: max_url_len = max_filename_len - len(prefix) - len(ext)
+  - If the sanitized URL length is within limit, use it as-is.
+  - If not:
+    - Compute an 8-hex-digit, deterministic hash of the original URL: sha1(url).hexdigest()[:8]
+    - Reserve room for “_” + hash
+    - Truncate the sanitized URL to fit
+    - Build: prefix + truncated + "_" + hash8 + ext
+  - Add a defensive fallback if prefix+ext alone would exceed the cap (extremely unlikely), by using only a truncated portion plus hash to fit.
+
+- You will need to import hashlib at the top of the file.
+
+Use this implementation as a guide for the function body:
+
+  import hashlib
+
+  def _generate_snapshot_filename(asset):
+      formatted_datetime = asset.date_created.strftime("%Y-%m-%d_%H%M%S")
+      sanitized_url = "".join(
+          ch if ch.isalnum() or ch in "-_." else "_" for ch in asset.bookmark.url
+      )
+      prefix = f"{asset.asset_type}_{formatted_datetime}_"
+      ext = ".html.gz"
+      tmp_suffix = ".tmp"
+      max_filename_len = 255 - len(tmp_suffix)
+
+      # Defensive guard in the unlikely event prefix + ext already exceeds the cap
+      if len(prefix) + len(ext) >= max_filename_len:
+          hash8 = hashlib.sha1(asset.bookmark.url.encode("utf-8")).hexdigest()[:8]
+          available = max(0, max_filename_len - len(prefix) - 1 - len(hash8) - len(ext))
+          truncated = sanitized_url[:available]
+          return f"{prefix}{truncated}_{hash8}{ext}"
+
+      max_url_len = max_filename_len - len(prefix) - len(ext)
+
+      if len(sanitized_url) <= max_url_len:
+          return f"{prefix}{sanitized_url}{ext}"
+
+      hash8 = hashlib.sha1(asset.bookmark.url.encode("utf-8")).hexdigest()[:8]
+      # Reserve room for "_" + hash8
+      truncated = sanitized_url[: max_url_len - 1 - len(hash8)]
+      return f"{prefix}{truncated}_{hash8}{ext}"
+
+4) Rerun the focused tests and ensure they pass (green):
+- Command: pytest -q bookmarks/tests/test_snapshot_filename_long_url.py
+
+5) Run the full test suite to ensure no regressions:
+- Command: pytest -q
+
+6) Optional manual sanity check:
+- From a Python shell, simulate the example from the bug report to visually inspect the generated name length and presence of the hash. No need to actually run singlefile.
+
+7) Clean up per requirements:
+- Delete the ad-hoc test file bookmarks/tests/test_snapshot_filename_long_url.py after validation.
+- Do not commit any changes.
+
+Success criteria
+- The new focused tests fail before your code change and pass after it.
+- The full test suite passes.
+- Long URLs no longer cause ENAMETOOLONG because both the final filename and the temporary filename (with “.tmp”) are within filesystem limits.
+- The ad-hoc tests are removed at the end, and nothing is committed.

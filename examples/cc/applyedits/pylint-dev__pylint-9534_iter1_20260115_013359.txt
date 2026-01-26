@@ -1,0 +1,145 @@
+You are working in /testbed. Your goal is to fix the false-positive “no-name-in-module” when imports are conditionally guarded by six.PY2 or six.PY3, following a strict test-driven workflow. The repository already skips imports guarded by sys.version_info, via pylint/checkers/utils.py:is_sys_guard, which is used by pylint/checkers/variables.py. The missing piece is robust support for six guards, including aliasing and name-import forms.
+
+Key improvements over previous attempts
+- Implement robust detection for six guards in is_sys_guard without relying on string equality of as_string().
+- For attribute form guards, correctly handle aliasing such as “import six as six_mod” by inferring the module of the attribute expression and verifying it is the “six” module and the attribute is PY2 or PY3.
+- For name-import form guards, iterate through all lookup results for the Name and confirm it originates from “from six import …” (including aliased names), using the real_name mapping to check PY2 or PY3.
+- Strengthen tests to validate is_sys_guard on various forms and confirm import checking is still active in unguarded code by expecting an E0611 in a negative control case.
+- Keep the change minimal: only adjust pylint/checkers/utils.py:is_sys_guard and do not alter broader import checking logic in variables.py.
+
+Follow these steps carefully. Write and run tests first, implement a minimal fix, validate, then remove the tests at the end. Do not commit any changes.
+
+Step 1: Add tests to reproduce and harden the behavior
+Create a new pytest test file at tests/test_six_guard.py. Use pytest’s tmp_path fixture to create a temporary directory that contains:
+- A local six.py stub to avoid external six dependency.
+- Sample modules to run Pylint against.
+
+six.py stub content:
+- PY2 = False
+- PY3 = True
+
+Functional tests
+- Attribute form basic:
+  - Module content:
+    - import six
+    - if six.PY2:
+        from urlparse import urlparse
+      else:
+        from urllib.parse import urlparse
+  - Run Pylint and assert that E0611 does not appear.
+
+- Name-import form basic:
+  - Module content:
+    - from six import PY2, PY3
+    - if PY2:
+        from urlparse import urlparse
+      else:
+        from urllib.parse import urlparse
+  - Run Pylint and assert that E0611 does not appear.
+
+- Attribute form with alias:
+  - Module content:
+    - import six as six_mod
+    - if six_mod.PY2:
+        from urlparse import urlparse
+      else:
+        from urllib.parse import urlparse
+  - Run Pylint and assert that E0611 does not appear.
+
+- Name-import form with alias:
+  - Module content:
+    - from six import PY2 as S2, PY3 as S3
+    - if S2:
+        from urlparse import urlparse
+      else:
+        from urllib.parse import urlparse
+  - Run Pylint and assert that E0611 does not appear.
+
+- Negative control (unguarded bad import):
+  - Module content:
+    - from urlparse import urlparse
+  - Run Pylint and assert that E0611 appears under Python 3 to confirm import checking remains active.
+
+Notes for functional tests
+- Ensure the temporary directory is on sys.path when running Pylint and when parsing with astroid, so the local six.py stub is importable.
+- You can invoke Pylint with pylint.lint.Run([...], exit=False) and capture messages with a custom reporter, or via subprocess capturing stdout/stderr. Assert on presence or absence of the string “E0611”.
+- Run tests with: python -m pytest -q.
+
+Unit tests for is_sys_guard
+- Use astroid.parse to build an AST for guarded if statements and assert is_sys_guard returns True for each form below:
+  - "import six\nif six.PY2:\n    pass"
+  - "from six import PY2\nif PY2:\n    pass"
+  - "import six as six_mod\nif six_mod.PY2:\n    pass"
+  - "from six import PY2 as S2\nif S2:\n    pass"
+- Retrieve the If node with astroid’s nodes_of_class. For example:
+  - mod = astroid.parse(code_str)
+  - if_node = next(mod.nodes_of_class(astroid.nodes.If))
+- Assert that pylint.checkers.utils.is_sys_guard(if_node) is True.
+
+Step 2: Locate the code to change
+- Change pylint/checkers/utils.py, function is_sys_guard(node: nodes.If) -> bool.
+- Import checking lives in pylint/checkers/variables.py, methods visit_import and visit_importfrom. They already skip checks if the immediate parent is an If and utils.is_sys_guard(parent) is True. Do not change variables.py.
+
+Step 3: Implement the fix in is_sys_guard with robust six guard detection
+Maintain existing sys.version_info logic. Extend is_sys_guard to also return True for six-based version guards, handling both attribute and name-import forms, including aliases.
+
+Implementation guidance
+- Attribute form:
+  - If node.test is an Attribute and the attribute name is PY2 or PY3:
+    - Safely infer the module of node.test.expr using the safe_infer helper used elsewhere in utils.py.
+    - If inference yields a Module and its name is “six”, return True.
+
+- Name-import form:
+  - If node.test is a Name:
+    - Use astroid’s lookup on node.test.name to retrieve the defining nodes within the current scope.
+    - Iterate over all defining nodes in the lookup result:
+      - If a defining node is ImportFrom and defining_node.modname is “six”:
+        - Use defining_node.real_name(node.test.name) to resolve aliases and get the original imported name.
+        - If the resolved name is PY2 or PY3, return True.
+    - Do not rely on only the first lookup result; check all of them.
+
+- Keep detection origin-aware for Name imports to avoid false positives for unrelated local variables named PY2 or PY3.
+- Do not rely on string equality for node.test.as_string(); use inference and import origin analysis as above.
+
+Conceptual sketch of the added logic:
+- if isinstance(test, nodes.Attribute) and test.attrname in (“PY2”, “PY3”):
+  - inferred = safe_infer(test.expr)
+  - if isinstance(inferred, nodes.Module) and inferred.name == “six”:
+    - return True
+- if isinstance(test, nodes.Name):
+  - name = test.name
+  - defs = test.lookup(name)[1]
+  - for d in defs:
+    - if isinstance(d, nodes.ImportFrom) and d.modname == “six”:
+      - real = d.real_name(name)
+      - if real in (“PY2”, “PY3”):
+        - return True
+
+Step 4: Rerun the tests
+- Run: python -m pytest -q
+- Ensure all functional tests pass, i.e., no E0611 for imports inside guarded false branches and that E0611 is still reported for the unguarded bad import.
+- Ensure all unit tests for is_sys_guard pass for attribute, name-import, and alias forms.
+
+If tests fail
+- Re-check is_sys_guard implementation:
+  - Confirm inference for attribute guards correctly identifies the six module even when aliased.
+  - Confirm Name-import guard detection iterates over all lookup results and resolves aliases using real_name.
+- Use the patterns already present in utils.py for inference and import origin detection to maintain consistency and robustness.
+
+Step 5: Clean up
+- Delete the test file tests/test_six_guard.py and any temporary artifacts created by the tests.
+- Do not commit any changes.
+
+Additional cautions and tips
+- The tests and fix should run under Python 3. Your six.py stub sets PY2=False and PY3=True to simulate the common case under Python 3 where the PY2 branch is not taken; Pylint must skip checking imports in that inactive branch.
+- Ensure you only skip checks when the import node is directly inside an If whose test is the guard; variables.py already guards on node.parent being an If and calling is_sys_guard on that parent.
+- Keep the change minimal: only adjust utils.is_sys_guard; do not alter broader import checking logic.
+- Strengthen validation by including the negative control test to confirm Pylint still reports genuine import errors when not guarded.
+
+Deliverables before cleanup
+- Passing tests that would have failed prior to the fix, including attribute, name-import, and alias forms.
+- Source changes limited to pylint/checkers/utils.py:is_sys_guard to recognize six.PY2/PY3 guards in both attribute and name-import forms with alias support and robust lookup.
+
+Final action
+- After validation, remove your temporary tests as required by the task.
+- Do not commit any code.

@@ -1,0 +1,90 @@
+diff --git a/recipes/lora_finetune_distributed.py b/recipes/lora_finetune_distributed.py
+index e95fbb40..abc95124 100644
+--- a/recipes/lora_finetune_distributed.py
++++ b/recipes/lora_finetune_distributed.py
+@@ -510,13 +510,18 @@ class LoRAFinetuneRecipeDistributed(FTRecipeInterface):
+             self._is_rank_zero,
+             cpu_offload=fsdp_cpu_offload,
+         )
+-        is_dora = False
+-        for m in model.modules():
+-            if hasattr(m, "initialize_dora_magnitude"):
+-                is_dora = True
+-                m.initialize_dora_magnitude()
++        # Ensure DoRA magnitudes are materialized off meta before initialization
++        is_dora = any(
++            hasattr(m, "initialize_dora_magnitude") for m in model.modules()
++        )
+         if is_dora:
++            # Materialize DoRA magnitude parameters using state_dict assign path
++            # This preserves parameter identity for FSDP-wrapped modules
+             load_dora_magnitudes(model)
++            # Now initialize the magnitudes
++            for m in model.modules():
++                if hasattr(m, "initialize_dora_magnitude"):
++                    m.initialize_dora_magnitude()
+         validate_missing_and_unexpected_for_lora(
+             lora_attn_modules=self._lora_attn_modules,
+             apply_lora_to_mlp=self._apply_lora_to_mlp,
+diff --git a/tests/recipes/test_lora_finetune_distributed.py b/tests/recipes/test_lora_finetune_distributed.py
+index 5ffa07ab..631bcc49 100644
+--- a/tests/recipes/test_lora_finetune_distributed.py
++++ b/tests/recipes/test_lora_finetune_distributed.py
+@@ -59,6 +59,57 @@ class TestLoRAFinetuneDistributedRecipe:
+         }
+         return loss_values_map[model_type]
+ 
++    def test_dora_magnitude_materialized_before_initialize(self):
++        """
++        Unit-style DoRA test that emulates the distributed recipe ordering on CPU.
++        Ensures DoRA magnitude params are materialized off meta via load_dora_magnitudes
++        BEFORE initialize_dora_magnitude is called, and that no params remain on meta.
++        """
++        from omegaconf import OmegaConf
++        from torchtune import config as tt_config, training
++        from torchtune.modules.peft import DoRALinear, LoRALinear, load_dora_magnitudes
++
++        # Build a tiny DoRA-enabled model on the meta device
++        with training.set_default_dtype(torch.float32), torch.device("meta"):
++            model = tt_config.instantiate(
++                OmegaConf.from_dotlist(MODEL_TEST_CONFIGS["llama2_dora"]).model
++            )
++
++        # Initialize LoRA params (lora_a/lora_b) and any RoPE buffers off meta
++        for m in model.modules():
++            if isinstance(m, (LoRALinear, DoRALinear)):
++                m.lora_a.to_empty(device="cpu")
++                m.lora_b.to_empty(device="cpu")
++                m.initialize_parameters()
++            if hasattr(m, "rope_init"):
++                m.rope_init()
++
++        # Construct a dummy base state dict (non-adapter params only) to materialize base weights
++        from torchtune.modules.peft import get_adapter_params
++
++        adapter_param_names = set(get_adapter_params(model).keys())
++        base_sd = {}
++        for k, v in model.state_dict().items():
++            if k in adapter_param_names:
++                continue
++            shape = v.shape
++            dtype = v.dtype if not v.is_meta else torch.float32
++            base_sd[k] = torch.zeros(shape, dtype=dtype)
++
++        # Materialize base weights using the same utility the recipe uses
++        training.load_from_full_model_state_dict(
++            model, base_sd, device=torch.device("cpu"), is_rank_zero=True, cpu_offload=False
++        )
++
++        # Now materialize DoRA magnitudes OFF meta before initialization
++        load_dora_magnitudes(model)
++        for m in model.modules():
++            if hasattr(m, "initialize_dora_magnitude"):
++                m.initialize_dora_magnitude()
++
++        # Validate no params or buffers remain on meta
++        training.validate_no_params_on_meta_device(model)
++
+     @pytest.mark.integration_test
+     @gpu_test(gpu_count=2)
+     @pytest.mark.parametrize(

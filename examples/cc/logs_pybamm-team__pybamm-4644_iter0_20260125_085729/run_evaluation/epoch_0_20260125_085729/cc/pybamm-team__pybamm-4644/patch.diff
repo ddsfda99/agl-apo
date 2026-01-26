@@ -1,0 +1,110 @@
+diff --git a/src/pybamm/solvers/processed_variable.py b/src/pybamm/solvers/processed_variable.py
+index 3de6e4bd5..cb5518615 100644
+--- a/src/pybamm/solvers/processed_variable.py
++++ b/src/pybamm/solvers/processed_variable.py
+@@ -50,9 +50,16 @@ class ProcessedVariable:
+         self.all_inputs = solution.all_inputs
+         self.all_inputs_casadi = solution.all_inputs_casadi
+ 
+-        self.mesh = base_variables[0].mesh
+-        self.domain = base_variables[0].domain
+-        self.domains = base_variables[0].domains
++        # Some variables (e.g. expressions added post-build) may not have mesh/domains
++        base_var0 = base_variables[0]
++        self.mesh = getattr(base_var0, "mesh", None)
++        self.domain = getattr(base_var0, "domain", [])
++        # domains defaults to primary/secondary/tertiary empty lists
++        self.domains = getattr(
++            base_var0,
++            "domains",
++            {"primary": [], "secondary": [], "tertiary": []},
++        )
+         self.time_integral = time_integral
+ 
+         # Process spatial variables
+@@ -878,12 +885,26 @@ class ProcessedVariable2DSciKitFEM(ProcessedVariable2D):
+ 
+ 
+ def process_variable(base_variables, *args, **kwargs):
+-    mesh = base_variables[0].mesh
+-    domain = base_variables[0].domain
++    # Robustly determine mesh from the base variable or its children
++    base_var = base_variables[0]
++    mesh = getattr(base_var, "mesh", None)
++    if mesh is None:
++        # Walk the expression tree to find a child with a mesh
++        try:
++            for node in base_var.pre_order():
++                if hasattr(node, "mesh"):
++                    mesh = getattr(node, "mesh")
++                    if mesh is not None:
++                        break
++        except AttributeError:
++            # If base_var has no pre_order (shouldn't happen for pybamm.Symbol), leave mesh as None
++            pass
++
++    domain = getattr(base_var, "domain", [])
+ 
+     # Evaluate base variable at initial time
+-    base_eval_shape = base_variables[0].shape
+-    base_eval_size = base_variables[0].size
++    base_eval_shape = base_var.shape
++    base_eval_size = base_var.size
+ 
+     # handle 2D (in space) finite element variables differently
+     if (
+@@ -893,10 +914,16 @@ def process_variable(base_variables, *args, **kwargs):
+     ):
+         return ProcessedVariable2DSciKitFEM(base_variables, *args, **kwargs)
+ 
+-    # check variable shape
++    # check variable shape (0D)
+     if len(base_eval_shape) == 0 or base_eval_shape[0] == 1:
+         return ProcessedVariable0D(base_variables, *args, **kwargs)
+ 
++    # If mesh wasn't found yet, try again before accessing mesh-dependent attributes
++    if mesh is None:
++        raise NotImplementedError(
++            f"Shape not recognized for {base_var} (mesh could not be determined)"
++        )
++
+     n = mesh.npts
+     base_shape = base_eval_shape[0]
+     # Try some shapes that could make the variable a 1D variable
+@@ -906,16 +933,30 @@ def process_variable(base_variables, *args, **kwargs):
+     # Try some shapes that could make the variable a 2D variable
+     first_dim_nodes = mesh.nodes
+     first_dim_edges = mesh.edges
+-    second_dim_pts = base_variables[0].secondary_mesh.nodes
+-    if base_eval_size // len(second_dim_pts) in [
+-        len(first_dim_nodes),
+-        len(first_dim_edges),
+-    ]:
+-        return ProcessedVariable2D(base_variables, *args, **kwargs)
++
++    # Get secondary mesh robustly
++    second_mesh = getattr(base_var, "secondary_mesh", None)
++    if second_mesh is None:
++        try:
++            for node in base_var.pre_order():
++                if hasattr(node, "secondary_mesh"):
++                    second_mesh = getattr(node, "secondary_mesh")
++                    if second_mesh is not None:
++                        break
++        except AttributeError:
++            pass
++
++    if second_mesh is not None:
++        second_dim_pts = second_mesh.nodes
++        if base_eval_size // len(second_dim_pts) in [
++            len(first_dim_nodes),
++            len(first_dim_edges),
++        ]:
++            return ProcessedVariable2D(base_variables, *args, **kwargs)
+ 
+     # Raise error for 3D variable
+     raise NotImplementedError(
+-        f"Shape not recognized for {base_variables[0]}"
++        f"Shape not recognized for {base_var}"
+         + "(note processing of 3D variables is not yet implemented)"
+     )

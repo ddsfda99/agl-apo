@@ -1,0 +1,120 @@
+You are working in a Matplotlib code repository. Your task is to fix a crash in Axes.pie/pyplot.pie when input contains NaN/Inf, validate the fix with tests, update documentation, and clean up temporary test files. Follow the workflow steps strictly and incorporate the improvements identified in the previous evaluation.
+
+Problem summary
+- Matplotlib’s Axes.pie raises a low-level ValueError (“cannot convert float NaN to integer”) when the input x contains NaN/Inf.
+- Desired behavior: filter out non-finite inputs (NaN/Inf) and proceed, or raise a clear, user-friendly ValueError.
+- Implement filtering non-finite values while preserving existing error semantics and user-friendly messages for other misuse scenarios.
+
+Strict workflow
+1) Carefully read and understand the requirements.
+2) Write a minimal reproduction test case first to confirm and understand the original failure and lock down the expected behavior. Run it before making any code changes to confirm the existing failure.
+3) Locate the bug or the place where the new feature should be implemented based on error messages or function names.
+4) Implement the fix or new feature in the appropriate files. Edit the source directly and avoid brittle search-and-replace that might not match the current code.
+5) Run the reproduction tests and the full test suite or a broader subset to validate your implementation. If tests fail, debug and fix the issues.
+6) Update documentation (docstrings) to reflect the new behavior.
+7) Clean up any temporary test files you created and verify the cleanup by listing the directory.
+8) Verify acceptance criteria are met.
+
+Implementation requirements and guidance
+- Code location: lib/matplotlib/axes/_axes.py, function Axes.pie. The pyplot wrapper in lib/matplotlib/pyplot.py typically inherits docstrings from Axes methods; confirm this and ensure the updated docstring is visible from pyplot.pie.
+- Root cause and approach:
+  - When x contains NaN/Inf, the sum sx becomes NaN. Normalization propagates NaNs, leading to NaN angles and a low-level ValueError during wedge path construction.
+  - Fix by filtering out non-finite values (NaN/Inf) from x before normalization, but only after validating labels/explode lengths against the original x length to preserve existing error messages and avoid NumPy boolean index errors.
+- Maintain existing semantics:
+  - Preserve the existing clear error messages for labels/explode length mismatches.
+  - Preserve handling of negative values as currently implemented.
+  - Preserve return semantics: two values (wedges, texts) when autopct is None; three values (wedges, texts, autotexts) when autopct is not None.
+  - Do not change unrelated behavior (color cycling, hatches, defaults, shadow, labeldistance, rotatelabels, normalize semantics).
+- Ordering of checks and filtering (important):
+  - Convert input x to a NumPy array of float type and validate dimensionality (1D).
+  - Compute finite_mask on the original x without modifying labels/explode yet.
+  - If no finite values at all, raise a clear, user-friendly ValueError: "Wedge sizes 'x' must contain at least one finite value".
+  - Validate labels/explode against the original x length before applying the finite_mask:
+    - If labels is not None and len(labels) != len(orig_x), raise the existing clear ValueError: "'labels' must be of length 'x', not {len(labels)}".
+    - If explode is not None and len(explode) != len(orig_x), raise the existing clear ValueError: "'explode' must be of length 'x', not {len(explode)}".
+  - After length validation, apply the finite_mask to x; and if provided, apply the same mask to labels and explode to keep them aligned.
+  - After filtering, check for degenerate cases:
+    - If sum(x) <= 0 after filtering, raise a clear, user-friendly ValueError: "Wedge sizes 'x' must sum to a positive value".
+  - Continue with the existing pie logic (normalization, angles, wedge creation, defaults, auto labels, etc.).
+- Suggested pseudocode for the critical section (use actual code in the implementation):
+  - orig_x = np.asarray(x, np.float64)
+  - Validate 1D: orig_x.ndim == 1
+  - finite_mask = np.isfinite(orig_x)
+  - if not np.any(finite_mask): raise ValueError("Wedge sizes 'x' must contain at least one finite value")
+  - if labels is not None and len(labels) != len(orig_x): raise ValueError("'labels' must be of length 'x', not {len(labels)}")
+  - if explode is not None and len(explode) != len(orig_x): raise ValueError("'explode' must be of length 'x', not {len(explode)}")
+  - x = orig_x[finite_mask]
+  - if labels is not None: labels = np.asarray(labels, dtype=object)[finite_mask].tolist()
+  - if explode is not None: explode = np.asarray(explode, np.float64)[finite_mask].tolist()
+  - if np.sum(x) <= 0: raise ValueError("Wedge sizes 'x' must sum to a positive value")
+  - proceed with normalization and plotting
+- Negative values:
+  - Preserve existing checks and error messages for negative values as currently implemented, but only consider the filtered, finite x values for subsequent logic.
+
+Documentation update
+- Update Axes.pie’s docstring in lib/matplotlib/axes/_axes.py to note:
+  - Non-finite values (NaN/Inf) in x are filtered out before normalization and plotting.
+  - If all values are non-finite, a ValueError is raised with message: "Wedge sizes 'x' must contain at least one finite value".
+  - If the sum of wedge sizes after filtering is not positive, a ValueError is raised with message: "Wedge sizes 'x' must sum to a positive value".
+  - Labels and explode are validated against the original x length before filtering; mismatches raise the existing formatted errors, and when provided they are filtered to remain aligned with the finite entries.
+  - Explicitly state return semantics: when autopct is None, return (wedges, texts); when autopct is provided, return (wedges, texts, autotexts).
+- Confirm that pyplot.pie inherits the Axes.pie docstring and that the updated docstring is visible. If it does not inherit automatically, update pyplot.pie’s docstring to reflect the same behavior.
+
+Tests
+- Write tests first to reproduce the issue, then expand to validate the fix. Place tests in lib/matplotlib/tests and use pytest. Use a non-interactive backend (Agg). Ensure figures are closed in tests.
+- Create test file: lib/matplotlib/tests/test_pie_nan.py with the following tests (implement actual code accordingly):
+  - test_pie_filters_nans_and_aligns_labels_and_explode:
+    - Setup: fig, ax = plt.subplots(); x = [10, 20, np.nan, 40]; labels = ["A", "B", "C", "D"]; explode = [0.1, 0.0, 0.3, 0.2].
+    - Action: wedges, texts, autotexts = ax.pie(x, labels=labels, explode=explode, autopct="%1.1f%%")
+    - Assert: len(wedges) == 3; the labels text strings correspond to ["A", "B", "D"]; explode distances on the wedges correspond to [0.1, 0.0, 0.2] in the same order; no exception raised.
+    - Close the figure.
+  - test_pie_raises_on_all_non_finite:
+    - x = [np.nan, np.inf, -np.inf]
+    - Assert that calling ax.pie(x) raises ValueError with message containing "at least one finite value".
+  - test_pie_labels_length_mismatch_with_nan_preserves_error_message:
+    - x = [10, np.nan, 20]; labels = ["A", "B"] (wrong length)
+    - Assert that ax.pie(x, labels=labels) raises ValueError matching the existing message: "'labels' must be of length 'x', not 2".
+  - test_pie_explode_length_mismatch_with_nan_preserves_error_message:
+    - x = [10, np.nan, 20]; explode = [0.1] (wrong length)
+    - Assert that ax.pie(x, explode=explode) raises ValueError matching the existing message: "'explode' must be of length 'x', not 1".
+  - test_pie_raises_on_zero_sum_after_filtering:
+    - x = [0, 0, np.nan]
+    - Assert that ax.pie(x) raises ValueError with message containing "sum to a positive value".
+  - Optional sanity check: test_pie_colors_behavior_with_nan:
+    - Provide a short list of colors to ax.pie alongside NaNs and assert the number of wedges matches the number of finite entries and no error is raised.
+    - Ensure correct return unpacking: if autopct is not provided, expect two values (wedges, texts), not three.
+- Important: Respect return semantics in tests:
+  - autopct=None: ax.pie returns two values (wedges, texts).
+  - autopct provided: ax.pie returns three values (wedges, texts, autotexts).
+  - Write tests accordingly to avoid unpacking errors.
+
+Running and validating
+- Step 2: Run the reproduction test before code changes to confirm the original failure (the NaN case should error before the fix).
+- Step 4: Implement the fix in lib/matplotlib/axes/_axes.py following the ordering above. Update the docstring accordingly.
+- Step 5: Rerun the tests:
+  - pytest -q lib/matplotlib/tests/test_pie_nan.py
+  - If passing, run a broader test subset or the full test suite to ensure no regressions are introduced:
+    - For example: pytest -q lib/matplotlib/tests/test_axes.py -k pie
+- Debug and iterate until tests pass and behavior is robust.
+
+Cleanup
+- Remove the temporary test file you added once validation is complete: lib/matplotlib/tests/test_pie_nan.py.
+- Verify cleanup by listing the directory and ensuring the file is gone.
+- Do not commit your edits; they will be committed later.
+
+Constraints
+- Do not commit your changes in this run.
+- Do not change unrelated behavior; keep existing error messages for other cases intact.
+- Ensure the fix is robust against common misuse scenarios (labels/explode length mismatches) and does not leak low-level NumPy index errors.
+- Edit source directly rather than relying on brittle string replacement.
+
+Acceptance criteria
+- Axes.pie filters out non-finite x values before normalization and wedge creation.
+- If all x values are non-finite, a clear ValueError is raised: "Wedge sizes 'x' must contain at least one finite value".
+- If sum of x after filtering is not positive, a clear ValueError is raised: "Wedge sizes 'x' must sum to a positive value".
+- Labels and explode are validated against the original x length before filtering; mismatches raise the existing, user-friendly ValueErrors and the values are filtered to remain aligned.
+- Negative values handling preserves existing error semantics.
+- Return semantics (wedges, texts[, autotexts]) are preserved and tests reflect this.
+- Tests for NaN filtering, all-non-finite error, labels/explode mismatch with NaNs, and zero-sum after filtering pass.
+- Axes.pie docstring is updated to reflect the new behavior and visible from pyplot.pie.
+- Temporary test file cleanup is performed and verified.

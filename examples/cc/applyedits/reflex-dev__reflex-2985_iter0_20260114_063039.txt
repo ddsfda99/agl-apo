@@ -1,0 +1,74 @@
+You are given a code repository in the current directory (/testbed).
+
+Bug description:
+Add support for tuple returning from pages. When a page returns a tuple, unwrap the tuple as the args for a container element so downstream logic receives a single valid Component. This should enable syntax like:
+def index():
+    return rx.text("Hello"), rx.text("World")
+
+Important guidance from prior attempts and reviews:
+- The correct place to normalize page return values is App._generate_component. That function already centralizes conversion of either a Component or a callable that returns a Component. If the callable returns a tuple, wrap it in a Fragment: Fragment.create(*result).
+- Do not rely on tag names or theme-dependent strings in your tests (e.g., "Text" vs "P"). Instead, assert by type or structural properties (isinstance checks, children count).
+- Cover both:
+  - app.add_page(page_func_returning_tuple)
+  - a @rx.page decorated function returning a tuple passed to app.add_page (this ensures decorated functions work through the same normalization).
+- The test environment may not have pytest installed. If pytest is unavailable, directly import and invoke your test functions via a Python one-liner or a small script to validate behavior.
+- Delete any test files you add at the end, per instructions.
+- Do not commit any edits.
+
+Your tasks:
+1) Write tests to reproduce the bug robustly (avoid theme-dependent assertions):
+   - Create a test module under tests/ that:
+     - Builds a minimal app (rx.App()).
+     - Defines a page function returning a tuple of components:
+       def index():
+           return rx.text("Hello"), rx.text("World")
+       app.add_page(index, route="/")
+       Assert that the stored page component for "index" is a Fragment or a subclass (the app may wrap in an OverlayFragment which is a Fragment subclass). Then verify:
+         - The underlying children include a Fragment that contains exactly two children.
+         - Both children are Components (e.g., isinstance(child, Component)) and in correct order.
+       Do NOT assert on tag names; assert on structure, types, and child count.
+     - Defines a decorated page function returning a tuple:
+       @rx.page(route="/decorated")
+       def decorated_index():
+           return rx.text("Hi"), rx.text("There")
+       Add this to the app via app.add_page(decorated_index). Assert the same structural conditions as above.
+   - Where possible, import Fragment from the library and assert isinstance(page_component, Fragment). If OverlayFragment is used, isinstance should still pass because it subclasses Fragment. If importing Fragment is challenging, you can fall back to asserting that:
+     - The page component has a .children sequence.
+     - Its first (or only relevant) child is a Fragment-like object with a .children of length 2.
+     - Those children are Components.
+   - Keep the tests minimal and deterministic.
+
+2) Explore the source to locate the bug:
+   - Inspect reflex/app.py for App.add_page and App._generate_component.
+   - Confirm that App._generate_component receives either:
+     - A Component, or
+     - A callable that returns a Component.
+   - Identify that when the callable returns a tuple, downstream code expects a Component and will fail. Therefore, normalize tuple return values to a Fragment here.
+
+3) Edit the source to fix the bug:
+   - In App._generate_component (reflex/app.py), after invoking the callable (if needed), detect if the result is a tuple. If so, wrap it in a Fragment:
+     - from reflex.components.layout.fragment import Fragment
+     - If result is a tuple, set result = Fragment.create(*result)
+   - Return the normalized Component. Only handle tuples per the requirement; no need to generalize to other iterables.
+   - Keep the fix localized to _generate_component; do not overhaul add_page.
+
+4) Rerun your tests to validate the fix:
+   - If pytest is available, run pytest -q.
+   - If pytest is NOT available, run your tests directly via Python. For example:
+     - python - << 'PY'
+       import tests.test_tuple_page as t
+       t.test_page_returns_tuple_unwrapped_to_fragment()
+       t.test_decorated_page_returns_tuple_unwrapped_to_fragment()
+       print("OK")
+       PY
+   - If a test fails, iterate on the code fix until both tests pass.
+
+5) Cleanup:
+   - Delete any test files you created under tests/ before finishing.
+   - Do not commit your edits.
+
+Success criteria:
+- Returning a tuple from a page function (both plain function and @rx.page-decorated function) results in the page being stored as a Fragment (or an OverlayFragment subclass) containing a Fragment child that has exactly two children corresponding to the tuple elements, preserving order.
+- Tests validate structural properties using isinstance and child counts rather than theme-dependent tag names.
+- Tests are executed successfully even without pytest by directly importing and calling test functions.
+- Test files are deleted at the end.

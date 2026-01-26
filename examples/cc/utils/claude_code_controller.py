@@ -1,4 +1,7 @@
 import json
+import os
+import random
+import time
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -12,7 +15,7 @@ from utils.type import AgentResult
 
 class ClaudeController:
     system_prompt = """You are an expert software engineer solving swebench bug fixing tasks."""
-    _instructions_path = "/testbed/CLAUDE.md"
+    _instructions_path = "/testbed/.claude"
     _telemetry_error_markers = (
         "event logging",
         "failed to export",
@@ -29,9 +32,8 @@ class ClaudeController:
         self.container: Runtime = self.init_container(self.image, self.instance)
         self.allowed_tools: str = ",".join([f'"{i}"' for i in tools])
         self.disallowed_tools: str = ",".join([f'"{i}"' for i in (all_tools - tools)])
-        assert "{description}" in user_prompt
         self.user_prompt: str = user_prompt
-        self._instructions_text = self._load_instructions_text()
+        self._instructions_file = Path("CLAUDE.md")
         return
 
     def init_container(self, image: str, instance: dict) -> Runtime:
@@ -53,18 +55,16 @@ class ClaudeController:
         container.send_command("export IS_SANDBOX=1")
         return container
 
-    def _load_instructions_text(self) -> str | None:
-        repo_root = Path(__file__).resolve().parents[3]
-        for name in ("CLAUDE.md", "claude.md"):
-            candidate = repo_root / name
-            if candidate.is_file():
-                return candidate.read_text(encoding="utf-8")
-        return None
-
     def _run_cli(self, instance: dict, max_step: int, timelimit: int) -> list[dict]:
         # prepare prompt safely: write it to a file inside the container using a single-quoted heredoc
         # directly applying prompt for heredoc may raise error for windows line ending \r\n
-        prompt_text = self.user_prompt.format(description=instance["problem_statement"].replace('"""', "'''"))
+
+        # Smart format: if user_prompt contains {description}, format it; otherwise use as-is
+        # This allows both template prompts (iter0) and optimized prompts (iter1, iter2) to work
+        if "{description}" in self.user_prompt:
+            prompt_text = self.user_prompt.format(description=instance["problem_statement"].replace('"""', "'''"))
+        else:
+            prompt_text = self.user_prompt
         
         # ===== DEBUG =====
         print("\n" + "=" * 80)
@@ -87,14 +87,9 @@ class ClaudeController:
         setting_cmd = "cat > /testbed/.claude/settings.json <<'CC_SETTING'\n" + setting + "\nCC_SETTING\n"
         self.container.send_command(setting_cmd)
 
-        # Write CLAUDE.md to /testbed - Claude Code will auto-load it
-        if self._instructions_text:
-            instructions_cmd = (
-                f"cat > {self._instructions_path} <<'CC_INSTRUCTIONS'\n"
-                + self._instructions_text
-                + "\nCC_INSTRUCTIONS\n"
-            )
-            self.container.send_command(instructions_cmd)
+        # Copy CLAUDE.md to /testbed
+        instructions_dir = self._instructions_path
+        self.container.copy_to_container(str(self._instructions_file), instructions_dir)
 
         # with open("utils/handle_hook.template.sh") as f:
         #     handler = f.read()
@@ -107,51 +102,70 @@ class ClaudeController:
             f'claude -p "$(cat /tmp/cc_prompt.txt)"'
             f' --system-prompt "{self.system_prompt}" --max-turns {max_step}  --output-format json --verbose'
         )
-        res = self.container.send_command(claude_cmd, timelimit * 60)
-        output = res.output
+        max_retries = int(os.getenv("CC_CLAUDE_MAX_RETRIES", "4"))
+        base_delay = float(os.getenv("CC_CLAUDE_RETRY_BASE_DELAY", "5"))
+        max_delay = float(os.getenv("CC_CLAUDE_RETRY_MAX_DELAY", "60"))
+
+        def _parse_output(output_text: str) -> tuple[dict | list | None, list[dict]]:
+            parsed_obj = None
+            stripped_output = output_text.strip()
+            if stripped_output:
+                try:
+                    parsed_obj = json.loads(stripped_output)
+                except json.JSONDecodeError:
+                    parsed_obj = None
+
+            # Parse output as full JSON, JSONL, or a trailing JSON block.
+            json_lines: list[dict] = []
+            if parsed_obj is None:
+                for line in output_text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if not (line.startswith("{") or line.startswith("[")):
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(obj, dict):
+                        if "type" in obj or "session_id" in obj:
+                            json_lines.append(obj)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            if isinstance(item, dict) and ("type" in item or "session_id" in item):
+                                json_lines.append(item)
+
+            if parsed_obj is None and not json_lines:
+                raw_lines = [line for line in output_text.splitlines() if line.strip()]
+                for idx, line in enumerate(raw_lines):
+                    if not line.lstrip().startswith(("{", "[")):
+                        continue
+                    candidate = "\n".join(raw_lines[idx:])
+                    try:
+                        parsed_obj = json.loads(candidate)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+            return parsed_obj, json_lines
+
         parsed = None
-        stripped_output = output.strip()
-        if stripped_output:
-            try:
-                parsed = json.loads(stripped_output)
-            except json.JSONDecodeError:
-                parsed = None
-
-        # Parse output as full JSON, JSONL, or a trailing JSON block.
         json_lines: list[dict] = []
-        if parsed is None:
-            for line in output.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if not (line.startswith("{") or line.startswith("[")):
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict):
-                    if "type" in obj or "session_id" in obj:
-                        json_lines.append(obj)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        if isinstance(item, dict) and ("type" in item or "session_id" in item):
-                            json_lines.append(item)
-
-        if parsed is None and not json_lines:
-            raw_lines = [line for line in output.splitlines() if line.strip()]
-            for idx, line in enumerate(raw_lines):
-                if not line.lstrip().startswith(("{", "[")):
-                    continue
-                candidate = "\n".join(raw_lines[idx:])
-                try:
-                    parsed = json.loads(candidate)
-                    break
-                except json.JSONDecodeError:
-                    continue
-
-        if parsed is None and not json_lines:
-            raise AssertionError("traj not found!")
+        for attempt in range(max_retries + 1):
+            res = self.container.send_command(claude_cmd, timelimit * 60)
+            parsed, json_lines = _parse_output(res.output)
+            if parsed is not None or json_lines:
+                break
+            if attempt >= max_retries:
+                raise AssertionError("traj not found!")
+            delay = min(max_delay, base_delay * (2**attempt))
+            jitter = random.uniform(0, delay * 0.2)
+            sleep_for = delay + jitter
+            print(
+                f"[retry {attempt + 1}/{max_retries}] no traj parsed; sleeping {sleep_for:.1f}s before retry"
+            )
+            time.sleep(sleep_for)
 
         def _assistant_turns(items: list[dict]) -> int:
             return sum(1 for obj in items if obj.get("type") == "assistant")
@@ -255,6 +269,30 @@ fi
             traj = self._run_cli(instance, max_step, timelimit)
         else:
             raise ValueError(f"wrong run_method {run_method}, run_method should be in [python, cli]")
+        try:
+            claude_md_path = "/testbed/.claude/CLAUDE.md"
+            claude_cmd = f"cat {claude_md_path}"
+            claude_md_output = self.container.send_command(claude_cmd).output
+            claude_md = claude_md_output
+            lines = claude_md_output.splitlines()
+            if lines and lines[0].strip() == claude_cmd:
+                claude_md = "\n".join(lines[1:])
+                if claude_md_output.endswith("\n"):
+                    claude_md += "\n"
+            Path("CLAUDE.md").write_text(claude_md, encoding="utf-8")
+            logger(self.run_id, instance["instance_id"], f"Pulled {claude_md_path} to CLAUDE.md")
+        except Exception as exc:
+            logger(self.run_id, instance["instance_id"], f"Failed to pull CLAUDE.md: {exc}")
+        try:
+            traj_dir = Path.cwd() / "traj"
+            traj_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            traj_path = traj_dir / f"{instance['instance_id']}_{timestamp}.json"
+            with traj_path.open("w", encoding="utf-8") as f:
+                json.dump(traj, f, ensure_ascii=True)
+            logger(self.run_id, instance["instance_id"], f"Trajectory saved to {traj_path}")
+        except Exception as exc:
+            logger(self.run_id, instance["instance_id"], f"Failed to write trajectory file: {exc}")
         solution_patch = self.container.send_command("git --no-pager diff HEAD --diff-filter=M --text").output
         solution_patch = solution_patch.replace("git --no-pager diff HEAD --diff-filter=M --text\n", "")
         reproduction_file = self.container.send_command("cat /testbed/reproduction.py").output

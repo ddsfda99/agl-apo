@@ -1,0 +1,72 @@
+Here is a thorough review of the agent’s investigation, what likely went wrong, and concrete steps to improve.
+
+What the agent tried and where it went off track
+- It correctly located the template and the relevant code paths for Fn::FindInMap, the LanguageExtensions transform, and type validation.
+- It ran cfn-lint on the reproduction template and saw “0 errors,” which gave the impression everything was fine.
+- It did not run the repository’s test suite (pytest) or inspect failing tests, which is usually the gating factor for these tasks. Relying purely on the CLI output for one template misses regression cases.
+- It tried “python -m cfnlint” which fails for this package (cfn-lint is exposed as an executable), then switched to “cfn-lint” properly.
+- It read the wrong path first (/test_findinmap_default.yaml), then corrected to /testbed/test_findinmap_default.yaml; that’s minor but indicates hurried path handling.
+- It did not make any code changes or propose them, nor create tests. The session ended with an API error, but the work up to then didn’t address root problems or validation gaps.
+
+Root cause and likely failure mode
+The template uses AWS::LanguageExtensions with Fn::FindInMap’s fourth argument “DefaultValue: !Ref AWS::NoValue”. The intent is that:
+- When the mapping lookup fails, DefaultValue should be used.
+- If DefaultValue resolves to AWS::NoValue, the property should be removed, which should suppress E3012 type violations for the removed property.
+
+Two places govern this:
+1) Validation schema for Fn::FindInMap (src/cfnlint/rules/functions/FindInMap.py)
+2) Resolution logic for Fn::FindInMap (src/cfnlint/jsonschema/_resolvers_cfn.py) and the LanguageExtensions transform (src/cfnlint/template/transforms/_language_extensions.py)
+
+The code currently has decent resolver and transform handling:
+- _language_extensions._Transform detects the presence of DefaultValue and sets default_on_resolver_failure. If the map can’t be resolved, it returns the DefaultValue. If the default resolves to AWS::NoValue (handled in _ForEachValueRef), it returns None. The walking logic deletes keys with None, so Properties get removed as desired.
+- _resolvers_cfn.find_in_map respects DefaultValue and avoids emitting missing mapping key errors when default is present. It also yields values and annotates the path to DefaultValue.
+
+However, the Fn::FindInMap schema validation for DefaultValue is too restrictive under LanguageExtensions:
+- In FindInMap.schema, when LanguageExtensions are enabled, the 4th item schema is an object with DefaultValue and a custom keyword “default_value”.
+- The custom validator _default_value evolves the validator with context.functions=["Ref"] and then descends into the instance with type constraints (“array” + singular_types). This means only “Ref” is allowed inside DefaultValue and intrinsic functions like Fn::Sub, Fn::Join, Fn::If, etc., are disallowed.
+- Realistic and valid LanguageExtensions usage expects DefaultValue to be able to use intrinsic functions beyond Ref (e.g., Fn::Sub, Fn::Join, Fn::If, Fn::Select, Fn::ToJsonString, possibly Fn::Length). The current validation would reject these, causing E1011 or related schema validation errors in cases covered by tests.
+- The agent did not run the full test suite to observe such failures, and only validated the single reproduction file that uses !Ref AWS::NoValue (which happens to pass under this restriction). This is why they concluded “0 errors,” but other tests likely failed.
+
+Other improvement areas the agent missed
+- Did not verify that resolved values are properly validated against the resource schema (“resolved_rule=W1034”). The FindInMapResolved rule is currently just metadata, but resolution is used by the validator. Without running tests, we can’t see whether invalid resolved types trigger correct rule IDs.
+- No check on behavior when DefaultValue is a list (allowed per LanguageExtensions) or more complex nested structures. The current implementation supports lists (see _FnFindInMapDefaultValue), but the custom default_value validator would still forbid functions other than Ref within those lists.
+- No explicit confirmation that Type rule E3012 interacts properly with resolved values and NoValue removal. The Type rule sets strict_types based on context.is_resolved_value and path handling, but correctness here still relies on the transform removing the property. The agent didn’t validate this across multiple scenarios.
+
+Concrete fixes to implement
+1) Loosen the validation for DefaultValue in FindInMap._default_value when LanguageExtensions is enabled:
+- Today, it limits functions to ["Ref"]. That is too restrictive.
+- It should allow the same set of intrinsic functions permitted elsewhere under LanguageExtensions. Based on FindInMap.schema’s scalar_schema functions, a safe set would be:
+  - "Ref", "Fn::Join", "Fn::Sub", "Fn::If", "Fn::Select", "Fn::Length", "Fn::ToJsonString"
+- If you want to be conservative, mirror exactly the LanguageExtensions functions added to scalar_schema (lines 51–60). For DefaultValue, set validator.context.functions to that broader set before descending.
+- Keep the type constraint for DefaultValue to allow arrays and scalar types, but allow those nested functions.
+
+Example conceptual changes:
+- In _default_value:
+  - If transforms.has_language_extensions_transform(): set functions=["Ref","Fn::Join","Fn::Sub","Fn::If","Fn::Select","Fn::Length","Fn::ToJsonString"] (the same as scalar_schema under LanguageExtensions).
+  - Then descend with type ("array",) + singular_types as before.
+- Adjust schema for fourth item to indicate that the DefaultValue property can have supported functions (handled via the custom default_value keyword). The fourth item’s "functions": [] is okay at the wrapper level, as the custom keyword controls the inner property.
+
+2) Confirm resolver and transform behavior:
+- find_in_map already resolves DefaultValue and uses “value_path=deque([4, "DefaultValue"])”; that’s fine.
+- _Transform already passes default_on_resolver_failure=True and removes keys when default resolves to None; keep that.
+- Ensure that resolving DefaultValue is not treated as a failure even if map is missing or keys don’t match. The current code already respects that.
+
+3) Add tests for:
+- DefaultValue: !Ref AWS::NoValue under LanguageExtensions should not raise E3012; property is removed.
+- DefaultValue using Fn::Sub or Fn::Join returns a valid string for a property requiring a string (e.g., S3 BucketName), and should not raise E3012.
+- DefaultValue as a list of scalars and/or functions, used in a property that expects a list, should validate correctly.
+- Without LanguageExtensions, a 4th item in Fn::FindInMap should raise E1011 (invalid function config).
+- DefaultValue object must only contain “DefaultValue” key; any additional keys should be flagged.
+
+4) Run the full test suite:
+- Use “pytest -q” to run all tests in the repository. Don’t rely solely on cfn-lint CLI output for one file.
+- Fix any additional regressions that appear from loosening DefaultValue functions, such as ensuring strict typing doesn't overfire when resolved values are temporary.
+
+Process improvements for the agent
+- Always run the repository’s tests early (pytest) to see the exact failure messages and rule IDs. Searching for rule IDs like E3012 is helpful, but only test outputs tell you where and why failures happen.
+- Validate multiple scenarios, not just a single reproduction template. The reproduction file using !Ref AWS::NoValue won’t surface issues with disallowed intrinsics inside DefaultValue.
+- Avoid dead-end commands like “python -m cfnlint” for packages that aren’t designed to be executed in that manner; use the documented CLI or run tests.
+- When making schema changes, ensure consistency with LanguageExtensions capabilities. If the code elsewhere allows certain intrinsics in mapping keys, carry that consistency to DefaultValue.
+
+Summary
+The primary issue is overly restrictive validation of Fn::FindInMap’s DefaultValue under LanguageExtensions: it only allows Ref, blocking legitimate intrinsics like Fn::Sub, Fn::Join, Fn::If, etc. The agent didn’t run the full test suite to expose those failures, relied on one template that happened to pass, and made no code changes. To fix: broaden allowed functions in DefaultValue’s custom validator to match the LanguageExtensions-supported set, add comprehensive tests for DefaultValue with various intrinsics, and run pytest to ensure all cases pass.

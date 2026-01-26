@@ -1,0 +1,39 @@
+diff --git a/src/cfnlint/rules/functions/FindInMap.py b/src/cfnlint/rules/functions/FindInMap.py
+index 0232d2104..8fe556ff7 100644
+--- a/src/cfnlint/rules/functions/FindInMap.py
++++ b/src/cfnlint/rules/functions/FindInMap.py
+@@ -84,9 +84,20 @@ class FindInMap(BaseFn):
+     def _default_value(
+         self, validator: Validator, s: Any, instance: Any, schema: Any
+     ) -> ValidationResult:
++        allowed_functions = ["Ref"]
++        if validator.context.transforms.has_language_extensions_transform():
++            allowed_functions = [
++                "Fn::Join",
++                "Fn::Sub",
++                "Fn::If",
++                "Fn::Select",
++                "Fn::Length",
++                "Fn::ToJsonString",
++                "Ref",
++            ]
+         validator = validator.evolve(
+             context=validator.context.evolve(
+-                functions=["Ref"],
++                functions=allowed_functions,
+             ),
+         )
+         yield from validator.descend(
+diff --git a/src/cfnlint/template/transforms/_language_extensions.py b/src/cfnlint/template/transforms/_language_extensions.py
+index 5263cf686..81cb7a3e2 100644
+--- a/src/cfnlint/template/transforms/_language_extensions.py
++++ b/src/cfnlint/template/transforms/_language_extensions.py
+@@ -159,7 +159,7 @@ class _Transform:
+                 elif k == "Fn::FindInMap":
+                     try:
+                         mapping = _ForEachValueFnFindInMap(get_hash(v), v)
+-                        map_value = mapping.value(cfn, params, True, False)
++                        map_value = mapping.value(cfn, params, True, True)
+                         # if we can resolve it we will return it
+                         if isinstance(map_value, tuple([list]) + _SCALAR_TYPES):
+                             return map_value

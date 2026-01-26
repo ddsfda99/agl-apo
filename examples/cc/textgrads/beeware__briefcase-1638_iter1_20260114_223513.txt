@@ -1,0 +1,49 @@
+Here’s a detailed review of the coding agent’s execution trace, what it did well, what went wrong, and how to improve.
+
+Summary of the task
+- Fix a Fedora/RHEL prompt bug where Briefcase suggests installing “rpmbuild” instead of the correct package “rpm-build”.
+- Update the existing RPM test expectation for RHEL/Fedora to “sudo dnf install rpm-build”.
+- Adjust the source mapping in LinuxSystemPackageCommand._verify_packaging_tools to use “rpm-build” for the install prompt.
+- Run RPM-specific tests, then the full suite; if a known unrelated test fails (test_data_path_creation_failure), do not modify it and note it as pre-existing.
+- Do not add new tests or commit changes.
+- Cleanup is a no-op (no added files to delete).
+
+What the agent did
+- Opened tests/platforms/linux/system/test_package__rpm.py, found test_verify_rpmbuild_missing, and updated the RHEL vendor_base case to expect:
+  "Can't find the rpm-build tools. Try running `sudo dnf install rpm-build`."
+- Opened src/briefcase/platforms/linux/system.py, found LinuxSystemPackageCommand._verify_packaging_tools() and changed the RPM mapping tuple from ("rpm-build", "rpmbuild", "rpmbuild") to ("rpm-build", "rpmbuild", "rpm-build").
+- Ran only the RPM-related tests first: pytest -q tests/platforms/linux/system/test_package__rpm.py. Result: 10 passed.
+- Ran the full test suite: pytest -q. Result: 1 failure at tests/commands/base/test_paths.py::test_data_path_creation_failure, 2598 passed, 39 skipped.
+
+Verification of correctness
+- Source fix:
+  - In LinuxSystemPackageCommand._verify_packaging_tools(), the mapping for RPM now uses package_name "rpm-build" for the install prompt (while leaving tool_name "rpm-build" and executable_name "rpmbuild" unchanged).
+  - This aligns with the requirement that the tuple be ("rpm-build", "rpmbuild", "rpm-build").
+- Test fix:
+  - The test case for vendor_base "rhel" now expects “sudo dnf install rpm-build”.
+  - The non-RHEL case remains unchanged and correct: it expects “Can’t find the rpmbuild tool. Install this first to package the rpm.” This matches code behavior when vendor_base is None (no installer available, so the message references the executable name rpmbuild and uses the singular “tool”).
+- RPM tests: All passed (10 passed).
+- Full suite: Only the known pre-existing test failed (test_data_path_creation_failure). This is explicitly called out in the instructions as pre-existing and unrelated; we must not modify it.
+
+Why the coding agent “failed”
+- Functionally, the agent did not break anything; it fixed the bug and validated the RPM tests. The single failing test in the full suite is pre-existing and unrelated to the RPM prompt fix, as per the instructions.
+- The gap is procedural: the agent didn’t explicitly note in its final output that the failure is expected and unrelated, nor did it state that cleanup is a no-op. The instructions ask you to note that failure and to explicitly record that there’s nothing to delete. That omission may have been interpreted as “failure” even though the technical changes are correct.
+
+How to improve
+- Explicitly document in the final report:
+  - The test change made: updated the RHEL vendor_base case in tests/platforms/linux/system/test_package__rpm.py::test_verify_rpmbuild_missing to expect “sudo dnf install rpm-build”.
+  - The source change made: changed the RPM mapping in src/briefcase/platforms/linux/system.py to ("rpm-build", "rpmbuild", "rpm-build").
+  - RPM-specific tests pass.
+  - The full suite shows a single failing test (tests/commands/base/test_paths.py::test_data_path_creation_failure); this is pre-existing and unrelated to the rpm prompt fix, and per instructions, no modifications were made.
+  - Cleanup step is a no-op since no new files were added.
+- Confirm in the report that unrelated expectations were not changed and that the non-RHEL case remains correct (and passed).
+- Reiterate that no changes were committed.
+
+Conclusion
+- The agent made the correct code and test updates, and RPM tests passed.
+- The one failing test in the full suite is expected and unrelated. The agent should explicitly note this in the final report and state that cleanup is a no-op.
+- With that documentation, the work meets the acceptance criteria:
+  - For app.packaging_format == "rpm" on RHEL/Fedora, the prompt is “sudo dnf install rpm-build”.
+  - tests/platforms/linux/system/test_package__rpm.py passes.
+  - src/briefcase/platforms/linux/system.py maps RPM package_name to "rpm-build".
+  - No new test files were added; cleanup is a no-op.

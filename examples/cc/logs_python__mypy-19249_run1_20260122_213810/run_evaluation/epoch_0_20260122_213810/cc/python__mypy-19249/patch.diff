@@ -1,0 +1,19 @@
+diff --git a/mypy/checkexpr.py b/mypy/checkexpr.py
+index edc3ac70f..d79a84982 100644
+--- a/mypy/checkexpr.py
++++ b/mypy/checkexpr.py
+@@ -4288,7 +4288,13 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
+         ):
+             self.msg.unreachable_right_operand(e.op, e.right)
+ 
+-        right_type = self.analyze_cond_branch(right_map, e.right, expanded_left_type)
++        # Prefer not to force a bool context on the right operand; it can be any type used for truthiness.
++        right_context = expanded_left_type
++        pl = get_proper_type(left_type)
++        # If the left operand is precisely 'bool', avoid using it as type context for the right.
++        if isinstance(pl, Instance) and pl.type.fullname == "builtins.bool":
++            right_context = ctx
++        right_type = self.analyze_cond_branch(right_map, e.right, right_context)
+ 
+         if left_map is None and right_map is None:
+             return UninhabitedType()

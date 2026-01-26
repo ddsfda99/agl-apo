@@ -1,0 +1,111 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+KUBECONFIG loading does not match kubectl behavior
+**What happened (please include outputs or screenshots)**:
+
+Calling `config.load_kube_config()` with a KUBECONFIG that uses colon delimited files throws an error:
+
+```shell
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:815: in load_kube_config
+    loader = _get_kube_config_loader(
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:775: in _get_kube_config_loader
+    return KubeConfigLoader(
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:206: in __init__
+    self.set_active_context(active_context)
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:258: in set_active_context
+    context_name = self._config['current-context']
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <kubernetes.config.kube_config.ConfigNode object at 0x7fb7e4108f90>, key = 'current-context'
+
+    def __getitem__(self, key):
+        v = self.safe_get(key)
+        if v is None:
+>           raise ConfigException(
+                'Invalid kube-config file. Expected key %s in %s'
+                % (key, self.name))
+E           kubernetes.config.config_exception.ConfigException: Invalid kube-config file. Expected key current-context in /var/home/seb/.config/kube/clusters/kube.example.com.yaml
+
+.venv/lib64/python3.11/site-packages/kubernetes/config/kube_config.py:625: ConfigException
+```
+
+The code that causes this is just:
+
+```python
+    @pytest.fixture
+    def k8s_client():
+        config.load_kube_config()
+```
+
+`KUBECONFIG` is defined as follows:
+
+```shell
+echo $KUBECONFIG
+/var/home/seb/.config/kube/clusters/kube.example.com.yaml:/var/home/seb/.config/kube/contexts/kube.example.com.yaml:/var/home/seb/.config/kube/users/kube.example.com.yaml
+```
+
+These files define clusters, contexts, and users each on their own.
+
+**What you expected to happen**:
+
+The `load_kube_config` call should behave just like kubectl which merges all files first and then attempts to load them and thus does not care about the order of these files.
+
+**How to reproduce it (as minimally and precisely as possible)**:
+
+Create 3 files for cluster, context, and user:
+
+```yaml
+# cluster
+apiVersion: v1
+kind: Config
+clusters:
+  - name: kube.example.com
+    cluster:
+      certificate-authority-data: doesnotmatter
+      server: https://kube.example.com:6443
+```
+
+```yaml
+# context
+apiVersion: v1
+kind: Config
+contexts:
+  - name: kube.example.com
+    context:
+      cluster: kube.example.com
+      user: kube.example.com
+      namespace: kube-system
+current-context: kube.example.com
+```
+
+```yaml
+# user
+apiVersion: v1
+kind: Config
+users:
+  - name: kube.example.com
+```
+
+Then define `KUBECONFIG` to something like `cluster.yaml:context.yaml:user.yaml`.
+
+**Anything else we need to know?**:
+
+Changing the order of these files so that the context file is at the first position fixes this!
+
+Support for colon separated files was introduced with https://github.com/kubernetes-client/python/issues/636 (?)
+
+**Environment**:
+- Kubernetes version (`kubectl version`): v1.29.0
+- OS (e.g., MacOS 10.13.6): Fedora 39
+- Python version (`python --version`): 3.11.7
+- Python client version (`pip list | grep kubernetes`): 29.0.0
+
+
+=================================================
+You task is to fix the bug with the following steps:
+(1) write test cases to reproduce the bug.
+(2) explore the source codes to locate the bug.
+(3) edit the source codes to fix the bug.
+(4) rerun your written test cases to validate that the bug is fixed. If not, go back to explore the source codes and fix the codes again.
+(5) remember to delete the test cases you write at last.
+Please do not commit your edits. We will do it later.

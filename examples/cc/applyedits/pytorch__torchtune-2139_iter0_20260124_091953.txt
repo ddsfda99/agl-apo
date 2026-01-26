@@ -1,0 +1,96 @@
+You are an expert coding agent. Your goal is to fix the distributed DoRA training bug and add the required test. Follow the steps below carefully and implement the minimal, correct fix that preserves FSDP behavior and passes tests.
+
+Task summary
+- Issue: In distributed LoRA/DoRA recipe, the DoRA magnitude parameter remains on the meta device, causing validate_no_params_on_meta_device to fail. Root cause is incorrect ordering: initialize_dora_magnitude runs before the magnitude is materialized off meta.
+- Required fix: Materialize DoRA magnitude parameters off meta before initialize_dora_magnitude runs. Use the existing load_dora_magnitudes(model) utility, which uses state_dict with assign=True and preserves parameter identity for FSDP.
+- Required test: Add a DoRA test to tests/recipes/test_lora_finetune_distributed.py. The test should validate that with DoRA enabled, after setup/model load, no parameters are left on meta, and initialization succeeds. Prefer a unit-style test that does not require multiple GPUs.
+
+Steps
+1) Understand the requirements
+- The failure is reported when running tune run --nnodes 1 --nproc_per_node 2 lora_finetune_distributed --config llama3/8B_dora.
+- Error trace points to recipes/lora_finetune_distributed.py calling training.validate_no_params_on_meta_device and finding a DoRA magnitude on meta.
+- The code constructs the model on torch.device("meta"), loads base weights, then initializes DoRA magnitudes. The bug is that initialize_dora_magnitude runs before magnitude is materialized.
+- Do not fix by reassigning Parameter objects after FSDP wrapping. Preserve parameter identity and use state_dict loading paths.
+
+2) Write a reproduction test
+- Add a targeted test function to tests/recipes/test_lora_finetune_distributed.py that:
+  - Constructs a minimal DoRA-enabled config and model on meta device (no multi-GPU required).
+  - Emulates the distributed setup ordering and asserts the correct behavior after your fix.
+- Test requirements:
+  - Without the fix, the test would fail by finding a parameter on meta or raising during initialization.
+  - With the fix, test should pass: initialize_dora_magnitude succeeds and validate_no_params_on_meta_device finds no meta params.
+- Suggested structure:
+  - Build a tiny model or module containing a DoRA adapter (e.g., a linear layer wrapped with a DoRA-compatible LoRA module) using the same factories/config paths as the recipe.
+  - Use torch.device("meta") context to instantiate it.
+  - Load a dummy full-model state dict compatible with the module (or skip loading if the test uses a synthetic module and focuses on magnitude materialization behavior).
+  - Call training.load_dora_magnitudes(model) and then initialize_dora_magnitude on each relevant submodule.
+  - Finally, call training.validate_no_params_on_meta_device(model) to assert no meta tensors remain.
+- Place the test in tests/recipes/test_lora_finetune_distributed.py and do not alter other existing tests.
+
+3) Locate the bug
+- In recipes/lora_finetune_distributed.py, find _setup_model and the code that:
+  - Instantiates the model on meta: with training.set_default_dtype(self._dtype), torch.device("meta"): model = config.instantiate(cfg_model)
+  - Loads base weights: training.load_from_full_model_state_dict(...)
+  - Calls initialize_dora_magnitude on DoRA modules.
+- Search for references to initialize_dora_magnitude and load_dora_magnitudes and inspect their current order.
+
+4) Implement the fix
+- Minimal and safe change: ensure load_dora_magnitudes(model) runs before initialize_dora_magnitude.
+- Pseudocode of the change inside _setup_model after base weights are loaded:
+  - Detect if model has DoRA modules. For example, iterate model.modules() and check hasattr(m, "initialize_dora_magnitude") or a specific DoRA class/type check used in the codebase.
+  - If DoRA present:
+    - Call training.load_dora_magnitudes(model) first. This will materialize the magnitude parameters off meta using model.load_state_dict(..., assign=True), preserving Parameter identity and FSDP handles.
+    - Then iterate over DoRA modules and call m.initialize_dora_magnitude().
+- Keep training.validate_no_params_on_meta_device(model) at the end of setup to catch any meta leftovers.
+- Do not reassign m.magnitude = nn.Parameter(...). Do not create new Parameter objects after FSDP wrapping.
+- Ensure dtype alignment: this path should be under training.set_default_dtype(self._dtype). The state_dict assign pathway will propagate the correct dtype/device.
+
+5) Run the reproduction test
+- Run the new DoRA test you added in tests/recipes/test_lora_finetune_distributed.py. It should pass on CPU.
+- Optionally, run the full file: python -m pytest tests/recipes/test_lora_finetune_distributed.py -q
+- If you have multiple GPUs available, you can also try the original repro command, but the unit test should be sufficient to validate the fix.
+
+6) Debug if tests fail
+- If validate_no_params_on_meta_device still fails, verify:
+  - load_dora_magnitudes(model) is indeed called before initialize_dora_magnitude.
+  - The default dtype context covers both materialization and initialization.
+  - No code path replaces Parameter objects after FSDP wrapping.
+- If dtype mismatches occur (e.g., bf16 vs fp32), ensure training.set_default_dtype(self._dtype) wraps both materialization and initialize calls, and that the config’s dtype matches expectations.
+
+7) Clean up
+- Do not commit changes.
+- Remove any temporary test scaffolding files you created outside tests/recipes/test_lora_finetune_distributed.py. Keep only the new DoRA test in that file.
+
+Implementation details to guide you
+- The failure was introduced by #1909: it switched to copying into magnitude instead of creating it properly, but in the distributed recipe magnitude was still on meta.
+- Correct ordering:
+  - Instantiate model on meta
+  - Materialize LoRA A/B params as needed
+  - Load base weights
+  - If DoRA present: call training.load_dora_magnitudes(model)
+  - Then call initialize_dora_magnitude on each DoRA module
+  - Validate no params on meta
+- Use the provided utilities:
+  - training.load_from_full_model_state_dict(...)
+  - training.load_dora_magnitudes(model)  // this uses model.load_state_dict(assign=True)
+  - training.validate_no_params_on_meta_device(model)
+- Avoid:
+  - Replacing Parameters after FSDP wrapping
+  - Changing or skipping unrelated tests to make CI pass
+  - Relying on skipped multi-GPU tests as proof of correctness
+
+Suggested test sketch (adjust to codebase specifics)
+- In tests/recipes/test_lora_finetune_distributed.py, add:
+
+  - A test like test_dora_magnitude_materialized_before_initialize that:
+    - Creates a tiny module with a DoRA adapter using the same adapter class the recipe uses.
+    - Instantiates the module under torch.device("meta") and training.set_default_dtype(torch.float32) or bf16 as appropriate.
+    - Calls training.load_dora_magnitudes(model).
+    - Calls initialize_dora_magnitude on the DoRA module(s).
+    - Calls training.validate_no_params_on_meta_device(model), asserting no RuntimeError is raised.
+  - Optionally, include an assertion that the magnitude dtype matches the expected training dtype.
+
+Notes
+- Keep changes minimal and scoped to the ordering in recipes/lora_finetune_distributed.py.
+- The new DoRA test should be robust without requiring multiple GPUs; do not depend on torch.distributed launch if avoidable.
+- Do not commit any edits.

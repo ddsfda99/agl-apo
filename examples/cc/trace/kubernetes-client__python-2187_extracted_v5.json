@@ -1,0 +1,392 @@
+{
+  "instance_id": "kubernetes-client__python-2187",
+  "trace": [
+    {
+      "role": "user",
+      "content": "You are working in the code repository under /testbed. The goal is to fix a bug where load_kube_config does not match kubectl behavior when KUBECONFIG is a colon-separated list of files. Specifically, current-context is only taken from the first file, instead of merging all files and using the last-defined current-context as kubectl does.\n\nFollow these steps precisely. Demonstrate the failing test before the fix, then implement the fix, verify, and finally delete the temporary test files. Do not commit any changes.\n\nContext on the bug\n- Symptom: load_kube_config fails when KUBECONFIG contains multiple files and only a later file defines current-context. The error is “Invalid kube-config file. Expected key current-context in <first-file-path>”.\n- Expected: Match kubectl behavior. Merge all files first, then read current-context from the merged config. Order should not matter. For conflicts, the last file wins.\n- Root cause: In KubeConfigMerger.load_config, the merger deep copies the first file and merges only the lists clusters, contexts, and users. Scalar top-level keys (like current-context) are not updated based on later files. KubeConfigLoader.__init__ calls set_active_context(), which immediately accesses current-context on the merged config and raises if missing.\n\nStep-by-step plan\n1) Identify the correct module to patch\n- There may be both kubernetes/base/config/kube_config.py and kubernetes/config/kube_config.py. Determine which module load_kube_config imports during tests:\n  - Run a short script or add a temporary test that imports kubernetes.config and prints kubernetes.config.kube_config.__file__ to confirm the file path used. Alternatively, grep for load_kube_config usage in the test suite to see which path is imported.\n  - In prior runs, kubernetes/base/config/kube_config.py was the one under test. Verify this in your environment.\n\n2) Write a failing test that reproduces the issue\n- Create a new test file dedicated to this bug, for example tests/test_kubeconfig_current_context_merge.py. Follow the style of existing tests in the repo.\n- Use pytest with tmp_path and monkeypatch to create three separate config YAML files:\n  - cluster.yaml: define a cluster with a server, no current-context key.\n    apiVersion: v1\n    kind: Config\n    clusters:\n      - name: kube.example.com\n        cluster:\n          server: https://kube.example.com:6443\n  - context.yaml: define a context that sets current-context.\n    apiVersion: v1\n    kind: Config\n    contexts:\n      - name: kube.example.com\n        context:\n          cluster: kube.example.com\n          user: kube.example.com\n          namespace: kube-system\n    current-context: kube.example.com\n  - user.yaml: define a user.\n    apiVersion: v1\n    kind: Config\n    users:\n      - name: kube.example.com\n- Construct a colon-separated KUBECONFIG string in the order cluster:context:user so that the first file lacks current-context.\n- Test behavior before the fix:\n  - monkeypatch the environment to set KUBECONFIG to the colon-separated paths.\n  - Call kubernetes.config.load_kube_config().\n  - Expect this to fail with ConfigException mentioning current-context missing from the first file. Use pytest.raises to assert the failure and capture the message.\n- Then add a second test in the same file that asserts the desired behavior (which will initially fail), for example:\n  - With the same KUBECONFIG order cluster:context:user, calling load_kube_config should succeed and set the active context to kube.example.com after the fix. You can assert that by constructing a KubeConfigLoader via load_kube_config and checking loader._config['current-context'] or using public accessors if available.\n\n3) Run the tests to confirm the failure\n- Run pytest to see the failing test clearly:\n  - pytest -q\n- Confirm that your new test fails in the expected way. This is the red step of red-green.\n\n4) Implement the fix with minimal impact and kubectl-like precedence\n- Open the correct kube_config.py file as confirmed in step 1.\n- Locate KubeConfigMerger.load_config.\n- After the logic that merges list fields (clusters, contexts, users) from each file, update the merged configuration to also merge scalar top-level keys with last-wins precedence, at least for current-context.\n- Specifically, after loading each individual file into a config mapping and merging its lists, add code that sets current-context on the merged config whenever the current file defines it and it is non-empty:\n  - if 'current-context' in config and config['current-context']:\n      self.config_merged.value['current-context'] = config['current-context']\n- This ensures:\n  - If the first file lacks current-context but a later file defines it, the merged config has it.\n  - If multiple files define current-context, the last non-empty one wins.\n- Optional improvement: Consider also last-wins for other top-level fields such as preferences and extensions. For safety and minimalism, you can focus on current-context for this bug. If you do handle additional keys, ensure you mimic kubectl semantics and do not break existing tests.\n\n5) Re-run tests to verify the fix\n- Run pytest -q again.\n- Your previously failing “should succeed” test should now pass, and the “expect failure before fix” test should be updated or removed as described next.\n\n6) Clean up tests per instructions\n- The instructions require deleting the test cases you wrote at last. Remove your temporary test file tests/test_kubeconfig_current_context_merge.py.\n- Re-run the entire test suite to ensure there are no regressions:\n  - pytest -q\n- All existing tests should still pass.\n\nAdditional notes and cautions\n- Avoid introducing changes that could affect certificate-authority-data handling. In the cluster.yaml test use only server or use valid base64 if you include certificate-authority-data to avoid unrelated failures.\n- Ensure you patch the exact file that kubernetes.config.load_kube_config imports in this repo. If there are duplicate modules, patch the one actually used. You can confirm via module path introspection in Python.\n- Preserve the existing merge behavior for list fields. Do not refactor more than necessary.\n- Do not commit changes.\n\nSuccess criteria\n- Before the fix, a test that calls load_kube_config with KUBECONFIG in the order cluster:context:user fails due to missing current-context in the first file.\n- After the fix, load_kube_config succeeds with the same KUBECONFIG order, and the active context resolves to the value from the later file. Order of files no longer matters for current-context.\n- All pre-existing tests in the repository continue to pass after the fix.\n- The temporary test file you added is deleted before finishing."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_tA215FnI4hM2myDZD4EKrio2",
+          "name": "Glob",
+          "input": {
+            "pattern": "**/kube_config.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_tA215FnI4hM2myDZD4EKrio2",
+          "type": "tool_result",
+          "content": "/testbed/kubernetes/base/config/kube_config.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_0NuKdCpFzYHyPJHfbAHC8mAm",
+          "name": "Bash",
+          "input": {
+            "command": "python -c \"import kubernetes.config as cfg; import inspect; import os; print(os.path.abspath(cfg.kube_config.__file__))\"",
+            "description": "Print file path of kubernetes.config.kube_config module used"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_0NuKdCpFzYHyPJHfbAHC8mAm",
+          "type": "tool_result",
+          "content": "/testbed/kubernetes/config/kube_config.py",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_zsfLWac96MN9czkqVmAow6WF",
+          "name": "Glob",
+          "input": {
+            "pattern": "tests/**/*.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_zsfLWac96MN9czkqVmAow6WF",
+          "type": "tool_result",
+          "content": "No files found"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_0Q8J3cXg4nMKBrJhk32JYQKL",
+          "name": "Read",
+          "input": {
+            "file_path": "/testbed/kubernetes/config/kube_config.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_0Q8J3cXg4nMKBrJhk32JYQKL",
+          "type": "tool_result",
+          "content": "     1→# Copyright 2018 The Kubernetes Authors.\n     2→#\n     3→# Licensed under the Apache License, Version 2.0 (the \"License\");\n     4→# you may not use this file except in compliance with the License.\n     5→# You may obtain a copy of the License at\n     6→#\n     7→#     http://www.apache.org/licenses/LICENSE-2.0\n     8→#\n     9→# Unless required by applicable law or agreed to in writing, software\n    10→# distributed under the License is distributed on an \"AS IS\" BASIS,\n    11→# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n    12→# See the License for the specific language governing permissions and\n    13→# limitations under the License.\n    14→\n    15→import atexit\n    16→import base64\n    17→import copy\n    18→import datetime\n    19→import json\n    20→import logging\n    21→import os\n    22→import platform\n    23→import subprocess\n    24→import tempfile\n    25→import time\n    26→from collections import namedtuple\n    27→\n    28→import google.auth\n    29→import google.auth.transport.requests\n    30→import oauthlib.oauth2\n    31→import urllib3\n    32→import yaml\n    33→from requests_oauthlib import OAuth2Session\n    34→from six import PY3\n    35→\n    36→from kubernetes.client import ApiClient, Configuration\n    37→from kubernetes.config.exec_provider import ExecProvider\n    38→\n    39→from .config_exception import ConfigException\n    40→from .dateutil import UTC, format_rfc3339, parse_rfc3339\n    41→\n    42→try:\n    43→    import adal\n    44→except ImportError:\n    45→    pass\n    46→\n    47→EXPIRY_SKEW_PREVENTION_DELAY = datetime.timedelta(minutes=5)\n    48→KUBE_CONFIG_DEFAULT_LOCATION = os.environ.get('KUBECONFIG', '~/.kube/config')\n    49→ENV_KUBECONFIG_PATH_SEPARATOR = ';' if platform.system() == 'Windows' else ':'\n    50→_temp_files = {}\n    51→\n    52→\n    53→def _cleanup_temp_files():\n    54→    global _temp_files\n    55→    for temp_file in _temp_files.values():\n    56→        try:\n    57→            os.remove(temp_file)\n    58→        except OSError:\n    59→            pass\n    60→    _temp_files = {}\n    61→\n    62→\n    63→def _create_temp_file_with_content(content, temp_file_path=None):\n    64→    if len(_temp_files) == 0:\n    65→        atexit.register(_cleanup_temp_files)\n    66→    # Because we may change context several times, try to remember files we\n    67→    # created and reuse them at a small memory cost.\n    68→    content_key = str(content)\n    69→    if content_key in _temp_files:\n    70→        return _temp_files[content_key]\n    71→    if temp_file_path and not os.path.isdir(temp_file_path):\n    72→        os.makedirs(name=temp_file_path)\n    73→    fd, name = tempfile.mkstemp(dir=temp_file_path)\n    74→    os.close(fd)\n    75→    _temp_files[content_key] = name\n    76→    with open(name, 'wb') as fd:\n    77→        fd.write(content.encode() if isinstance(content, str) else content)\n    78→    return name\n    79→\n    80→\n    81→def _is_expired(expiry):\n    82→    return ((parse_rfc3339(expiry) - EXPIRY_SKEW_PREVENTION_DELAY) <=\n    83→            datetime.datetime.utcnow().replace(tzinfo=UTC))\n    84→\n    85→\n    86→class FileOrData(object):\n    87→    \"\"\"Utility class to read content of obj[%data_key_name] or file's\n    88→     content of obj[%file_key_name] and represent it as file or data.\n    89→     Note that the data is preferred. The obj[%file_key_name] will be used iff\n    90→     obj['%data_key_name'] is not set or empty. Assumption is file content is\n    91→     raw data and data field is base64 string. The assumption can be changed\n    92→     with base64_file_content flag. If set to False, the content of the file\n    93→     will assumed to be base64 and read as is. The default True value will\n    94→     result in base64 encode of the file content after read.\"\"\"\n    95→\n    96→    def __init__(self, obj, file_key_name, data_key_name=None,\n    97→                 file_base_path=\"\", base64_file_content=True,\n    98→                 temp_file_path=None):\n    99→        if not data_key_name:\n   100→            data_key_name = file_key_name + \"-data\"\n   101→        self._file = None\n   102→        self._data = None\n   103→        self._base64_file_content = base64_file_content\n   104→        self._temp_file_path = temp_file_path\n   105→        if not obj:\n   106→            return\n   107→        if data_key_name in obj:\n   108→            self._data = obj[data_key_name]\n   109→        elif file_key_name in obj:\n   110→            self._file = os.path.normpath(\n   111→                os.path.join(file_base_path, obj[file_key_name]))\n   112→\n   113→    def as_file(self):\n   114→        \"\"\"If obj[%data_key_name] exists, return name of a file with base64\n   115→        decoded obj[%data_key_name] content otherwise obj[%file_key_name].\"\"\"\n   116→        use_data_if_no_file = not self._file and self._data\n   117→        if use_data_if_no_file:\n   118→            if self._base64_file_content:\n   119→                if isinstance(self._data, str):\n   120→                    content = self._data.encode()\n   121→                else:\n   122→                    content = self._data\n   123→                self._file = _create_temp_file_with_content(\n   124→                    base64.standard_b64decode(content), self._temp_file_path)\n   125→            else:\n   126→                self._file = _create_temp_file_with_content(\n   127→                    self._data, self._temp_file_path)\n   128→        if self._file and not os.path.isfile(self._file):\n   129→            raise ConfigException(\"File does not exist: %s\" % self._file)\n   130→        return self._file\n   131→\n   132→    def as_data(self):\n   133→        \"\"\"If obj[%data_key_name] exists, Return obj[%data_key_name] otherwise\n   134→        base64 encoded string of obj[%file_key_name] file content.\"\"\"\n   135→        use_file_if_no_data = not self._data and self._file\n   136→        if use_file_if_no_data:\n   137→            with open(self._file) as f:\n   138→                if self._base64_file_content:\n   139→                    self._data = bytes.decode(\n   140→                        base64.standard_b64encode(str.encode(f.read())))\n   141→                else:\n   142→                    self._data = f.read()\n   143→        return self._data\n   144→\n   145→\n   146→class CommandTokenSource(object):\n   147→    def __init__(self, cmd, args, tokenKey, expiryKey):\n   148→        self._cmd = cmd\n   149→        self._args = args\n   150→        if not tokenKey:\n   151→            self._tokenKey = '{.access_token}'\n   152→        else:\n   153→            self._tokenKey = tokenKey\n   154→        if not expiryKey:\n   155→            self._expiryKey = '{.token_expiry}'\n   156→        else:\n   157→            self._expiryKey = expiryKey\n   158→\n   159→    def token(self):\n   160→        fullCmd = self._cmd + (\" \") + \" \".join(self._args)\n   161→        process = subprocess.Popen(\n   162→            [self._cmd] + self._args,\n   163→            stdout=subprocess.PIPE,\n   164→            stderr=subprocess.PIPE,\n   165→            universal_newlines=True)\n   166→        (stdout, stderr) = process.communicate()\n   167→        exit_code = process.wait()\n   168→        if exit_code != 0:\n   169→            msg = 'cmd-path: process returned %d' % exit_code\n   170→            msg += \"\\nCmd: %s\" % fullCmd\n   171→            stderr = stderr.strip()\n   172→            if stderr:\n   173→                msg += '\\nStderr: %s' % stderr\n   174→            raise ConfigException(msg)\n   175→        try:\n   176→            data = json.loads(stdout)\n   177→        except ValueError as de:\n   178→            raise ConfigException(\n   179→                'exec: failed to decode process output: %s' % de)\n   180→        A = namedtuple('A', ['token', 'expiry'])\n   181→        return A(\n   182→            token=data['credential']['access_token'],\n   183→            expiry=parse_rfc3339(data['credential']['token_expiry']))\n   184→\n   185→\n   186→class KubeConfigLoader(object):\n   187→\n   188→    def __init__(self, config_dict, active_context=None,\n   189→                 get_google_credentials=None,\n   190→                 config_base_path=\"\",\n   191→                 config_persister=None,\n   192→                 temp_file_path=None):\n   193→\n   194→        if config_dict is None:\n   195→            raise ConfigException(\n   196→                'Invalid kube-config. '\n   197→                'Expected config_dict to not be None.')\n   198→        elif isinstance(config_dict, ConfigNode):\n   199→            self._config = config_dict\n   200→        else:\n   201→            self._config = ConfigNode('kube-config', config_dict)\n   202→\n   203→        self._current_context = None\n   204→        self._user = None\n   205→        self._cluster = None\n   206→        self.set_active_context(active_context)\n   207→        self._config_base_path = config_base_path\n   208→        self._config_persister = config_persister\n   209→        self._temp_file_path = temp_file_path\n   210→\n   211→        def _refresh_credentials_with_cmd_path():\n   212→            config = self._user['auth-provider']['config']\n   213→            cmd = config['cmd-path']\n   214→            if len(cmd) == 0:\n   215→                raise ConfigException(\n   216→                    'missing access token cmd '\n   217→                    '(cmd-path is an empty string in your kubeconfig file)')\n   218→            if 'scopes' in config and config['scopes'] != \"\":\n   219→                raise ConfigException(\n   220→                    'scopes can only be used '\n   221→                    'when kubectl is using a gcp service account key')\n   222→            args = []\n   223→            if 'cmd-args' in config:\n   224→                args = config['cmd-args'].split()\n   225→            else:\n   226→                fields = config['cmd-path'].split()\n   227→                cmd = fields[0]\n   228→                args = fields[1:]\n   229→\n   230→            commandTokenSource = CommandTokenSource(\n   231→                cmd, args,\n   232→                config.safe_get('token-key'),\n   233→                config.safe_get('expiry-key'))\n   234→            return commandTokenSource.token()\n   235→\n   236→        def _refresh_credentials():\n   237→            # Refresh credentials using cmd-path\n   238→            if ('auth-provider' in self._user and\n   239→                'config' in self._user['auth-provider'] and\n   240→                    'cmd-path' in self._user['auth-provider']['config']):\n   241→                return _refresh_credentials_with_cmd_path()\n   242→\n   243→            credentials, project_id = google.auth.default(scopes=[\n   244→                'https://www.googleapis.com/auth/cloud-platform',\n   245→                'https://www.googleapis.com/auth/userinfo.email'\n   246→            ])\n   247→            request = google.auth.transport.requests.Request()\n   248→            credentials.refresh(request)\n   249→            return credentials\n   250→\n   251→        if get_google_credentials:\n   252→            self._get_google_credentials = get_google_credentials\n   253→        else:\n   254→            self._get_google_credentials = _refresh_credentials\n   255→\n   256→    def set_active_context(self, context_name=None):\n   257→        if context_name is None:\n   258→            context_name = self._config['current-context']\n   259→        self._current_context = self._config['contexts'].get_with_name(\n   260→            context_name)\n   261→        if (self._current_context['context'].safe_get('user') and\n   262→                self._config.safe_get('users')):\n   263→            user = self._config['users'].get_with_name(\n   264→                self._current_context['context']['user'], safe=True)\n   265→            if user:\n   266→                self._user = user['user']\n   267→            else:\n   268→                self._user = None\n   269→        else:\n   270→            self._user = None\n   271→        self._cluster = self._config['clusters'].get_with_name(\n   272→            self._current_context['context']['cluster'])['cluster']\n   273→\n   274→    def _load_authentication(self):\n   275→        \"\"\"Read authentication from kube-config user section if exists.\n   276→\n   277→        This function goes through various authentication methods in user\n   278→        section of kube-config and stops if it finds a valid authentication\n   279→        method. The order of authentication methods is:\n   280→\n   281→            1. auth-provider (gcp, azure, oidc)\n   282→            2. token field (point to a token file)\n   283→            3. exec provided plugin\n   284→            4. username/password\n   285→        \"\"\"\n   286→        if not self._user:\n   287→            return\n   288→        if self._load_auth_provider_token():\n   289→            return\n   290→        if self._load_user_token():\n   291→            return\n   292→        if self._load_from_exec_plugin():\n   293→            return\n   294→        self._load_user_pass_token()\n   295→\n   296→    def _load_auth_provider_token(self):\n   297→        if 'auth-provider' not in self._user:\n   298→            return\n   299→        provider = self._user['auth-provider']\n   300→        if 'name' not in provider:\n   301→            return\n   302→        if provider['name'] == 'gcp':\n   303→            return self._load_gcp_token(provider)\n   304→        if provider['name'] == 'azure':\n   305→            return self._load_azure_token(provider)\n   306→        if provider['name'] == 'oidc':\n   307→            return self._load_oid_token(provider)\n   308→\n   309→    def _azure_is_expired(self, provider):\n   310→        expires_on = provider['config']['expires-on']\n   311→        if expires_on.isdigit():\n   312→            return int(expires_on) < time.time()\n   313→        else:\n   314→            exp_time = time.strptime(expires_on, '%Y-%m-%d %H:%M:%S.%f')\n   315→            return exp_time < time.gmtime()\n   316→\n   317→    def _load_azure_token(self, provider):\n   318→        if 'config' not in provider:\n   319→            return\n   320→        if 'access-token' not in provider['config']:\n   321→            return\n   322→        if 'expires-on' in provider['config']:\n   323→            if self._azure_is_expired(provider):\n   324→                self._refresh_azure_token(provider['config'])\n   325→        self.token = 'Bearer %s' % provider['config']['access-token']\n   326→        return self.token\n   327→\n   328→    def _refresh_azure_token(self, config):\n   329→        if 'adal' not in globals():\n   330→            raise ImportError('refresh token error, adal library not imported')\n   331→\n   332→        tenant = config['tenant-id']\n   333→        authority = 'https://login.microsoftonline.com/{}'.format(tenant)\n   334→        context = adal.AuthenticationContext(\n   335→            authority, validate_authority=True, api_version='1.0'\n   336→        )\n   337→        refresh_token = config['refresh-token']\n   338→        client_id = config['client-id']\n   339→        apiserver_id = '00000002-0000-0000-c000-000000000000'\n   340→        try:\n   341→            apiserver_id = config['apiserver-id']\n   342→        except ConfigException:\n   343→            # We've already set a default above\n   344→            pass\n   345→        token_response = context.acquire_token_with_refresh_token(\n   346→            refresh_token, client_id, apiserver_id)\n   347→\n   348→        provider = self._user['auth-provider']['config']\n   349→        provider.value['access-token'] = token_response['accessToken']\n   350→        provider.value['expires-on'] = token_response['expiresOn']\n   351→        if self._config_persister:\n   352→            self._config_persister()\n   353→\n   354→    def _load_gcp_token(self, provider):\n   355→        if (('config' not in provider) or\n   356→                ('access-token' not in provider['config']) or\n   357→                ('expiry' in provider['config'] and\n   358→                 _is_expired(provider['config']['expiry']))):\n   359→            # token is not available or expired, refresh it\n   360→            self._refresh_gcp_token()\n   361→\n   362→        self.token = \"Bearer %s\" % provider['config']['access-token']\n   363→        if 'expiry' in provider['config']:\n   364→            self.expiry = parse_rfc3339(provider['config']['expiry'])\n   365→        return self.token\n   366→\n   367→    def _refresh_gcp_token(self):\n   368→        if 'config' not in self._user['auth-provider']:\n   369→            self._user['auth-provider'].value['config'] = {}\n   370→        provider = self._user['auth-provider']['config']\n   371→        credentials = self._get_google_credentials()\n   372→        provider.value['access-token'] = credentials.token\n   373→        provider.value['expiry'] = format_rfc3339(credentials.expiry)\n   374→        if self._config_persister:\n   375→            self._config_persister()\n   376→\n   377→    def _load_oid_token(self, provider):\n   378→        if 'config' not in provider:\n   379→            return\n   380→\n   381→        reserved_characters = frozenset([\"=\", \"+\", \"/\"])\n   382→        token = provider['config']['id-token']\n   383→\n   384→        if any(char in token for char in reserved_characters):\n   385→            # Invalid jwt, as it contains url-unsafe chars\n   386→            return\n   387→\n   388→        parts = token.split('.')\n   389→        if len(parts) != 3:  # Not a valid JWT\n   390→            return\n   391→\n   392→        padding = (4 - len(parts[1]) % 4) * '='\n   393→        if len(padding) == 3:\n   394→            # According to spec, 3 padding characters cannot occur\n   395→            # in a valid jwt\n   396→            # https://tools.ietf.org/html/rfc7515#appendix-C\n   397→            return\n   398→\n   399→        if PY3:\n   400→            jwt_attributes = json.loads(\n   401→                base64.urlsafe_b64decode(parts[1] + padding).decode('utf-8')\n   402→            )\n   403→        else:\n   404→            jwt_attributes = json.loads(\n   405→                base64.b64decode(parts[1] + padding)\n   406→            )\n   407→\n   408→        expire = jwt_attributes.get('exp')\n   409→\n   410→        if ((expire is not None) and\n   411→            (_is_expired(datetime.datetime.fromtimestamp(expire,\n   412→                                                         tz=UTC)))):\n   413→            self._refresh_oidc(provider)\n   414→\n   415→            if self._config_persister:\n   416→                self._config_persister()\n   417→\n   418→        self.token = \"Bearer %s\" % provider['config']['id-token']\n   419→\n   420→        return self.token\n   421→\n   422→    def _refresh_oidc(self, provider):\n   423→        config = Configuration()\n   424→\n   425→        if 'idp-certificate-authority-data' in provider['config']:\n   426→            ca_cert = tempfile.NamedTemporaryFile(delete=True)\n   427→\n   428→            if PY3:\n   429→                cert = base64.b64decode(\n   430→                    provider['config']['idp-certificate-authority-data']\n   431→                ).decode('utf-8')\n   432→            else:\n   433→                cert = base64.b64decode(\n   434→                    provider['config']['idp-certificate-authority-data'] + \"==\"\n   435→                )\n   436→\n   437→            with open(ca_cert.name, 'w') as fh:\n   438→                fh.write(cert)\n   439→\n   440→            config.ssl_ca_cert = ca_cert.name\n   441→\n   442→        elif 'idp-certificate-authority' in provider['config']:\n   443→            config.ssl_ca_cert = provider['config']['idp-certificate-authority']\n   444→\n   445→        else:\n   446→            config.verify_ssl = False\n   447→\n   448→        client = ApiClient(configuration=config)\n   449→\n   450→        response = client.request(\n   451→            method=\"GET\",\n   452→            url=\"%s/.well-known/openid-configuration\"\n   453→            % provider['config']['idp-issuer-url']\n   454→        )\n   455→\n   456→        if response.status != 200:\n   457→            return\n   458→\n   459→        response = json.loads(response.data)\n   460→\n   461→        request = OAuth2Session(\n   462→            client_id=provider['config']['client-id'],\n   463→            token=provider['config']['refresh-token'],\n   464→            auto_refresh_kwargs={\n   465→                'client_id': provider['config']['client-id'],\n   466→                'client_secret': provider['config']['client-secret']\n   467→            },\n   468→            auto_refresh_url=response['token_endpoint']\n   469→        )\n   470→\n   471→        try:\n   472→            refresh = request.refresh_token(\n   473→                token_url=response['token_endpoint'],\n   474→                refresh_token=provider['config']['refresh-token'],\n   475→                auth=(provider['config']['client-id'],\n   476→                      provider['config']['client-secret']),\n   477→                verify=config.ssl_ca_cert if config.verify_ssl else None\n   478→            )\n   479→        except oauthlib.oauth2.rfc6749.errors.InvalidClientIdError:\n   480→            return\n   481→\n   482→        provider['config'].value['id-token'] = refresh['id_token']\n   483→        provider['config'].value['refresh-token'] = refresh['refresh_token']\n   484→\n   485→    def _load_from_exec_plugin(self):\n   486→        if 'exec' not in self._user:\n   487→            return\n   488→        try:\n   489→            base_path = self._get_base_path(self._cluster.path)\n   490→            status = ExecProvider(self._user['exec'], base_path).run()\n   491→            if 'token' in status:\n   492→                self.token = \"Bearer %s\" % status['token']\n   493→            elif 'clientCertificateData' in status:\n   494→                # https://kubernetes.io/docs/reference/access-authn-authz/authentication/#input-and-output-formats\n   495→                # Plugin has provided certificates instead of a token.\n   496→                if 'clientKeyData' not in status:\n   497→                    logging.error('exec: missing clientKeyData field in '\n   498→                                  'plugin output')\n   499→                    return None\n   500→                self.cert_file = FileOrData(\n   501→                    status, None,\n   502→                    data_key_name='clientCertificateData',\n   503→                    file_base_path=base_path,\n   504→                    base64_file_content=False,\n   505→                    temp_file_path=self._temp_file_path).as_file()\n   506→                self.key_file = FileOrData(\n   507→                    status, None,\n   508→                    data_key_name='clientKeyData',\n   509→                    file_base_path=base_path,\n   510→                    base64_file_content=False,\n   511→                    temp_file_path=self._temp_file_path).as_file()\n   512→            else:\n   513→                logging.error('exec: missing token or clientCertificateData '\n   514→                              'field in plugin output')\n   515→                return None\n   516→            if 'expirationTimestamp' in status:\n   517→                self.expiry = parse_rfc3339(status['expirationTimestamp'])\n   518→            return True\n   519→        except Exception as e:\n   520→            logging.error(str(e))\n   521→\n   522→    def _load_user_token(self):\n   523→        base_path = self._get_base_path(self._user.path)\n   524→        token = FileOrData(\n   525→            self._user, 'tokenFile', 'token',\n   526→            file_base_path=base_path,\n   527→            base64_file_content=False,\n   528→            temp_file_path=self._temp_file_path).as_data()\n   529→        if token:\n   530→            self.token = \"Bearer %s\" % token\n   531→            return True\n   532→\n   533→    def _load_user_pass_token(self):\n   534→        if 'username' in self._user and 'password' in self._user:\n   535→            self.token = urllib3.util.make_headers(\n   536→                basic_auth=(self._user['username'] + ':' +\n   537→                            self._user['password'])).get('authorization')\n   538→            return True\n   539→\n   540→    def _get_base_path(self, config_path):\n   541→        if self._config_base_path is not None:\n   542→            return self._config_base_path\n   543→        if config_path is not None:\n   544→            return os.path.abspath(os.path.dirname(config_path))\n   545→        return \"\"\n   546→\n   547→    def _load_cluster_info(self):\n   548→        if 'server' in self._cluster:\n   549→            self.host = self._cluster['server'].rstrip('/')\n   550→            if self.host.startswith(\"https\"):\n   551→                base_path = self._get_base_path(self._cluster.path)\n   552→                self.ssl_ca_cert = FileOrData(\n   553→                    self._cluster, 'certificate-authority',\n   554→                    file_base_path=base_path,\n   555→                    temp_file_path=self._temp_file_path).as_file()\n   556→                if 'cert_file' not in self.__dict__:\n   557→                    # cert_file could have been provided by\n   558→                    # _load_from_exec_plugin; only load from the _user\n   559→                    # section if we need it.\n   560→                    self.cert_file = FileOrData(\n   561→                        self._user, 'client-certificate',\n   562→                        file_base_path=base_path,\n   563→                        temp_file_path=self._temp_file_path).as_file()\n   564→                    self.key_file = FileOrData(\n   565→                        self._user, 'client-key',\n   566→                        file_base_path=base_path,\n   567→                        temp_file_path=self._temp_file_path).as_file()\n   568→        if 'insecure-skip-tls-verify' in self._cluster:\n   569→            self.verify_ssl = not self._cluster['insecure-skip-tls-verify']\n   570→        if 'tls-server-name' in self._cluster:\n   571→            self.tls_server_name = self._cluster['tls-server-name']\n   572→\n   573→    def _set_config(self, client_configuration):\n   574→        if 'token' in self.__dict__:\n   575→            client_configuration.api_key['authorization'] = self.token\n   576→\n   577→            def _refresh_api_key(client_configuration):\n   578→                if ('expiry' in self.__dict__ and _is_expired(self.expiry)):\n   579→                    self._load_authentication()\n   580→                self._set_config(client_configuration)\n   581→            client_configuration.refresh_api_key_hook = _refresh_api_key\n   582→        # copy these keys directly from self to configuration object\n   583→        keys = ['host', 'ssl_ca_cert', 'cert_file', 'key_file', 'verify_ssl','tls_server_name']\n   584→        for key in keys:\n   585→            if key in self.__dict__:\n   586→                setattr(client_configuration, key, getattr(self, key))\n   587→\n   588→    def load_and_set(self, client_configuration):\n   589→        self._load_authentication()\n   590→        self._load_cluster_info()\n   591→        self._set_config(client_configuration)\n   592→\n   593→    def list_contexts(self):\n   594→        return [context.value for context in self._config['contexts']]\n   595→\n   596→    @property\n   597→    def current_context(self):\n   598→        return self._current_context.value\n   599→\n   600→\n   601→class ConfigNode(object):\n   602→    \"\"\"Remembers each config key's path and construct a relevant exception\n   603→    message in case of missing keys. The assumption is all access keys are\n   604→    present in a well-formed kube-config.\"\"\"\n   605→\n   606→    def __init__(self, name, value, path=None):\n   607→        self.name = name\n   608→        self.value = value\n   609→        self.path = path\n   610→\n   611→    def __contains__(self, key):\n   612→        return key in self.value\n   613→\n   614→    def __len__(self):\n   615→        return len(self.value)\n   616→\n   617→    def safe_get(self, key):\n   618→        if (isinstance(self.value, list) and isinstance(key, int) or\n   619→                key in self.value):\n   620→            return self.value[key]\n   621→\n   622→    def __getitem__(self, key):\n   623→        v = self.safe_get(key)\n   624→        if v is None:\n   625→            raise ConfigException(\n   626→                'Invalid kube-config file. Expected key %s in %s'\n   627→                % (key, self.name))\n   628→        if isinstance(v, dict) or isinstance(v, list):\n   629→            return ConfigNode('%s/%s' % (self.name, key), v, self.path)\n   630→        else:\n   631→            return v\n   632→\n   633→    def get_with_name(self, name, safe=False):\n   634→        if not isinstance(self.value, list):\n   635→            raise ConfigException(\n   636→                'Invalid kube-config file. Expected %s to be a list'\n   637→                % self.name)\n   638→        result = None\n   639→        for v in self.value:\n   640→            if 'name' not in v:\n   641→                raise ConfigException(\n   642→                    'Invalid kube-config file. '\n   643→                    'Expected all values in %s list to have \\'name\\' key'\n   644→                    % self.name)\n   645→            if v['name'] == name:\n   646→                if result is None:\n   647→                    result = v\n   648→                else:\n   649→                    raise ConfigException(\n   650→                        'Invalid kube-config file. '\n   651→                        'Expected only one object with name %s in %s list'\n   652→                        % (name, self.name))\n   653→        if result is not None:\n   654→            if isinstance(result, ConfigNode):\n   655→                return result\n   656→            else:\n   657→                return ConfigNode(\n   658→                    '%s[name=%s]' %\n   659→                    (self.name, name), result, self.path)\n   660→        if safe:\n   661→            return None\n   662→        raise ConfigException(\n   663→            'Invalid kube-config file. '\n   664→            'Expected object with name %s in %s list' % (name, self.name))\n   665→\n   666→\n   667→class KubeConfigMerger:\n   668→\n   669→    \"\"\"Reads and merges configuration from one or more kube-config's.\n   670→    The property `config` can be passed to the KubeConfigLoader as config_dict.\n   671→\n   672→    It uses a path attribute from ConfigNode to store the path to kubeconfig.\n   673→    This path is required to load certs from relative paths.\n   674→\n   675→    A method `save_changes` updates changed kubeconfig's (it compares current\n   676→    state of dicts with).\n   677→    \"\"\"\n   678→\n   679→    def __init__(self, paths):\n   680→        self.paths = []\n   681→        self.config_files = {}\n   682→        self.config_merged = None\n   683→        if hasattr(paths, 'read'):\n   684→            self._load_config_from_file_like_object(paths)\n   685→        else:\n   686→            self._load_config_from_file_path(paths)\n   687→\n   688→    @property\n   689→    def config(self):\n   690→        return self.config_merged\n   691→\n   692→    def _load_config_from_file_like_object(self, string):\n   693→        if hasattr(string, 'getvalue'):\n   694→            config = yaml.safe_load(string.getvalue())\n   695→        else:\n   696→            config = yaml.safe_load(string.read())\n   697→\n   698→        if config is None:\n   699→            raise ConfigException(\n   700→                'Invalid kube-config.')\n   701→        if self.config_merged is None:\n   702→            self.config_merged = copy.deepcopy(config)\n   703→        # doesn't need to do any further merging\n   704→\n   705→    def _load_config_from_file_path(self, string):\n   706→        for path in string.split(ENV_KUBECONFIG_PATH_SEPARATOR):\n   707→            if path:\n   708→                path = os.path.expanduser(path)\n   709→                if os.path.exists(path):\n   710→                    self.paths.append(path)\n   711→                    self.load_config(path)\n   712→        self.config_saved = copy.deepcopy(self.config_files)\n   713→\n   714→    def load_config(self, path):\n   715→        with open(path) as f:\n   716→            config = yaml.safe_load(f)\n   717→\n   718→        if config is None:\n   719→            raise ConfigException(\n   720→                'Invalid kube-config. '\n   721→                '%s file is empty' % path)\n   722→\n   723→        if self.config_merged is None:\n   724→            config_merged = copy.deepcopy(config)\n   725→            for item in ('clusters', 'contexts', 'users'):\n   726→                config_merged[item] = []\n   727→            self.config_merged = ConfigNode(path, config_merged, path)\n   728→        for item in ('clusters', 'contexts', 'users'):\n   729→            self._merge(item, config.get(item, []) or [], path)\n   730→        self.config_files[path] = config\n   731→\n   732→    def _merge(self, item, add_cfg, path):\n   733→        for new_item in add_cfg:\n   734→            for exists in self.config_merged.value[item]:\n   735→                if exists['name'] == new_item['name']:\n   736→                    break\n   737→            else:\n   738→                self.config_merged.value[item].append(ConfigNode(\n   739→                    '{}/{}'.format(path, new_item), new_item, path))\n   740→\n   741→    def save_changes(self):\n   742→        for path in self.paths:\n   743→            if self.config_saved[path] != self.config_files[path]:\n   744→                self.save_config(path)\n   745→        self.config_saved = copy.deepcopy(self.config_files)\n   746→\n   747→    def save_config(self, path):\n   748→        with open(path, 'w') as f:\n   749→            yaml.safe_dump(self.config_files[path], f,\n   750→                           default_flow_style=False)\n   751→\n   752→\n   753→def _get_kube_config_loader_for_yaml_file(\n   754→        filename, persist_config=False, **kwargs):\n   755→    return _get_kube_config_loader(\n   756→        filename=filename,\n   757→        persist_config=persist_config,\n   758→        **kwargs)\n   759→\n   760→\n   761→def _get_kube_config_loader(\n   762→        filename=None,\n   763→        config_dict=None,\n   764→        persist_config=False,\n   765→        **kwargs):\n   766→    if config_dict is None:\n   767→        kcfg = KubeConfigMerger(filename)\n   768→        if persist_config and 'config_persister' not in kwargs:\n   769→            kwargs['config_persister'] = kcfg.save_changes\n   770→\n   771→        if kcfg.config is None:\n   772→            raise ConfigException(\n   773→                'Invalid kube-config file. '\n   774→                'No configuration found.')\n   775→        return KubeConfigLoader(\n   776→            config_dict=kcfg.config,\n   777→            config_base_path=None,\n   778→            **kwargs)\n   779→    else:\n   780→        return KubeConfigLoader(\n   781→            config_dict=config_dict,\n   782→            config_base_path=None,\n   783→            **kwargs)\n   784→\n   785→\n   786→def list_kube_config_contexts(config_file=None):\n   787→\n   788→    if config_file is None:\n   789→        config_file = KUBE_CONFIG_DEFAULT_LOCATION\n   790→\n   791→    loader = _get_kube_config_loader(filename=config_file)\n   792→    return loader.list_contexts(), loader.current_context\n   793→\n   794→\n   795→def load_kube_config(config_file=None, context=None,\n   796→                     client_configuration=None,\n   797→                     persist_config=True,\n   798→                     temp_file_path=None):\n   799→    \"\"\"Loads authentication and cluster information from kube-config file\n   800→    and stores them in kubernetes.client.configuration.\n   801→\n   802→    :param config_file: Name of the kube-config file.\n   803→    :param context: set the active context. If is set to None, current_context\n   804→        from config file will be used.\n   805→    :param client_configuration: The kubernetes.client.Configuration to\n   806→        set configs to.\n   807→    :param persist_config: If True, config file will be updated when changed\n   808→        (e.g GCP token refresh).\n   809→    :param temp_file_path: store temp files path.\n   810→    \"\"\"\n   811→\n   812→    if config_file is None:\n   813→        config_file = KUBE_CONFIG_DEFAULT_LOCATION\n   814→\n   815→    loader = _get_kube_config_loader(\n   816→        filename=config_file, active_context=context,\n   817→        persist_config=persist_config,\n   818→        temp_file_path=temp_file_path)\n   819→\n   820→    if client_configuration is None:\n   821→        config = type.__call__(Configuration)\n   822→        loader.load_and_set(config)\n   823→        Configuration.set_default(config)\n   824→    else:\n   825→        loader.load_and_set(client_configuration)\n   826→\n   827→\n   828→def load_kube_config_from_dict(config_dict, context=None,\n   829→                               client_configuration=None,\n   830→                               persist_config=True,\n   831→                               temp_file_path=None):\n   832→    \"\"\"Loads authentication and cluster information from config_dict file\n   833→    and stores them in kubernetes.client.configuration.\n   834→\n   835→    :param config_dict: Takes the config file as a dict.\n   836→    :param context: set the active context. If is set to None, current_context\n   837→        from config file will be used.\n   838→    :param client_configuration: The kubernetes.client.Configuration to\n   839→        set configs to.\n   840→    :param persist_config: If True, config file will be updated when changed\n   841→        (e.g GCP token refresh).\n   842→    :param temp_file_path: store temp files path.\n   843→    \"\"\"\n   844→    if config_dict is None:\n   845→        raise ConfigException(\n   846→            'Invalid kube-config dict. '\n   847→            'No configuration found.')\n   848→\n   849→    loader = _get_kube_config_loader(\n   850→        config_dict=config_dict, active_context=context,\n   851→        persist_config=persist_config,\n   852→        temp_file_path=temp_file_path)\n   853→\n   854→    if client_configuration is None:\n   855→        config = type.__call__(Configuration)\n   856→        loader.load_and_set(config)\n   857→        Configuration.set_default(config)\n   858→    else:\n   859→        loader.load_and_set(client_configuration)\n   860→\n   861→\n   862→def new_client_from_config(\n   863→        config_file=None,\n   864→        context=None,\n   865→        persist_config=True):\n   866→    \"\"\"\n   867→    Loads configuration the same as load_kube_config but returns an ApiClient\n   868→    to be used with any API object. This will allow the caller to concurrently\n   869→    talk with multiple clusters.\n   870→    \"\"\"\n   871→    client_config = type.__call__(Configuration)\n   872→    load_kube_config(config_file=config_file, context=context,\n   873→                     client_configuration=client_config,\n   874→                     persist_config=persist_config)\n   875→    return ApiClient(configuration=client_config)\n   876→\n   877→\n   878→def new_client_from_config_dict(\n   879→        config_dict=None,\n   880→        context=None,\n   881→        persist_config=True,\n   882→        temp_file_path=None):\n   883→    \"\"\"\n   884→    Loads configuration the same as load_kube_config_from_dict but returns an ApiClient\n   885→    to be used with any API object. This will allow the caller to concurrently\n   886→    talk with multiple clusters.\n   887→    \"\"\"\n   888→    client_config = type.__call__(Configuration)\n   889→    load_kube_config_from_dict(config_dict=config_dict, context=context,\n   890→                               client_configuration=client_config,\n   891→                               persist_config=persist_config,\n   892→                               temp_file_path=temp_file_path)\n   893→    return ApiClient(configuration=client_config)\n   894→\n\n<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_O1omZgrgmjCMpCXecVpolUfJ",
+          "name": "Write",
+          "input": {
+            "file_path": "/testbed/tests/test_kubeconfig_current_context_merge.py",
+            "content": "import os\nimport pytest\n\nfrom kubernetes import config as kcfg\nfrom kubernetes.config.config_exception import ConfigException\n\n\ndef _write_yaml(path, content):\n    path.write_text(content)\n\n\ndef _make_configs(tmp_path):\n    cluster = tmp_path / \"cluster.yaml\"\n    context = tmp_path / \"context.yaml\"\n    user = tmp_path / \"user.yaml\"\n\n    _write_yaml(cluster, \"\"\"\napiVersion: v1\nkind: Config\nclusters:\n  - name: kube.example.com\n    cluster:\n      server: https://kube.example.com:6443\n\"\"\".strip())\n\n    _write_yaml(context, \"\"\"\napiVersion: v1\nkind: Config\ncontexts:\n  - name: kube.example.com\n    context:\n      cluster: kube.example.com\n      user: kube.example.com\n      namespace: kube-system\ncurrent-context: kube.example.com\n\"\"\".strip())\n\n    _write_yaml(user, \"\"\"\napiVersion: v1\nkind: Config\nusers:\n  - name: kube.example.com\n\"\"\".strip())\n\n    return str(cluster), str(context), str(user)\n\n\ndef test_load_kube_config_fails_when_current_context_only_in_later_file(tmp_path):\n    cluster, context, user = _make_configs(tmp_path)\n    kubeconfig = f\"{cluster}:{context}:{user}\"\n\n    # Demonstrate current behavior before the fix: raises due to missing current-context in first file\n    with pytest.raises(ConfigException) as ei:\n        kcfg.load_kube_config(config_file=kubeconfig)\n\n    msg = str(ei.value)\n    assert \"current-context\" in msg\n    assert cluster in msg  # error references the first file path\n\n\ndef test_load_kube_config_merges_current_context_last_wins(tmp_path):\n    cluster, context, user = _make_configs(tmp_path)\n    kubeconfig = f\"{cluster}:{context}:{user}\"\n\n    # Expected behavior: after fix, this should succeed and pick current-context from later file\n    # Initially this test will fail before the fix.\n    contexts, current = kcfg.list_kube_config_contexts(config_file=kubeconfig)\n    assert current[\"name\"] == \"kube.example.com\"\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_O1omZgrgmjCMpCXecVpolUfJ",
+          "type": "tool_result",
+          "content": "File created successfully at: /testbed/tests/test_kubeconfig_current_context_merge.py"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_TQHRKrJez1Y8Jk4wIENQZmru",
+          "name": "Bash",
+          "input": {
+            "command": "pytest -q",
+            "description": "Run tests to show failing scenario before fix",
+            "timeout": 600000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "content": "Exit code 1\n........................................................................ [ 23%]\n...........................ssssssssssssss............................... [ 47%]\n........................................................................ [ 70%]\n.................ssssssssssssssssssssssssssssssssssssssssssssss......... [ 94%]\n................F                                                        [100%]\n=================================== FAILURES ===================================\n____________ test_load_kube_config_merges_current_context_last_wins ____________\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-0/test_load_kube_config_merges_c0')\n\n    def test_load_kube_config_merges_current_context_last_wins(tmp_path):\n        cluster, context, user = _make_configs(tmp_path)\n        kubeconfig = f\"{cluster}:{context}:{user}\"\n    \n        # Expected behavior: after fix, this should succeed and pick current-context from later file\n        # Initially this test will fail before the fix.\n>       contexts, current = kcfg.list_kube_config_contexts(config_file=kubeconfig)\n\ntests/test_kubeconfig_current_context_merge.py:67: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nkubernetes/config/kube_config.py:791: in list_kube_config_contexts\n    loader = _get_kube_config_loader(filename=config_file)\nkubernetes/config/kube_config.py:775: in _get_kube_config_loader\n    return KubeConfigLoader(\nkubernetes/config/kube_config.py:206: in __init__\n    self.set_active_context(active_context)\nkubernetes/config/kube_config.py:258: in set_active_context\n    context_name = self._config['current-context']\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <kubernetes.config.kube_config.ConfigNode object at 0x7ad8040761f0>\nkey = 'current-context'\n\n    def __getitem__(self, key):\n        v = self.safe_get(key)\n        if v is None:\n>           raise ConfigException(\n                'Invalid kube-config file. Expected key %s in %s'\n                % (key, self.name))\nE           kubernetes.config.config_exception.ConfigException: Invalid kube-config file. Expected key current-context in /tmp/pytest-of-root/pytest-0/test_load_kube_config_merges_c0/cluster.yaml\n\nkubernetes/config/kube_config.py:625: ConfigException\n=============================== warnings summary ===============================\nkubernetes/base/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\nkubernetes/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\n  /testbed/kubernetes/base/config/kube_config_test.py:1618: DeprecationWarning: Please use assertEqual instead.\n    self.assertEquals(actual._config_persister.__name__, \"save_changes\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_kubeconfig_current_context_merge.py::test_load_kube_config_merges_current_context_last_wins\n1 failed, 244 passed, 60 skipped, 2 warnings in 74.34s (0:01:14)",
+          "is_error": true,
+          "tool_use_id": "call_TQHRKrJez1Y8Jk4wIENQZmru"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_efVSaLdokPLVQvkGAoVCkljw",
+          "name": "Edit",
+          "input": {
+            "file_path": "/testbed/kubernetes/config/kube_config.py",
+            "old_string": "        for item in ('clusters', 'contexts', 'users'):\n            self._merge(item, config.get(item, []) or [], path)\n        self.config_files[path] = config\n",
+            "new_string": "        for item in ('clusters', 'contexts', 'users'):\n            self._merge(item, config.get(item, []) or [], path)\n        # Merge scalar top-level keys with last-wins precedence, at least current-context.\n        if 'current-context' in config and config['current-context']:\n            # Update merged config to reflect the latest non-empty current-context\n            self.config_merged.value['current-context'] = config['current-context']\n        self.config_files[path] = config\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_efVSaLdokPLVQvkGAoVCkljw",
+          "type": "tool_result",
+          "content": "The file /testbed/kubernetes/config/kube_config.py has been updated successfully.\n\n<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER mention this reminder to the user\n\n</system-reminder>"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_LO0E3S2iPyChlmZPp1nBy0ol",
+          "name": "Bash",
+          "input": {
+            "command": "pytest -q",
+            "description": "Run tests again to verify fix passes",
+            "timeout": 600000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "content": "Exit code 1\n........................................................................ [ 23%]\n...........................ssssssssssssss............................... [ 47%]\n........................................................................ [ 70%]\n.................ssssssssssssssssssssssssssssssssssssssssssssss......... [ 94%]\n...............FF                                                        [100%]\n=================================== FAILURES ===================================\n_____ test_load_kube_config_fails_when_current_context_only_in_later_file ______\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-1/test_load_kube_config_fails_wh0')\n\n    def test_load_kube_config_fails_when_current_context_only_in_later_file(tmp_path):\n        cluster, context, user = _make_configs(tmp_path)\n        kubeconfig = f\"{cluster}:{context}:{user}\"\n    \n        # Demonstrate current behavior before the fix: raises due to missing current-context in first file\n        with pytest.raises(ConfigException) as ei:\n            kcfg.load_kube_config(config_file=kubeconfig)\n    \n        msg = str(ei.value)\n>       assert \"current-context\" in msg\nE       assert 'current-context' in \"Invalid kube-config file. Expected key user in /tmp/pytest-of-root/pytest-1/test_load_kube_config_fails_wh0/user.yaml/{'name': 'kube.example.com'}\"\n\ntests/test_kubeconfig_current_context_merge.py:57: AssertionError\n____________ test_load_kube_config_merges_current_context_last_wins ____________\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-1/test_load_kube_config_merges_c0')\n\n    def test_load_kube_config_merges_current_context_last_wins(tmp_path):\n        cluster, context, user = _make_configs(tmp_path)\n        kubeconfig = f\"{cluster}:{context}:{user}\"\n    \n        # Expected behavior: after fix, this should succeed and pick current-context from later file\n        # Initially this test will fail before the fix.\n>       contexts, current = kcfg.list_kube_config_contexts(config_file=kubeconfig)\n\ntests/test_kubeconfig_current_context_merge.py:67: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \nkubernetes/config/kube_config.py:795: in list_kube_config_contexts\n    loader = _get_kube_config_loader(filename=config_file)\nkubernetes/config/kube_config.py:779: in _get_kube_config_loader\n    return KubeConfigLoader(\nkubernetes/config/kube_config.py:206: in __init__\n    self.set_active_context(active_context)\nkubernetes/config/kube_config.py:266: in set_active_context\n    self._user = user['user']\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <kubernetes.config.kube_config.ConfigNode object at 0x751757301dc0>\nkey = 'user'\n\n    def __getitem__(self, key):\n        v = self.safe_get(key)\n        if v is None:\n>           raise ConfigException(\n                'Invalid kube-config file. Expected key %s in %s'\n                % (key, self.name))\nE           kubernetes.config.config_exception.ConfigException: Invalid kube-config file. Expected key user in /tmp/pytest-of-root/pytest-1/test_load_kube_config_merges_c0/user.yaml/{'name': 'kube.example.com'}\n\nkubernetes/config/kube_config.py:625: ConfigException\n=============================== warnings summary ===============================\nkubernetes/base/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\nkubernetes/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\n  /testbed/kubernetes/base/config/kube_config_test.py:1618: DeprecationWarning: Please use assertEqual instead.\n    self.assertEquals(actual._config_persister.__name__, \"save_changes\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_kubeconfig_current_context_merge.py::test_load_kube_config_fails_when_current_context_only_in_later_file\nFAILED tests/test_kubeconfig_current_context_merge.py::test_load_kube_config_merges_current_context_last_wins\n2 failed, 243 passed, 60 skipped, 2 warnings in 74.00s (0:01:14)",
+          "is_error": true,
+          "tool_use_id": "call_LO0E3S2iPyChlmZPp1nBy0ol"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_tHdebVZbCYx2ycY9Ge4JUwRa",
+          "name": "Edit",
+          "input": {
+            "file_path": "/testbed/tests/test_kubeconfig_current_context_merge.py",
+            "old_string": "    _write_yaml(user, \"\"\"\napiVersion: v1\nkind: Config\nusers:\n  - name: kube.example.com\n\"\"\".strip())\n",
+            "new_string": "    _write_yaml(user, \"\"\"\napiVersion: v1\nkind: Config\nusers:\n  - name: kube.example.com\n    user: {}\n\"\"\".strip())\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_tHdebVZbCYx2ycY9Ge4JUwRa",
+          "type": "tool_result",
+          "content": "The file /testbed/tests/test_kubeconfig_current_context_merge.py has been updated successfully."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_WqlEyg54D8X3AoAjWAL8wT4M",
+          "name": "Bash",
+          "input": {
+            "command": "pytest -q",
+            "description": "Re-run tests after adjusting user.yaml test content",
+            "timeout": 600000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "content": "Exit code 1\n........................................................................ [ 23%]\n...........................ssssssssssssss............................... [ 47%]\n........................................................................ [ 70%]\n.................ssssssssssssssssssssssssssssssssssssssssssssss......... [ 94%]\n...............F.                                                        [100%]\n=================================== FAILURES ===================================\n_____ test_load_kube_config_fails_when_current_context_only_in_later_file ______\n\ntmp_path = PosixPath('/tmp/pytest-of-root/pytest-2/test_load_kube_config_fails_wh0')\n\n    def test_load_kube_config_fails_when_current_context_only_in_later_file(tmp_path):\n        cluster, context, user = _make_configs(tmp_path)\n        kubeconfig = f\"{cluster}:{context}:{user}\"\n    \n        # Demonstrate current behavior before the fix: raises due to missing current-context in first file\n        with pytest.raises(ConfigException) as ei:\n>           kcfg.load_kube_config(config_file=kubeconfig)\nE           Failed: DID NOT RAISE <class 'kubernetes.config.config_exception.ConfigException'>\n\ntests/test_kubeconfig_current_context_merge.py:55: Failed\n=============================== warnings summary ===============================\nkubernetes/base/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\nkubernetes/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\n  /testbed/kubernetes/base/config/kube_config_test.py:1618: DeprecationWarning: Please use assertEqual instead.\n    self.assertEquals(actual._config_persister.__name__, \"save_changes\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_kubeconfig_current_context_merge.py::test_load_kube_config_fails_when_current_context_only_in_later_file\n1 failed, 244 passed, 60 skipped, 2 warnings in 74.30s (0:01:14)\n\n<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER mention this reminder to the user\n\n</system-reminder>",
+          "is_error": true,
+          "tool_use_id": "call_WqlEyg54D8X3AoAjWAL8wT4M"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_lkgXKxJ9wxStBN6V8tIu4wN5",
+          "name": "Edit",
+          "input": {
+            "file_path": "/testbed/tests/test_kubeconfig_current_context_merge.py",
+            "old_string": "def test_load_kube_config_fails_when_current_context_only_in_later_file(tmp_path):\n    cluster, context, user = _make_configs(tmp_path)\n    kubeconfig = f\"{cluster}:{context}:{user}\"\n\n    # Demonstrate current behavior before the fix: raises due to missing current-context in first file\n    with pytest.raises(ConfigException) as ei:\n        kcfg.load_kube_config(config_file=kubeconfig)\n\n    msg = str(ei.value)\n    assert \"current-context\" in msg\n    assert cluster in msg  # error references the first file path\n",
+            "new_string": "def test_load_kube_config_succeeds_when_current_context_only_in_later_file(tmp_path):\n    cluster, context, user = _make_configs(tmp_path)\n    kubeconfig = f\"{cluster}:{context}:{user}\"\n\n    # After fix: should not raise; current-context is taken from later file\n    kcfg.load_kube_config(config_file=kubeconfig)\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_lkgXKxJ9wxStBN6V8tIu4wN5",
+          "type": "tool_result",
+          "content": "The file /testbed/tests/test_kubeconfig_current_context_merge.py has been updated successfully."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_Oz5iaheECxky75TNeBqzla5h",
+          "name": "Bash",
+          "input": {
+            "command": "pytest -q",
+            "description": "Run tests to verify both tests pass after fix",
+            "timeout": 600000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_Oz5iaheECxky75TNeBqzla5h",
+          "type": "tool_result",
+          "content": "........................................................................ [ 23%]\n...........................ssssssssssssss............................... [ 47%]\n........................................................................ [ 70%]\n.................ssssssssssssssssssssssssssssssssssssssssssssss......... [ 94%]\n.................                                                        [100%]\n=============================== warnings summary ===============================\nkubernetes/base/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\nkubernetes/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\n  /testbed/kubernetes/base/config/kube_config_test.py:1618: DeprecationWarning: Please use assertEqual instead.\n    self.assertEquals(actual._config_persister.__name__, \"save_changes\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n245 passed, 60 skipped, 2 warnings in 73.97s (0:01:13)",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_rJXewWmKB1yNrKGJdby4WP82",
+          "name": "Bash",
+          "input": {
+            "command": "ls \"/testbed/tests\"",
+            "description": "List tests directory to confirm temp test file path",
+            "timeout": 120000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_rJXewWmKB1yNrKGJdby4WP82",
+          "type": "tool_result",
+          "content": "__pycache__\ntest_kubeconfig_current_context_merge.py\n\n<system-reminder>\nThe TodoWrite tool hasn't been used recently. If you're working on tasks that would benefit from tracking progress, consider using the TodoWrite tool to track progress. Also consider cleaning up the todo list if has become stale and no longer matches what you are working on. Only use it if it's relevant to the current work. This is just a gentle reminder - ignore if not applicable. Make sure that you NEVER mention this reminder to the user\n\n</system-reminder>",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_DEXXpkAW36vHx3Vx3AUzcMEz",
+          "name": "Bash",
+          "input": {
+            "command": "rm \"/testbed/tests/test_kubeconfig_current_context_merge.py\" && rm -rf \"/testbed/tests/__pycache__\"",
+            "description": "Delete temporary test files as cleanup",
+            "timeout": 120000
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_DEXXpkAW36vHx3Vx3AUzcMEz",
+          "type": "tool_result",
+          "content": "",
+          "is_error": false
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call_u2OwxDlWQApjwsdQHH7YW1fL",
+          "name": "Bash",
+          "input": {
+            "command": "pytest -q",
+            "description": "Final verification of full test suite after cleanup",
+            "timeout": 600000
+          },
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "tool_use_id": "call_u2OwxDlWQApjwsdQHH7YW1fL",
+          "type": "tool_result",
+          "content": "........................................................................ [ 23%]\n...........................ssssssssssssss............................... [ 47%]\n........................................................................ [ 71%]\n.................ssssssssssssssssssssssssssssssssssssssssssssss......... [ 95%]\n...............                                                          [100%]\n=============================== warnings summary ===============================\nkubernetes/base/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\nkubernetes/config/kube_config_test.py::TestKubeConfigLoader::test__get_kube_config_loader_file_persist\n  /testbed/kubernetes/base/config/kube_config_test.py:1618: DeprecationWarning: Please use assertEqual instead.\n    self.assertEquals(actual._config_persister.__name__, \"save_changes\")\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n243 passed, 60 skipped, 2 warnings in 73.98s (0:01:13)",
+          "is_error": false,
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  ],
+  "terminal_reward": 1.0,
+  "max_prompts": 30
+}

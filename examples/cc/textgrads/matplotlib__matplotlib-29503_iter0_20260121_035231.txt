@@ -1,0 +1,87 @@
+Summary of what the agent did
+- Located the relevant code path: Axes.bar() and Axes.barh() in lib/matplotlib/axes/_axes.py; barh defers to bar with orientation='horizontal'.
+- Identified the numpy broadcasting call that currently throws an unhelpful ValueError: np.broadcast_arrays(np.atleast_1d(x), height, width, y, linewidth, hatch).
+- Implemented a try/except around np.broadcast_arrays to catch ValueError and re-raise with a clearer message that includes parameter names and shapes, using different name mappings for vertical vs horizontal orientation.
+- Added a new test file lib/matplotlib/tests/test_bar_parameter_mismatch_message.py with two tests (one for barh and one for bar).
+- Started running pytest but didn’t wait for completion/validation.
+
+Why it failed / problems in the agent’s solution
+1) Incorrect expectation in the test for barh:
+   - In the barh reproduction (missing comma in the y/labels), the mismatched arrays are y (labels, length 2) and width (values, length 3). left (x) is None by default and is treated as scalar, so it won’t be the culprit in the mismatch.
+   - The test asserts:
+     assert ('left' in msg and 'y' in msg) or ('x' in msg and 'bottom' in msg)
+     This is wrong for the provided setup; the improved message should reference 'y' and 'width'.
+   - The test likely fails because it looks for 'left'/'x'/'bottom' instead of 'width'/'y'.
+
+2) Didn’t wait for test run completion:
+   - The agent launched pytest, but the task timed out while tests were still running. This prevented catching and fixing the failing assertion quickly.
+
+3) Potentially too-broad mismatch detection:
+   - The code tries to find “the first pair of non-scalar arguments with mismatched shapes.” This is a reasonable heuristic, but it includes linewidth and hatch, which are purely stylistic and often scalars. If a user passes non-scalar linewidth/hatch of mismatched lengths, the message might point at e.g. “linewidth” mismatch, which isn’t the main data/coordinate mismatch that the issue was about. It’s not wrong, but could be less helpful than focusing on the primary data parameters.
+
+4) Test hygiene:
+   - The new tests open figures via pyplot implicitly and don’t explicitly close them. In Matplotlib’s test suite this is normally okay due to backend settings, but explicit cleanup is considered good practice.
+
+5) Misc minor process/flow issues:
+   - Initial path confusion (attempted to read from /workspace). Corrected later, but cost time.
+   - Step (6) in the instructions mentions cleaning up temporary test files. In this context the test is not a temporary artifact, it’s a legitimate regression test and should remain. The agent didn’t clarify this.
+
+What works / strengths of the approach
+- The change is implemented exactly where broadcasting happens (inside Axes.bar()), so it covers both bar and barh because barh calls bar.
+- The new message starts with the original numpy phrase (“shape mismatch...”) and appends more context with parameter names and shapes; this reduces the risk of breaking tests that rely on the generic wording while adding the requested detail.
+- The param-name mapping for vertical is sensible: ['x', 'height', 'width', 'bottom', 'linewidth', 'hatch'].
+- For horizontal, the mapping to user-facing names ['left', 'height', 'width', 'y', 'linewidth', 'hatch'] is consistent with barh’s signature. In the missing-comma example, the reported pair should be “width” vs “y”, which is actually what users need.
+
+How to fix the current issues
+- Fix the barh test assertion to match the real, mismatching arguments:
+  Replace:
+    assert ('left' in msg and 'y' in msg) or ('x' in msg and 'bottom' in msg)
+  With:
+    assert 'width' in msg and 'y' in msg
+  This matches the scenario where y has length 2 and width has length 3.
+
+- Optionally, be robust to other mismatches by using a set comparison:
+  params = {'y', 'width'}
+  assert params.issubset(set(msg.split()))
+  But the simpler 'width' in msg and 'y' in msg is fine.
+
+- Wait for pytest to finish and iterate on any other failures. The changed message could cause unforeseen differences if there are tests that match numpy’s original wording extremely tightly; however, because the new message begins with the original “shape mismatch: objects cannot be broadcast to a single shape.” it is unlikely to break existing tests.
+
+- Consider tightening which arrays participate in the mismatch-name identification:
+  Instead of scanning all six arrays, consider only the “data-driven” ones for the primary message:
+    orientation == 'vertical': x, height, width, bottom
+    orientation == 'horizontal': left(x), height, width, y
+  If a mismatch is found among those, report it. If not, and broadcasting still fails, then fall back to include linewidth/hatch. This prevents less-useful messages like “Mismatch is between linewidth and width”.
+
+- Add explicit figure cleanup in tests (optional improvement):
+  For example, wrap the plotting in a figure context via plt.figure() and plt.close('all') at the end, or use pytest fixtures common in matplotlib’s test suite if available.
+
+Concrete corrected test snippet for barh
+def test_barh_parameter_mismatch_error_message_contains_names():
+    # Missing comma leading to 2-length labels vs 3-length data
+    arg_k = ["foo", "bar" "baz"]  # -> ["foo", "barbaz"]
+    arg_n = [1, 2, 3]
+
+    with pytest.raises(ValueError) as excinfo:
+        plt.barh(arg_k, arg_n)
+    msg = str(excinfo.value)
+    assert 'Mismatch is between' in msg
+    # For horizontal bars in this scenario, the mismatch is between y and width:
+    assert 'y' in msg and 'width' in msg
+    assert '(3,)' in msg
+    assert '(2,)' in msg
+
+Additional suggestions to strengthen the implementation
+- If you want to be even more precise, you can try ordered checks of the logical pairs that commonly mismatch:
+  - For vertical: check x vs height first, then tick_label broadcasting if relevant; but for the basic improvement your current generic approach is acceptable.
+- Consider unit tests for:
+  - bar with mismatched x vs height arrays.
+  - barh with mismatched y vs width arrays (fixed as above).
+  - Mismatch involving width vs bottom or height vs x, to ensure the name mapping correctly changes with orientation.
+- Ensure style and API consistency:
+  - The raised ValueError preserves the original numpy phrase, which is good.
+
+Bottom line
+- The core code change is reasonable and likely to satisfy the feature request.
+- The current barh test expectation is incorrect for the reproduced mismatch; it should look for 'y' and 'width', not 'left'/'x'/'bottom'.
+- Rerun the full test suite after adjusting the test and be prepared to refine mismatch identification to focus on data parameters if needed.

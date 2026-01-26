@@ -1,0 +1,119 @@
+diff --git a/torchtune/data/_messages.py b/torchtune/data/_messages.py
+index a6b356b0..14a878b0 100644
+--- a/torchtune/data/_messages.py
++++ b/torchtune/data/_messages.py
+@@ -6,6 +6,7 @@
+ 
+ from pathlib import Path
+ from typing import Any, Dict, List, Literal, Mapping, Optional, Union
++from urllib.parse import urlparse
+ 
+ from torchtune.data._utils import format_content_with_images, load_image
+ 
+@@ -141,6 +142,26 @@ class Message:
+         return f"Message(role='{self.role}', content={content_only!r})"
+ 
+ 
++def _resolve_image_location(image_dir: Optional[Path], image_path: Union[str, Path]) -> Union[Path, str]:
++    s = str(image_path)
++    parsed = urlparse(s)
++    if parsed.scheme:
++        # Remote URL or other scheme; return string as-is
++        return s
++    p = Path(s)
++    if p.is_absolute():
++        # Always normalize absolute local paths to Path
++        return p
++    if image_dir is not None:
++        # Join relative with provided image_dir
++        return image_dir / s
++    # No image_dir: preserve provided type for relative local paths
++    if isinstance(image_path, str):
++        return s
++    else:
++        return p
++
++
+ class InputOutputToMessages(Transform):
+     """
+     Message transform class that converts a single sample with "input" and "output" fields,
+@@ -161,11 +182,11 @@ class InputOutputToMessages(Transform):
+             keeping the default "input" and "output" column names.
+         new_system_prompt (Optional[str]): if specified, prepend a system message. This can
+             serve as instructions to guide the model response. Default is None.
+-        image_dir (Optional[Path]): path to the directory containing the images that is prepended to all image
++        image_dir (Optional[Union[str, Path]]): path to the directory containing the images that is prepended to all image
+             paths in the dataset. For example, if ``image_dir="/home/user/dataset/"` and the sample image path
+             was ``"images/1.jpg"``, the final image path that will be loaded is ``"/home/user/dataset/images/1.jpg"``.
+             If None, assume images are available in current working directory or are located
+-            on a remote url. For text-only, leave as None. Default is None.
++            on a remote url. For text-only, leave as None. Default is None. If a URL is provided in the sample, it will not be joined with image_dir. Absolute local paths are used as-is.
+ 
+     Raises:
+         ValueError: If ``column_map`` is provided and ``input`` not in ``column_map``, or
+@@ -177,7 +198,7 @@ class InputOutputToMessages(Transform):
+         train_on_input: bool = False,
+         column_map: Optional[Dict[str, str]] = None,
+         new_system_prompt: Optional[str] = None,
+-        image_dir: Optional[Path] = None,
++        image_dir: Optional[Union[str, Path]] = None,
+     ):
+         self.train_on_input = train_on_input
+         self.new_system_prompt = new_system_prompt
+@@ -196,7 +217,7 @@ class InputOutputToMessages(Transform):
+         else:
+             self.column_map = {"input": "input", "output": "output", "image": "image"}
+ 
+-        self.image_dir = image_dir
++        self.image_dir = Path(image_dir) if image_dir is not None else None
+ 
+     def __call__(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
+         is_multimodal = "image" in sample or (
+@@ -206,10 +227,8 @@ class InputOutputToMessages(Transform):
+         if is_multimodal:
+             image_path = sample[self.column_map["image"]]
+             if isinstance(image_path, str):
+-                if self.image_dir is not None:
+-                    image_path = self.image_dir / image_path
+-                # Load if not loaded
+-                pil_image = load_image(image_path)
++                resolved = _resolve_image_location(self.image_dir, image_path)
++                pil_image = load_image(resolved)
+             else:
+                 pil_image = image_path
+             content = [
+@@ -383,11 +402,11 @@ class ShareGPTToMessages(Transform):
+         new_system_prompt (Optional[str]): if specified, prepend a system message. This can
+             serve as instructions to guide the model response. Setting this will OVERRIDE any system
+             messages already present in the dataset. Default is None.
+-        image_dir (Optional[Path]): path to the directory containing the images that is prepended to all image
++        image_dir (Optional[Union[str, Path]]): path to the directory containing the images that is prepended to all image
+             paths in the dataset. For example, if ``image_dir="/home/user/dataset/"` and the sample image path
+             was ``"images/1.jpg"``, the final image path that will be loaded is ``"/home/user/dataset/images/1.jpg"``.
+             If None, assume images are available in current working directory or are located
+-            on a remote url. For text-only, leave as None. Default is None.
++            on a remote url. For text-only, leave as None. Default is None. If a URL is provided in the sample, it will not be joined with image_dir. Absolute local paths are used as-is.
+         image_tag (Optional[str]): placeholder tags in the text content of each message to be replaced by image
+             special tokens. If images are present and this is None, then will prepend image tokens to the first
+             user message in the sample by default. If text-only, this field is ignored. Default is ``"<image>"``.
+@@ -414,7 +433,7 @@ class ShareGPTToMessages(Transform):
+             self._column_map = column_map
+         else:
+             self._column_map = {"conversations": "conversations", "image": "image"}
+-        self.image_dir = image_dir
++        self.image_dir = Path(image_dir) if image_dir is not None else None
+         self.image_tag = image_tag
+ 
+     def __call__(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
+@@ -451,9 +470,8 @@ class ShareGPTToMessages(Transform):
+             if role == "user":
+                 if is_multimodal and not image_loaded:
+                     image_path = sample[self._column_map["image"]]
+-                    if self.image_dir is not None:
+-                        image_path = self.image_dir / image_path
+-                    pil_image = load_image(image_path)
++                    resolved = _resolve_image_location(self.image_dir, image_path)
++                    pil_image = load_image(resolved)
+                     # If image tag is not specified, prepend by default
+                     if self.image_tag is None:
+                         content = [

@@ -1,0 +1,30 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index dc7f0c433f..ec085f1996 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -5203,10 +5203,24 @@ class Axes(_AxesBase):
+                 ymin = 10.0 ** ymin
+                 ymax = 10.0 ** ymax
+                 self.set_yscale(yscale)
++            # Compute bin centers in data coordinates
++            offsets_data = offsets.copy()
++            if xscale == 'log':
++                offsets_data[:, 0] = 10.0 ** offsets_data[:, 0]
++            if yscale == 'log':
++                offsets_data[:, 1] = 10.0 ** offsets_data[:, 1]
++
++            # Shift each polygon to be relative to its center so that we can
++            # attach centers via offsets without changing the rendered result.
++            # This ensures get_offsets() returns the hexagon centers for log scales.
++            polygons_rel = polygons - np.expand_dims(offsets_data, 1)
++
+             collection = mcoll.PolyCollection(
+-                polygons,
++                polygons_rel,
+                 edgecolors=edgecolors,
+                 linewidths=linewidths,
++                offsets=offsets_data,
++                offset_transform=mtransforms.AffineDeltaTransform(self.transData),
+                 )
+         else:
+             collection = mcoll.PolyCollection(

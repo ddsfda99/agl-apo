@@ -1,0 +1,98 @@
+You are working in the code repository in the current directory to fix a bug in cfn-lint. Follow the plan below precisely, and apply robust model-usage practices so you don’t fail due to unavailable deployments or rate limits.
+
+Primary goal
+- Fix the bug: FindInMap with DefaultValue incorrectly validates unrelated SecondLevelKey values against a Resource Property. Only the actual resolved mapping value or the DefaultValue should be validated.
+
+Behavior to reproduce and fix
+- In the example, Test.Properties.BucketName is validated against Mappings.TestMapName.TestTopLevelKey.NotBucketNameSecondLevelKey, which is unrelated and incorrect.
+- Expected: Validate only Mappings.TestMapName.TestTopLevelKey.BucketName or the DefaultValue (AWS::NoValue in the example).
+
+LLM call resilience policy for this task
+- Do not request an unavailable or speculative model. Never use future-dated or unknown model IDs like “claude-sonnet-4-5-20250929.”
+- Before any call to an LLM tool or API:
+  - Perform a pre-call check for model availability. Use the default model configured by the runtime if available; otherwise list deployed models from the provider and pick a known available one. If you must select explicitly, prefer a known deployed model for your environment, or let the tool choose the default without overriding.
+  - If a 429 response or “No deployments available for selected model” occurs:
+    - Respect Retry-After if present; otherwise wait at least 5 seconds.
+    - Use exponential backoff with jitter (e.g., start at 2s, double each attempt, add random 0–1s jitter, cap at 30s, limit to 3–5 attempts).
+    - Do not keep retrying the same unavailable deployment; immediately pivot to another available model.
+  - Maintain a simple circuit breaker: if a model returns “no deployments” or repeated 429s, avoid it for a few minutes and select a different available model.
+  - Keep the prompt and tool context stable across retries; do not lose information.
+  - If you fall back, note it succinctly in your logs: “Primary model unavailable; using fallback.”
+- Keep calls idempotent and set reasonable timeouts. Avoid aggressive concurrency that triggers rate limits.
+
+Task steps
+1) Understand the requirements
+- You will implement a fix so that FindInMap with DefaultValue only validates the resolved mapping value or the DefaultValue, and does not validate unrelated sibling keys under the same TopLevelKey.
+
+2) Write a reproduction test case
+- Create a temporary file named test_findinmap_default.yaml with this content exactly:
+  AWSTemplateFormatVersion: "2010-09-09"
+  Transform: AWS::LanguageExtensions
+  Mappings:
+    TestMapName:
+      TestTopLevelKey:
+        NotBucketNameSecondLevelKey:
+          - this array should not be checked against BucketName
+  Resources:
+    Test:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !FindInMap
+          - TestMapName
+          - TestTopLevelKey
+          - BucketName
+          - DefaultValue: !Ref AWS::NoValue
+- Run: cfn-lint test_findinmap_default.yaml
+- Confirm the current bug manifests: E3012 error complaining that the array is not a string.
+
+3) Locate the bug
+- Search the repository for relevant code paths:
+  - grep -R "FindInMap" -n
+  - grep -R "DefaultValue" -n
+  - grep -R "LanguageExtensions" -n
+  - grep -R "E3012" -n
+- Likely locations:
+  - Intrinsic function handling and type inference, often in modules like cfnlint/helpers or cfnlint/decode where Fn::FindInMap is resolved or analyzed.
+  - Property type validation rules that infer candidate types from intrinsic outputs (E3012 comes from property type checking).
+
+4) Implement the fix
+- Root cause: The validator or intrinsic evaluator is considering all sibling SecondLevelKey values under the specified TopLevelKey when inferring the type for Fn::FindInMap, even when DefaultValue is present. This causes unrelated values (like arrays) to be tested against a property (BucketName requires string).
+- Intended behavior:
+  - If FindInMap explicitly specifies a TopLevelKey and SecondLevelKey, only the value at that path should be considered for type validation.
+  - If the referenced SecondLevelKey is absent and DefaultValue is provided, treat the value as the DefaultValue (which can be AWS::NoValue). AWS::NoValue indicates the property should be removed; it must not trigger a type mismatch.
+- Implementation guidance:
+  - In the intrinsic resolution/type inference for Fn::FindInMap:
+    - Detect the Language Extensions form with DefaultValue. This is a 4th argument with key DefaultValue when using Transform: AWS::LanguageExtensions.
+    - If the 3rd element (SecondLevelKey) is a literal string, restrict type inference to only Mappings[MapName][TopLevelKey][SecondLevelKey], not all keys under TopLevelKey.
+    - If that exact SecondLevelKey path is missing and DefaultValue exists, use the DefaultValue for type inference. If DefaultValue is AWS::NoValue, mark the property as removable/ignored for type checking.
+    - Do not aggregate types from other sibling keys under TopLevelKey in this mode.
+  - In the property validator (E3012 rule), ensure that:
+    - When the resolved value is AWS::NoValue, skip type enforcement for that property because it will be removed.
+    - When a concrete value is resolved, validate it against the property’s type constraints as usual.
+- Add helper logic if needed:
+  - A function that identifies the FindInMap-with-DefaultValue pattern under LanguageExtensions and returns either the resolved value type or a DefaultValue sentinel.
+  - Ensure that unknown refs or dynamic keys still behave conservatively, but do not validate unrelated sibling keys.
+
+5) Validate with the reproduction test
+- After implementing the fix, re-run: cfn-lint test_findinmap_default.yaml
+- Expected result: No E3012 error. The unrelated NotBucketNameSecondLevelKey must not be validated against BucketName. If DefaultValue is AWS::NoValue, BucketName is effectively removed and should not trigger a type error.
+
+6) Add unit tests if the repository has a test framework
+- If pytest-based tests exist, add a test case in the appropriate tests directory that:
+  - Loads the reproduction template and asserts that E3012 does not occur.
+  - Optionally add a counter-test where BucketName resolves to a non-string without DefaultValue to ensure E3012 still triggers correctly in valid scenarios.
+
+7) Clean up temporary files
+- Remove test_findinmap_default.yaml after validation.
+- Do not commit any changes yet.
+
+Notes and checks during implementation
+- Ensure you handle both YAML and JSON syntaxes for Fn::FindInMap, and the LanguageExtensions DefaultValue form.
+- Confirm that AWS::NoValue is treated correctly by the validator: properties set to AWS::NoValue must be ignored/removed rather than type-validated.
+- Keep the fix minimal and localized to the intrinsic evaluation/type inference path and E3012 handling as needed; do not broaden validation to unrelated map keys.
+- Run the repository’s test suite if available to ensure no regressions.
+
+If you must use any LLM-assisted step during this task
+- Use the default model provided by the environment. Do not specify unavailable model IDs.
+- If the provider returns 429 or “No deployments available,” apply the resilience policy: backoff, pivot to an available model, and maintain a circuit breaker to avoid hammering the same deployment.
+- Log model selections, retry attempts, and fallbacks succinctly for traceability.

@@ -1,0 +1,99 @@
+diff --git a/src/briefcase/commands/base.py b/src/briefcase/commands/base.py
+index 7bb4998f..f2d862a2 100644
+--- a/src/briefcase/commands/base.py
++++ b/src/briefcase/commands/base.py
+@@ -193,15 +193,22 @@ class BaseCommand(ABC):
+         BRIEFCASE_HOME environment variable. If that isn't defined, use a platform-
+         specific default data path.
+         """
++        # Resolve the base data path based on inputs and environment
+         if data_path is None:
+             try:
+                 briefcase_home = os.environ["BRIEFCASE_HOME"]
+-                data_path = Path(briefcase_home).resolve()
+-                # Path("") converts to ".", so check for that edge case.
+-                if briefcase_home == "" or not data_path.is_dir():
++                # Path("") converts to ".", so check for that edge case and non-existence
++                if briefcase_home == "":
+                     raise BriefcaseCommandError(
+                         "The path specified by BRIEFCASE_HOME does not exist."
+                     )
++                env_path = Path(briefcase_home).resolve()
++                if not env_path.is_dir():
++                    # Do not auto-create a missing custom BRIEFCASE_HOME
++                    raise BriefcaseCommandError(
++                        "The path specified by BRIEFCASE_HOME does not exist."
++                    )
++                data_path = env_path
+             except KeyError:
+                 if platform.system() == "Darwin":  # pragma: no-cover-if-not-macos
+                     # macOS uses a bundle name, rather than just the app name
+@@ -213,9 +220,13 @@ class BaseCommand(ABC):
+                     appname=app_name,
+                     appauthor="BeeWare",
+                 ).user_cache_path
++        else:
++            data_path = Path(data_path)
+ 
++        # Convert to a string for subprocess and validation
+         data_path = os.fsdecode(data_path)
+ 
++        # Reject paths containing spaces
+         if " " in data_path:
+             raise BriefcaseCommandError(
+                 f"""
+@@ -232,27 +243,25 @@ a custom location for Briefcase's tools.
+ """
+             )
+ 
+-        if not os.path.exists(data_path):
+-            try:
+-                # The Windows Store version of Python can redirect filesystem
+-                # interactions within %LOCALAPPDATA% to a sandboxed location.
+-                # To bypass this, the Briefcase cache directory creation is
+-                # performed via ``cmd.exe`` in a different process. Once this
+-                # directory exists in the "real" %LOCALAPPDATA%, Windows will
+-                # allow normal interactions without attempting to sandbox them.
+-                if platform.system() == "Windows":  # pragma: no-cover-if-not-windows
+-                    subprocess.run(
+-                        ["mkdir", data_path],
+-                        shell=True,
+-                        check=True,
+-                        stdout=subprocess.DEVNULL,
+-                        stderr=subprocess.DEVNULL,
+-                    )
+-                else:  # pragma: no-cover-if-is-windows
+-                    os.makedirs(data_path, exist_ok=True)
+-            except (subprocess.CalledProcessError, OSError):
+-                raise BriefcaseCommandError(
+-                    f"""
++        # Always attempt to create the directory using subprocess.run, idempotently
++        try:
++            if platform.system() == "Windows":  # pragma: no-cover-if-not-windows
++                # Use cmd.exe to bypass potential Windows Store sandboxing
++                subprocess.run(
++                    ["cmd", "/c", "mkdir", data_path],
++                    check=True,
++                )
++                # Ensure data_path is the real path on Windows
++                data_path = os.path.realpath(data_path)
++            else:  # pragma: no-cover-if-is-windows
++                subprocess.run([
++                    "mkdir",
++                    "-p",
++                    data_path,
++                ], check=True)
++        except subprocess.CalledProcessError as e:
++            raise BriefcaseCommandError(
++                f"""
+ Failed to create the Briefcase directory to store tools and support files:
+ 
+     {data_path}
+@@ -261,7 +270,7 @@ You can set the environment variable BRIEFCASE_HOME to specify
+ a custom location for Briefcase's tools.
+ 
+ """
+-                )
++            ) from e
+ 
+         return Path(data_path)

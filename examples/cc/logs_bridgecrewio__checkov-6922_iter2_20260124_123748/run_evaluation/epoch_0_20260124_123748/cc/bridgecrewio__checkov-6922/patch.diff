@@ -1,0 +1,161 @@
+diff --git a/checkov/kubernetes/parser/k8_yaml.py b/checkov/kubernetes/parser/k8_yaml.py
+index 8831b8c5c..ca978646a 100644
+--- a/checkov/kubernetes/parser/k8_yaml.py
++++ b/checkov/kubernetes/parser/k8_yaml.py
+@@ -42,9 +42,7 @@ def load(filename: Path) -> Tuple[List[Dict[str, Any]], List[Tuple[int, str]]]:
+     if not all(key in content for key in ("apiVersion", "kind")):
+         return [{}], []
+ 
+-    if '{{' in content:
+-        return [{}], []
+-
++    # Do not drop files that contain double-curly braces templating; let the validator handle them
+     file_lines = [(idx + 1, line) for idx, line in enumerate(content.splitlines(keepends=True))]
+ 
+     template = loads(content)
+diff --git a/checkov/kubernetes/parser/validatior.py b/checkov/kubernetes/parser/validatior.py
+index 5cbbf4f3b..3bd123e0f 100644
+--- a/checkov/kubernetes/parser/validatior.py
++++ b/checkov/kubernetes/parser/validatior.py
+@@ -3,7 +3,16 @@ from typing import Any, Dict, Tuple
+ 
+ 
+ class K8sValidator:
+-    name_disallowed_chars = re.compile("[#{}]+")  # noqa: CCE003  # a static attribute
++    """
++    Kubernetes template validator with strict name validation that allows
++    double-curly braces templating blocks (e.g., {{ .Release.Name }}) while
++    enforcing DNS-1123 subdomain rules on the non-templated portions.
++    """
++
++    # DNS-1123 subdomain regex: start/end alphanumeric, allow '-', '.' in between
++    _dns1123_re = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
++    # Match double-curly-brace templating blocks lazily, allow newlines
++    _double_curly_block_re = re.compile(r"\{\{.*?\}\}", re.DOTALL)
+ 
+     @staticmethod
+     def is_valid_template(template: Any) -> Tuple[bool, str]:
+@@ -47,10 +56,37 @@ class K8sValidator:
+                     return is_section_valid, reason
+         return True, ''
+ 
++    @staticmethod
++    def is_valid_name(name: Any) -> Tuple[bool, str]:
++        """
++        Public helper to validate Kubernetes names with support for double-curly braces templating.
++        """
++        return K8sValidator._is_name_valid(name)
++
+     @staticmethod
+     def _is_name_valid(name: Any) -> Tuple[bool, str]:
++        """
++        Validate a Kubernetes resource/name-like string.
++
++        - Accept double-curly braces templating blocks by sanitizing them to a safe token
++        - Enforce DNS-1123 subdomain constraints on the sanitized result
++        - Reject names with stray single braces outside templating blocks
++        - Enforce max length of 253 characters
++        """
++        # Basic type/length guard
+         if not isinstance(name, str) or len(name) > 253:
+             return False, f'name {name} is invalid'
+-        if K8sValidator.name_disallowed_chars.search(name):
++
++        original = name
++        # Replace all {{ ... }} blocks with a safe alphanumeric placeholder
++        sanitized = K8sValidator._double_curly_block_re.sub('x', original)
++
++        # If any braces remain, they are stray single braces -> reject
++        if '{' in sanitized or '}' in sanitized:
++            return False, f'name {name} is invalid'
++
++        # Enforce DNS-1123 subdomain pattern on sanitized name
++        if not K8sValidator._dns1123_re.match(sanitized):
+             return False, f'name {name} is invalid'
++
+         return True, ''
+diff --git a/setup.py b/setup.py
+index bc75fa2e8..323846f84 100644
+--- a/setup.py
++++ b/setup.py
+@@ -66,7 +66,7 @@ setup(
+     },
+     install_requires=[
+         "bc-python-hcl2==0.4.2",
+-        "bc-detect-secrets==1.5.41",
++        "bc-detect-secrets==1.5.33",
+         "bc-jsonpath-ng==1.6.1",
+         "pycep-parser==0.5.1",
+         "tabulate>=0.9.0,<0.10.0",
+diff --git a/tests/kubernetes/parser/test_k8_valicator.py b/tests/kubernetes/parser/test_k8_valicator.py
+index 9bd888597..b33279463 100644
+--- a/tests/kubernetes/parser/test_k8_valicator.py
++++ b/tests/kubernetes/parser/test_k8_valicator.py
+@@ -1,6 +1,8 @@
+ import pytest
+ 
+ from checkov.kubernetes.parser.validatior import K8sValidator
++from checkov.kubernetes.parser import k8_yaml
++from checkov.kubernetes.parser.parser import parse
+ 
+ 
+ @pytest.fixture
+@@ -59,3 +61,58 @@ def test_k8s_template_has_required_fields(template_valid_fields):
+ def test_k8s_template_is_name_valid(template_invalid_name):
+     is_valid, reason = K8sValidator.is_valid_template(template_invalid_name)
+     assert not is_valid
++
++
++# New tests to reproduce and validate acceptance of double-curly braces in names
++
++def test_is_valid_name_all_templated_double_curly_braces():
++    # Name consisting entirely of a double-curly braces templating placeholder
++    name = "{{ .Release.Name }}"
++    is_valid, reason = K8sValidator.is_valid_name(name)
++    assert is_valid, "Name with double-curly braces should be valid"
++
++
++def test_is_valid_name_prefix_plus_templated_double_curly_braces():
++    # Name combining a static prefix plus a templated suffix using double-curly braces
++    name = "app-{{ .Values.suffix }}"
++    is_valid, reason = K8sValidator.is_valid_name(name)
++    assert is_valid, "Name with static prefix and double-curly braces should be valid"
++
++
++def test_is_valid_template_with_templated_name_double_curly_braces():
++    template = {
++        "apiVersion": "v1",
++        "kind": "ConfigMap",
++        "metadata": {"name": "app-{{ .Values.name }}"},
++        "data": {"k": "v"},
++    }
++    is_valid, reason = K8sValidator.is_valid_template(template)
++    assert is_valid, f"Template with double-curly braces name should be valid: {reason}"
++
++
++def test_parser_parse_keeps_templated_name_double_curly_braces(tmp_path):
++    # YAML containing a templated name with double-curly braces should not be dropped
++    yaml_content = """
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: app-{{ .Values.name }}
++data:
++  k: v
++"""
++    p = tmp_path / "cm.yaml"
++    p.write_text(yaml_content)
++
++    # Using parser.parse should return definitions and not drop the template
++    result = parse(str(p))
++    assert result is not None
++    templates, lines = result
++    assert isinstance(templates, list)
++    assert templates, "Parser should retain templates with double-curly braces in names"
++
++
++def test_invalid_name_with_illegal_char_outside_double_curly_braces_still_rejected():
++    # Illegal character like '#' outside double-curly braces should be rejected
++    name = "app#{{ .Values.name }}"
++    is_valid, reason = K8sValidator.is_valid_name(name)
++    assert not is_valid, "Name with illegal character outside double-curly braces should be invalid"

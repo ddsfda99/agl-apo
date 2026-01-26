@@ -1,0 +1,36 @@
+diff --git a/mypy/checkexpr.py b/mypy/checkexpr.py
+index edc3ac70f..21f75c0d0 100644
+--- a/mypy/checkexpr.py
++++ b/mypy/checkexpr.py
+@@ -234,6 +234,17 @@ OVERLAPPING_BYTES_ALLOWLIST: Final = {
+ }
+ 
+ 
++def is_bool_like_type(t: Type) -> bool:
++    tp = get_proper_type(t)
++    if isinstance(tp, UnionType):
++        return any(is_bool_like_type(item) for item in tp.items)
++    if isinstance(tp, Instance):
++        return tp.type.fullname == "builtins.bool"
++    if isinstance(tp, LiteralType):
++        fb = get_proper_type(tp.fallback)
++        return isinstance(fb, Instance) and fb.type.fullname == "builtins.bool"
++    return False
++
+ class TooManyUnions(Exception):
+     """Indicates that we need to stop splitting unions in an attempt
+     to match an overload in order to save performance.
+@@ -4288,7 +4299,12 @@ class ExpressionChecker(ExpressionVisitor[Type], ExpressionCheckerSharedApi):
+         ):
+             self.msg.unreachable_right_operand(e.op, e.right)
+ 
+-        right_type = self.analyze_cond_branch(right_map, e.right, expanded_left_type)
++        ctx_for_right = expanded_left_type
++        if is_bool_like_type(expanded_left_type):
++            # Avoid passing a bool-derived context to the RHS of a boolean op.
++            # This prevents over-constraining generic inference (e.g., deepcopy’s _T inferred as bool).
++            ctx_for_right = None
++        right_type = self.analyze_cond_branch(right_map, e.right, ctx_for_right)
+ 
+         if left_map is None and right_map is None:
+             return UninhabitedType()

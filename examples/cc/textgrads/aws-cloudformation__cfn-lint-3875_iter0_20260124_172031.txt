@@ -1,0 +1,98 @@
+Summary of failure
+- The agent attempted to call an unavailable/nonexistent model name: claude-sonnet-4-5-20250929. This looks like a mis-specified or future-dated model identifier not deployed in the environment.
+- The API returned 429 with message “No deployments available for selected model, Try again in 5 seconds,” including a cooldown list for a failing deployment. The agent did not implement any retry, fallback, or pre-call checks, and simply surfaced the error.
+- pre-call-checks=False indicates the agent skipped validating that a deployment exists before sending the request.
+- The agent did not respect rate limiting or Retry-After guidance, did not implement exponential backoff, and did not switch to an available model.
+- Result: A single failing call led to complete task failure instead of graceful recovery.
+
+Root causes
+- Invalid or unavailable model ID. The suffix “20250929” suggests a future date; it’s very likely no deployment exists under that name.
+- Lack of defensive programming around model selection and rate-limits.
+- Missing circuit breaker/cooldown handling based on the provider’s cooldown_list.
+- No fallback strategy to alternative models or deployments.
+- No pre-call validation of model availability.
+
+How to fix and improve robustness
+1) Validate model IDs before calling
+- Maintain a configuration-driven registry of allowed model IDs for each provider/environment (e.g., per tenant or region).
+- On startup or before first call, query the provider’s list of deployed models and cache them. Use this cache to validate the requested model name.
+- Enable pre-call checks. If the requested model is not in the deployed set, select a fallback or prompt the user to choose an available model.
+
+2) Implement smart retry with backoff
+- For HTTP 429:
+  - Respect Retry-After header if present; otherwise default to provider guidance (e.g., 5 seconds).
+  - Use exponential backoff with jitter: e.g., base delay 1–2s, multiply by 2 per attempt, add random jitter, cap at a max (e.g., 30s), limit attempts (e.g., 3–5).
+  - If error indicates “No deployments available,” do not hammer the same deployment; pivot to an available model/deployment immediately.
+- For transient 5xx errors, similar backoff policies apply.
+- Ensure retry logic is idempotent and preserves conversation state.
+
+3) Fall back to an available model
+- Define a model fallback chain per capability class. For example:
+  - Sonnet-tier → fallback to another Sonnet deployment/version → fallback to Haiku-tier if acceptable.
+- Use capability-based selection (reasoning, JSON-mode, tool-use) rather than hardcoding a single model identifier.
+- If all fallbacks fail, surface a clear message and offer to proceed with a lower-tier model or queue the task.
+
+4) Respect cooldown_list and use a circuit breaker
+- Maintain a cooldown map keyed by deployment/model ID. If a deployment is in cooldown_list or returns repeated failures, trip a circuit breaker for a TTL (e.g., 1–5 minutes) and route traffic away.
+- Periodically re-check availability to close the circuit.
+
+5) Preserve user context and retry safely
+- Store the original prompt and any tool/context inputs so retries and fallbacks can reissue the same request without losing information.
+- Ensure partial progress and streamed outputs are handled: if a retry starts, cancel the previous stream cleanly.
+
+6) Logging and observability
+- Log the model ID used, the provider response code, error message, and retry attempts.
+- Emit metrics for 429 rates, retry success, fallback usage, and circuit breaker events to detect systemic issues early.
+
+7) Timeouts and concurrency limits
+- Set reasonable request timeouts and concurrency limits to avoid tripping rate limits.
+- Use a token bucket or semaphore to throttle calls per model/provider based on known quotas.
+
+8) Configuration hygiene
+- Avoid speculative or future-dated model IDs. Keep model names in config, versioned per environment, and update them through release processes.
+- Provide an admin or automated job that refreshes available deployments regularly and updates the registry.
+
+9) User-facing resilience
+- If a fallback occurs, notify the user succinctly: “Selected model is currently unavailable; using X as fallback.” Offer a switch back when availability returns.
+- If repeated failures occur, provide actionable guidance: “Please select an available model from: …” or “We’ll retry in the background and notify you.”
+
+10) Testing
+- Unit tests for:
+  - Model ID validation against a mock deployment list.
+  - Retry/backoff logic with simulated 429 and Retry-After.
+  - Circuit breaker behavior and cooldown handling.
+  - Fallback chain selection rules.
+- Integration tests against a sandbox environment that triggers rate limits and deployment unavailability.
+- Load tests to ensure throttling avoids 429s under concurrency.
+
+Example request wrapper (pseudocode)
+- validate requested_model against deployments_cache
+- if not available:
+  - requested_model = pick_fallback_model(capabilities)
+- attempts = 0
+- while attempts < max_attempts:
+  - try:
+    - response = call_model_api(requested_model, prompt, timeout)
+    - return response
+  - except ApiError as e:
+    - if e.code == 429:
+      - delay = compute_backoff_with_jitter(attempts, retry_after=e.retry_after or 5)
+      - mark_deployment_cooldown(e.cooldown_list)
+      - requested_model = switch_to_available_model(requested_model, deployments_cache, cooldown_map)
+      - sleep(delay)
+      - attempts += 1
+      - continue
+    - elif e.code in transient_5xx:
+      - delay = compute_backoff_with_jitter(attempts)
+      - sleep(delay); attempts += 1; continue
+    - else:
+      - raise
+- raise RetryExceededError
+
+Concrete immediate actions for this failure
+- Stop using claude-sonnet-4-5-20250929; replace with a currently deployed model from your provider (e.g., a known available “claude-3.5-sonnet-20241022” or similar, depending on your environment).
+- Turn on pre-call checks and validate deployments before sending requests.
+- Implement a retry with exponential backoff and respect provider cooldown guidance.
+- Add a fallback chain so the task can still complete even when the primary model is unavailable.
+
+With these improvements, the agent will recover from transient provider issues, avoid invalid model selections, and continue the task instead of failing on the first error.

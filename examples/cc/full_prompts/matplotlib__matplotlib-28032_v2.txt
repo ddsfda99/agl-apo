@@ -1,0 +1,79 @@
+You are working in the /testbed repository. Your goal is to fix a bug in Matplotlib’s imsave where saving RGBA uint8 arrays with origin="lower" fails due to a non-C-contiguous buffer being passed to Pillow. Follow the steps below carefully and completely, in the order given. Do not commit any edits.
+
+Context and root cause
+- Reproducer: RGBA uint8 array of shape MxNx4 saved with origin="lower" triggers ValueError: ndarray is not C-contiguous in PIL.Image.frombuffer. RGB works because the conversion to RGBA copies into a contiguous buffer.
+- Root cause: In lib/matplotlib/image.py, imsave flips the array for origin="lower" using arr[::-1], which creates a non-C-contiguous view (negative stride). If the input is already RGBA, ScalarMappable.to_rgba returns it unchanged (no copy), so the non-contiguous buffer is passed to Pillow’s frombuffer, which requires a C-contiguous, positive-stride buffer.
+- Desired behavior: Ensure the buffer passed to Pillow is C-contiguous without breaking existing optimizations (especially the memoryview fast path) and avoid unnecessary copies.
+
+Tasks
+1) Write targeted tests first that reproduce the bug and cover controls.
+- Create a temporary test file under lib/matplotlib/tests/, named lib/matplotlib/tests/test_imsave_origin_rgba.py.
+- Tests to include (use pytest and the tmp_path fixture so files are auto-cleaned):
+  - For RGBA uint8 arrays (shape (50, 60, 4)), origin="lower" should successfully save images for formats: "png", "jpg", "tiff", and "gif". Prior to the fix, these should reproduce the ValueError; after the fix, they should pass.
+  - Control: RGBA uint8 with origin="upper" should work for the same formats.
+  - Control: RGB uint8 (shape (50, 60, 3)) with origin="lower" should work for the same formats (this masked the bug previously).
+- Implementation details:
+  - Use numpy to create zero-filled arrays of shape (50, 60, 4) dtype=uint8 for RGBA and (50, 60, 3) for RGB.
+  - Call matplotlib.pyplot.imsave for each format and origin combination as specified, writing to tmp_path with a unique file name per case.
+  - Assert: no exception raised, file exists, and PIL.Image.open confirms image size equals (60, 50).
+  - Keep tests focused and fast; do not rely on external resources.
+- Run this new test file alone to confirm it fails on the RGBA+origin="lower" cases before making any changes.
+
+2) Locate the bug in source code.
+- Open lib/matplotlib/image.py.
+- Find the imsave function and the block where:
+  - origin="lower" triggers an array reversal using arr[::-1], producing a negative-stride, non-C-contiguous view.
+  - rgba is computed (ScalarMappable.to_rgba(...)) and then passed to Pillow via PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1).
+- Confirm that when origin="lower" and input is already RGBA uint8, rgba ends up being a non-C-contiguous numpy array, causing frombuffer to raise ValueError.
+
+3) Implement the refined fix that ensures a C-contiguous buffer is passed to Pillow while preserving optimizations as much as possible, especially the memoryview fast path.
+- Keep changes minimal and localized to imsave in lib/matplotlib/image.py.
+- Just before the call to PIL.Image.frombuffer, add a guard to ensure rgba is C-contiguous without unconditionally converting buffers.
+- Preserve the memoryview fast path: only convert memoryview to a numpy array if the memoryview is not C-contiguous. If it already is C-contiguous, pass it through directly so Pillow can consume it via frombuffer without extra allocation.
+- Use the following logic immediately before PIL.Image.frombuffer(...):
+
+  - Compute pil_shape = (rgba.shape[1], rgba.shape[0]) as currently done.
+  - Introduce a small decision block with a use_frombuffer flag:
+    - If isinstance(rgba, np.ndarray):
+      - If not rgba.flags["C_CONTIGUOUS"]: set rgba = rgba.copy()
+    - Elif isinstance(rgba, memoryview):
+      - Determine if the memoryview is C-contiguous:
+        - Try contig = getattr(rgba, "c_contiguous", None)
+        - If contig is False, or (contig is None and not getattr(rgba, "contiguous", True)), then set rgba = np.ascontiguousarray(rgba)
+        - Else leave rgba as the memoryview to preserve the fast path.
+      - If accessing these attributes raises AttributeError, set rgba = np.ascontiguousarray(rgba)
+    - Else (other buffer-like objects):
+      - Try rgba = np.ascontiguousarray(rgba)
+      - If that raises an exception (TypeError or ValueError), then:
+        - Construct the image via PIL.Image.fromarray(np.asarray(rgba)) and set use_frombuffer = False to skip frombuffer
+    - Finally:
+      - If use_frombuffer is True, call PIL.Image.frombuffer("RGBA", pil_shape, rgba, "raw", "RGBA", 0, 1)
+      - Else, use the PIL.Image created by fromarray
+
+- Add a concise explanatory comment above this block noting:
+  - origin="lower" introduces negative strides via arr[::-1], creating non-C-contiguous views
+  - If input is already RGBA, ScalarMappable returns it unchanged, so ensure C-contiguity before passing to frombuffer
+  - Preserve the memoryview fast path by not converting already C-contiguous memoryviews unnecessarily
+
+- Do not unconditionally call np.ascontiguousarray on everything; only copy/convert when needed to maintain performance.
+
+4) Validate the fix thoroughly.
+- Re-run the new tests in lib/matplotlib/tests/test_imsave_origin_rgba.py; confirm they now pass for RGBA origin="lower" across "png", "jpg", "tiff", and "gif".
+- Confirm the control tests pass:
+  - RGBA origin="upper"
+  - RGB origin="lower"
+- Run the full Matplotlib test suite and WAIT for it to complete. Ensure no regressions, especially in tests involving image saving or Pillow integration. If regressions appear, refine the guard logic to avoid perturbing previously working paths (e.g., do not convert already C-contiguous memoryviews).
+
+5) Clean up after successful validation.
+- Delete the temporary test file you added: lib/matplotlib/tests/test_imsave_origin_rgba.py
+- Ensure any temporary output images created during your tests are also removed; if you used pytest’s tmp_path, these are already handled.
+- Do not commit any edits.
+
+Constraints and notes
+- Do not commit any edits.
+- Keep changes minimal and localized to imsave in lib/matplotlib/image.py.
+- Preserve existing performance optimizations where possible, especially the memoryview fast path. Only introduce copies when necessary to ensure C-contiguity for Pillow.
+- Include clear code comments explaining the rationale for ensuring C-contiguity before calling Pillow.
+- The fix must work for RGBA uint8 arrays of shape MxNx4 with origin="lower" across "png", "jpg", "gif", and "tiff" formats.
+- Confirm that the fix does not alter behavior for cases that already worked, particularly RGB input and origin="upper".
+- Maintain the step ordering: write and run failing tests first, implement the fix, re-run targeted tests, run the full suite, then delete the temporary test file.

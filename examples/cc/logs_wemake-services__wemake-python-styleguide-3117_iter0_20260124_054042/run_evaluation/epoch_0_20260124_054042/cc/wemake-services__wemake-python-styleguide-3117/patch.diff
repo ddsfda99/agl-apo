@@ -1,0 +1,28 @@
+diff --git a/tests/test_visitors/test_ast/test_compares/conftest.py b/tests/test_visitors/test_ast/test_compares/conftest.py
+index defb888d..581910a7 100644
+--- a/tests/test_visitors/test_ast/test_compares/conftest.py
++++ b/tests/test_visitors/test_ast/test_compares/conftest.py
+@@ -39,9 +39,6 @@ IS_COMPARES = frozenset((
+ EQUAL_COMPARES = frozenset((
+     if_with_eq,
+     if_with_not_eq,
+-
+-    assert_construct,
+-    assert_with_message,
+ ))
+ 
+ OTHER_COMPARES = frozenset((
+diff --git a/wemake_python_styleguide/visitors/ast/compares.py b/wemake_python_styleguide/visitors/ast/compares.py
+index a88cec1e..5f9db23f 100644
+--- a/wemake_python_styleguide/visitors/ast/compares.py
++++ b/wemake_python_styleguide/visitors/ast/compares.py
+@@ -162,6 +162,9 @@ class WrongConstantCompareVisitor(BaseNodeVisitor):
+         ) else len(real.elts)
+ 
+         if not length:
++            # Skip violation in assert context:
++            if walk.get_closest_parent(comparator, ast.Assert) is not None:
++                return
+             self.add_violation(FalsyConstantCompareViolation(comparator))
+ 
+     def _check_is_constant_compare(

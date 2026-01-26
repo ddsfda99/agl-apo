@@ -1,0 +1,145 @@
+You are working in a mypy repository located in the current directory. Your goal is to fix a specific bug in the type checker involving boolean short-circuit operations and type context propagation that incorrectly constrains generic inference on the right-hand side, and to validate the fix with targeted tests. Please follow the steps below precisely and keep the change minimal and well-scoped.
+
+Context and problem summary
+- Symptom 1 (primary): When the left operand of an “or” expression is a bool (or bool literal), mypy incorrectly uses a bool-derived context when analyzing the right operand. This can cause generic functions like copy.deepcopy (typed as def deepcopy(x: _T) -> _T) to infer _T as bool and then complain that the provided argument has the wrong type.
+
+  Reproducer:
+  from copy import deepcopy
+  from typing import Literal, Union
+
+  def f(a: str, b: bool) -> Union[Literal[True], str]:
+      return b or deepcopy(a)
+
+  Expected: no errors, because the expression evaluates to True or a string, so the return type Union[Literal[True], str] is satisfied.
+
+  Actual erroneous behavior seen in older mypy versions:
+  - “Incompatible return value type (got "bool", expected "Union[Literal[True], str]")”
+  - “Argument 1 to "deepcopy" has incompatible type "str"; expected "bool"”
+
+- Root cause summary: The boolean-op checker intentionally passes the left-hand side’s type as context to the right to help infer types in cases like “[1] or []”. However, when the left is bool-like, that context over-constrains inference (e.g., inferring deepcopy’s _T as bool), producing bogus errors.
+
+- Important: Keep the behavior where non-bool left-hand sides guide inference for the right (e.g., “[1] or []” inferring [] as list[int]). Only avoid passing a bool-like context.
+
+- Do not implement speculative changes elsewhere (e.g., conditional expression/ternary analysis). Only change what a failing test proves is necessary. Do not modify visit_conditional_expr.
+
+What to do
+1) Reproduce the bug locally to anchor the fix.
+   - Create a local ad hoc file tmp_boolop_deepcopy.py with:
+     from copy import deepcopy
+     from typing import Literal, Union
+
+     def f(a: str, b: bool) -> Union[Literal[True], str]:
+         return b or deepcopy(a)
+   - Build and run mypy from this repo against that file to observe current behavior.
+   - You will add proper tests to mypy’s test suite in step 4. Remove this temporary file after you’re done.
+
+2) Locate the relevant code.
+   - Restrict your search to the mypy source tree in this repository; do not grep the entire filesystem or vendored wheels.
+   - Focus on mypy/checkexpr.py.
+   - Find check_boolean_op (invoked from visit_op_expr for “and”/“or”). There is a call to analyze_cond_branch for the right operand with a context derived from the left operand’s type. That call is the correct place to conditionally remove the context when the left is bool-like.
+
+3) Implement a minimal, targeted fix in checkexpr.py only.
+   - Core idea: When the left operand’s type is bool-like (builtins.bool or a bool LiteralType), including cases where the left operand’s type is a Union that contains a bool-like disjunct (e.g., Optional[bool] or Union[bool, T]), do not pass that as the type context to the right operand. Instead, pass None (no context). This avoids over-constraining generic inference (e.g., deepcopy’s _T).
+   - Use only module-level imports; do not add imports inside functions.
+   - At module scope, ensure these imports exist (add if needed):
+     from mypy.types import Type, Instance, LiteralType, UnionType, get_proper_type
+   - Add a small helper at module scope to detect “bool-like”, including unions:
+     def is_bool_like_type(t: Type) -> bool:
+         tp = get_proper_type(t)
+         if isinstance(tp, UnionType):
+             return any(is_bool_like_type(item) for item in tp.items)
+         if isinstance(tp, Instance):
+             return tp.type.fullname == "builtins.bool"
+         if isinstance(tp, LiteralType):
+             fb = get_proper_type(tp.fallback)
+             return isinstance(fb, Instance) and fb.type.fullname == "builtins.bool"
+         return False
+   - In check_boolean_op, identify the variable currently passed as the right-hand side’s context to analyze_cond_branch (often expanded_left_type or similar). Change this:
+     right_type = self.analyze_cond_branch(right_map, e.right, EXPANDED_LEFT_CONTEXT)
+     to:
+     ctx_for_right = EXPANDED_LEFT_CONTEXT
+     if is_bool_like_type(EXPANDED_LEFT_CONTEXT):
+         # Avoid passing a bool-derived context to the RHS of a boolean op.
+         # This prevents over-constraining generic inference (e.g., deepcopy’s _T inferred as bool).
+         ctx_for_right = None
+     right_type = self.analyze_cond_branch(right_map, e.right, ctx_for_right)
+     Notes:
+     - Use the actual variable name that you currently pass as context (usually a left-derived type). The check should key off the exact type you would otherwise pass to the RHS.
+     - This change should apply to both “or” and “and”, since check_boolean_op handles both.
+     - Preserve the behavior where non-bool left-derived context is still passed to the RHS to maintain helpful inference such as “[1] or []”.
+
+   - Do not modify visit_conditional_expr or any other unrelated code. Keep the change minimal and localized to check_boolean_op, plus the helper and imports above.
+
+4) Add robust, targeted tests using mypy’s data-driven test harness.
+   - Create a new file test-data/unit/check-boolops-deepcopy.test.
+   - Important: Use the correct fixtures. Add both builtins and typing fixtures at the top of the test file:
+     [builtins fixtures/primitives.pyi]
+     [typing fixtures/typing.pyi]
+   - Provide a minimal local stub for the copy module so the test doesn’t depend on external stdlib fixtures:
+     [file copy.pyi]
+     from typing import TypeVar
+     _T = TypeVar("_T")
+     def deepcopy(x: _T) -> _T: ...
+   - Add a test case that verifies the bug fix and that non-bool context behavior remains intact, plus covers unions that include bool and “and”:
+     [case test_boolop_context_ignores_bool_for_right_operand_deepcopy]
+     from typing import Union, Literal, List
+     from copy import deepcopy
+
+     def f(a: str, b: bool) -> Union[Literal[True], str]:
+         return b or deepcopy(a)
+
+     def f_and(a: str, b: bool) -> Union[Literal[False], str]:
+         return b and deepcopy(a)
+
+     def g(xs: List[int], ys: List[int]) -> List[int]:
+         return xs or ys
+
+     def h(xs: List[int]) -> List[int]:
+         return xs or []
+
+     def u(a: str, b: Union[bool, int]) -> Union[Literal[True], int, str]:
+         return b or deepcopy(a)
+
+     def o(a: str, b: Union[None, bool]) -> Union[Literal[True], str]:
+         return b or deepcopy(a)
+
+     # Assert types via annotated assignments to avoid brittle reveal_type output ordering.
+     rv1: Union[Literal[True], str] = f("x", False)
+     rv1a: Union[Literal[False], str] = f_and("x", False)
+     rv2: List[int] = g([1], [2])
+     rv3: List[int] = h([1])
+     rv4: Union[Literal[True], int, str] = u("x", 0)
+     rv5: Union[Literal[True], str] = o("x", None)
+   - Do not add a separate [out] section for this case. The test passes if there are no type checker errors. Avoid reveal_type here to prevent brittleness in union pretty-printing order.
+
+5) Run tests and iterate if needed.
+   - Run the full unit test suite to ensure no regressions:
+     pytest -q
+   - If you need to iterate more quickly, you can first run a subset:
+     pytest -q -k bool
+     or
+     pytest -q test/testcheck.py
+   - Ensure your new test passes and there are no regressions elsewhere. If any failures arise tied to your change, refine the bool-like detection (e.g., ensure Union[bool, X] is handled) but keep the change minimal and constrained to check_boolean_op.
+   - Also run mypy from this repo against your local tmp_boolop_deepcopy.py reproducer to confirm no errors are reported there.
+
+6) Clean up.
+   - Remove any ad hoc temporary files you created outside the test-data directory (e.g., tmp_boolop_deepcopy.py).
+   - Do not commit any changes; leave the repository modified with your fix and tests.
+
+Important constraints and guidance
+- Keep the change minimal and focused:
+  - Only modify mypy/checkexpr.py in check_boolean_op, plus add the module-level helper and imports as needed.
+  - Do not introduce inline/dynamic imports inside functions.
+  - Do not modify visit_conditional_expr or other unrelated code.
+- Preserve intended behavior:
+  - The right operand should still receive left-derived context when the left is not bool-like, to maintain helpful inference such as “[1] or []” inferring [] as list[int].
+- Test harness specifics:
+  - Always include fixtures for builtins and typing as shown.
+  - For third-party/stdlib modules (like copy), provide a local [file ...] stub within the test file.
+  - Prefer asserting types via annotated assignments instead of reveal_type notes to avoid brittle expectations.
+- Deliverables (in repo only; do not commit):
+  - A minimal patch to mypy/checkexpr.py implementing the bool-like context avoidance for RHS in boolean ops as described, with a concise explanatory comment.
+  - A new test file test-data/unit/check-boolops-deepcopy.test with the case above.
+  - Confirmation via tests that:
+    - deepcopy + bool “or” and “and” no longer produce spurious errors, including when the left operand’s type is Union that includes bool.
+    - Existing expected behavior for non-bool left contexts (e.g., list/list) is preserved.

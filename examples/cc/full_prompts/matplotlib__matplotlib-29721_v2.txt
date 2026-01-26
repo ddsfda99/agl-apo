@@ -1,0 +1,95 @@
+You are an expert coding agent. Your goal is to reproduce and fix the reported bug, add a regression test, and validate the fix. Do not commit changes.
+
+Context and goal
+- Issue: In headless/LXC environments with Matplotlib 3.10.0, pyplot may try to load an explicitly configured interactive backend like 'TkAgg' and crash with "ImportError: Cannot load backend 'TkAgg'... as 'headless' is currently running".
+- Expected: When backend_fallback is enabled and a headless environment is detected, Matplotlib should fall back to a non-interactive backend (Agg), even if rcParams['backend'] is set to an interactive backend with mixed case (e.g., 'TkAgg').
+- Root cause: In lib/matplotlib/pyplot.py, the import-time fallback check for interactive backends is case-sensitive. rcParams can hold mixed-case names (e.g., 'TkAgg') while the interactive backends set is lowercase (e.g., 'tkagg'), so the fallback code never triggers in headless.
+
+Important process requirements
+- Write a reproduction test first to confirm failure/behavior.
+- Read files before editing them.
+- Use the correct repository root (current working directory). In Matplotlib, tests are under lib/matplotlib/tests and pyplot is at lib/matplotlib/pyplot.py.
+- After implementing the fix, run the tests and ensure they pass.
+- Clean up any temporary artifacts.
+- Do not change core semantics in switch_backend; fix the import-time fallback logic instead.
+
+Step-by-step plan
+1) Reproduce with a test
+- Create a pytest test file at: lib/matplotlib/tests/test_headless_backend_fallback.py
+- The test should:
+  - Simulate a headless environment by monkeypatching display validity.
+    - monkeypatch matplotlib.cbook._c_internal_utils.display_is_valid to return False.
+  - Ensure backend_fallback is enabled and set an explicit interactive backend with mixed case:
+    - mpl.rcParams['backend'] = 'TkAgg'
+    - mpl.rcParams['backend_fallback'] = True
+  - Ensure pyplot resolves backend at import time:
+    - Remove 'matplotlib.pyplot' from sys.modules if present to re-trigger import logic.
+    - Optionally reload matplotlib to reset state between tests if needed.
+  - Import matplotlib.pyplot as plt and create a figure to trigger backend resolution.
+  - Assert:
+    - No ImportError is raised.
+    - mpl.get_backend().lower() == 'agg' (or plt.get_backend().lower() == 'agg').
+  - Close the figure to avoid resource leaks.
+- Example outline (write this in the test file, adapting to pytest and the repo’s conventions):
+  - import sys, importlib
+  - import matplotlib as mpl
+  - from matplotlib import cbook
+  - monkeypatch.setattr(cbook._c_internal_utils, 'display_is_valid', lambda: False, raising=True)
+  - mpl.rcParams['backend'] = 'TkAgg'
+  - mpl.rcParams['backend_fallback'] = True
+  - if 'matplotlib.pyplot' in sys.modules: del sys.modules['matplotlib.pyplot']
+  - import matplotlib.pyplot as plt
+  - fig = plt.figure()
+  - assert mpl.get_backend().lower() == 'agg'
+  - plt.close(fig)
+
+2) Locate the buggy code
+- Open lib/matplotlib/pyplot.py.
+- Search for the import-time fallback block that references:
+  - rcParams['backend_fallback']
+  - backend_registry.list_builtin(BackendFilter.INTERACTIVE)
+  - cbook._get_running_interactive_framework()
+- This block sets rcParams to rcsetup._auto_backend_sentinel to trigger auto backend selection.
+
+3) Implement the fix
+- Problem: The check that decides whether to fallback compares rcParams._get_backend_or_none() directly to a set of lowercase interactive backends. This is case-sensitive, so values like 'TkAgg' fail to match and prevent fallback in headless.
+- Fix: Normalize the backend name to lowercase before checking membership.
+- Additionally, ensure we fallback whenever an interactive framework is running or we are headless. cbook._get_running_interactive_framework() returns a truthy 'headless' in headless mode, so checking for is not None (or truthiness) suffices.
+- Modify the block roughly as follows (adjust within existing structure; do not alter unrelated logic):
+  - backend_name = rcParams._get_backend_or_none()
+  - interactive_builtins = set(backend_registry.list_builtin(BackendFilter.INTERACTIVE)) - {'webagg', 'nbagg'}
+  - if (rcParams['backend_fallback']
+       and backend_name
+       and backend_name.lower() in interactive_builtins):
+      current_framework = cbook._get_running_interactive_framework()
+      if current_framework is not None:
+          rcParams._set('backend', rcsetup._auto_backend_sentinel)
+- Keep the rest of pyplot’s backend resolution and switch_backend logic unchanged.
+- Do not implement a new fallback path inside switch_backend; the import-time fallback is the intended mechanism and minimizes risk.
+
+4) Run tests
+- Run the test suite or at least the new test to validate the fix.
+- Ensure the new headless test passes and there are no regressions.
+
+5) Debug if needed
+- If the test still fails:
+  - Ensure the fallback block actually runs at import time (pyplot must be imported after setting rcParams and monkeypatching display_is_valid).
+  - Ensure the test clears matplotlib.pyplot from sys.modules before importing it.
+  - Verify interactive_builtins contains 'tkagg' and that the set excludes 'webagg' and 'nbagg'.
+
+6) Clean up
+- Ensure figures are closed in tests.
+- Keep the test file under lib/matplotlib/tests.
+- Do not leave any temporary files outside the tests directory.
+
+Acceptance criteria
+- In a simulated headless environment with rcParams['backend'] set to 'TkAgg' and backend_fallback True, importing pyplot and creating a figure does not raise ImportError and the resolved backend is Agg.
+- The new test passes.
+- No changes to core switch_backend behavior beyond the import-time fallback check.
+- No regressions in existing tests.
+
+Tool usage reminders
+- Always read a file before editing it.
+- Use correct project paths (lib/matplotlib/pyplot.py and lib/matplotlib/tests/).
+- Avoid passing unsupported parameters to tools.
+- Do not commit your edits.

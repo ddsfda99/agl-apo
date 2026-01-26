@@ -1,0 +1,46 @@
+diff --git a/telegram/ext/_jobqueue.py b/telegram/ext/_jobqueue.py
+index 14a005f8..de9cb276 100644
+--- a/telegram/ext/_jobqueue.py
++++ b/telegram/ext/_jobqueue.py
+@@ -703,14 +703,36 @@ class JobQueue(Generic[CCT]):
+         """
+         return tuple(Job.from_aps_job(job) for job in self.scheduler.get_jobs())
+ 
+-    def get_jobs_by_name(self, name: str) -> tuple["Job[CCT]", ...]:
+-        """Returns a tuple of all *pending/scheduled* jobs with the given name that are currently
+-        in the :class:`JobQueue`.
++    def get_jobs_by_name(self, name: str, use_regex: bool = False) -> tuple["Job[CCT]", ...]:
++        """Returns a tuple of all *pending/scheduled* jobs whose name matches the given filter.
++
++        Args:
++            name (:obj:`str`): The name filter. If :paramref:`use_regex` is :obj:`False`, the
++                filter matches exactly (:attr:`Job.name` equals :paramref:`name`). If
++                :paramref:`use_regex` is :obj:`True`, :paramref:`name` is treated as a regular
++                expression and searched against each job name.
++            use_regex (:obj:`bool`): Whether to interpret :paramref:`name` as a regex pattern.
++                If :obj:`True` and the pattern is invalid, a :class:`ValueError` is raised with a
++                clear message.
+ 
+         Returns:
+-            tuple[:class:`Job`]: Tuple of all *pending* or *scheduled* jobs matching the name.
++            tuple[:class:`Job`]: Tuple of all *pending* or *scheduled* jobs matching the filter.
++
++        Note:
++            If :paramref:`use_regex` is :obj:`True` and an invalid regex pattern is provided,
++            a :class:`ValueError` is raised with a clear message.
+         """
+-        return tuple(job for job in self.jobs() if job.name == name)
++        if not use_regex:
++            return tuple(job for job in self.jobs() if job.name == name)
++
++        from re import compile as _re_compile, error as _re_error
++
++        try:
++            pattern = _re_compile(name)
++        except _re_error as exc:
++            raise ValueError(f"Invalid regex pattern: {name}") from exc
++
++        return tuple(job for job in self.jobs() if job.name and pattern.search(job.name))
+ 
+ 
+ class Job(Generic[CCT]):

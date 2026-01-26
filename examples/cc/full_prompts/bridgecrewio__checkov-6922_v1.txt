@@ -1,0 +1,65 @@
+Revised task prompt for the coding agent:
+
+You are fixing a parsing/validation bug in the Checkov Kubernetes parser that prevents reporting on files containing templating sequences with double-curly braces. The issue manifests when Checkov silently drops Kubernetes templates whose metadata.name includes templating placeholders, causing “no results” or “no failed checks” even though the file contains valid (pre-rendered) manifests. Your goal is to make the parser accept templated names and not discard those templates.
+
+Follow these steps carefully and do not commit your edits:
+
+1) Understand the requirements and context
+- The reported problem: Checkov does not output results for files that contain specific symbols such as double-curly braces in templating.
+- In Kubernetes manifests, Helm/Kustomize placeholders often appear in metadata fields like metadata.name and are represented with double-curly braces. These placeholders are valid before rendering and should not cause templates to be dropped from analysis.
+- Previous attempts missed the core validator logic and test expectations. You must review the relevant validator and parser code and the tests that target them.
+
+2) Read the existing tests to understand expected behavior
+- Open and read tests/kubernetes/parser/test_k8_valicator.py in full. Despite the odd filename spelling, this is intentional and targets the validator behavior.
+- Identify what the tests expect for Kubernetes template validity, especially around templated names and allowed/disallowed characters.
+
+3) Locate the relevant code paths
+- Navigate to checkov/kubernetes/parser/validatior.py. Note the unconventional filename spelling.
+- Locate the K8sValidator class and its methods, especially is_valid_name and is_valid_template (or similarly named functions).
+- Observe the current disallowed character logic for names. There is a regular expression that rejects names containing braces. This is likely the root cause: names with double-curly brace placeholders are being treated as invalid and dropped.
+- Also review checkov/kubernetes/parser/parser.py to see how parse() uses K8sValidator.is_valid_template and how invalid templates are filtered out or cause the entire document to be discarded.
+
+Important: When searching, use simple grep patterns without unsupported flags and verify results by opening files directly. Be aware of the filename spelling: validatior and valicator.
+
+4) Write a reproduction test case confirming the bug
+- Add a new unit test to tests/kubernetes/parser/test_k8_valicator.py that constructs a minimal valid Kubernetes manifest with apiVersion, kind, and metadata.name that includes a templating placeholder using double-curly braces. For example, a Pod with metadata.name that uses a placeholder. Also include a case where the name combines a static prefix with a templated suffix (e.g., my-app- plus a double-curly brace placeholder).
+- The test should:
+  - Verify K8sValidator.is_valid_name returns True for names containing a templating placeholder in double-curly braces.
+  - Verify K8sValidator.is_valid_template returns True for the template containing such a name.
+  - Verify parser.parse on a YAML string/file containing such a templated name returns definitions and does not drop the template.
+- Add a negative test case showing that truly invalid names (e.g., names with illegal characters and not part of a templating placeholder) are still rejected.
+
+Note: Describe the templating placeholder using the phrase “double-curly braces” in your test comments and assertions. In the code, write the placeholder with actual double-curly braces.
+
+5) Implement the fix in the validator and parser
+- In checkov/kubernetes/parser/validatior.py:
+  - Adjust the name validation logic to accept names that contain templating placeholders with double-curly braces. A robust approach is to sanitize or mask templating segments before applying the strict Kubernetes DNS label validation:
+    - Implement a helper that replaces all occurrences of double-curly brace blocks with a safe alphanumeric token (e.g., replace each block with “x”), then run the existing name validity checks against the sanitized result.
+    - This allows names like a static prefix combined with a placeholder to pass validation while still preventing unrelated illegal characters.
+  - Alternatively, if the current logic uses a disallowed character regex that includes braces, modify it so braces are not considered disallowed when they appear as part of a templating sequence with double-curly braces. Do not weaken validation for non-templated content.
+- Ensure is_valid_template does not reject templates purely due to the presence of double-curly braces in names. It should pass templates that would be valid after rendering.
+- In checkov/kubernetes/parser/parser.py:
+  - Confirm that parse() does not drop templates erroneously due to templated names. If parse() filters templates using K8sValidator, the updated validator should now allow templated names. No further changes may be needed depending on current logic.
+
+6) Run the reproduction tests and existing tests
+- Run the new test(s) and any existing validator/parser tests to ensure behavior matches expectations.
+- If tests fail, carefully inspect the validator logic and adjust the sanitization or acceptance criteria for templating placeholders.
+- Ignore external API or environment errors unrelated to repository functionality. Focus on local unit test results.
+
+7) Clean up any temporary test files you created
+- Remove any temporary artifacts or files you created only for manual testing. Keep only the new unit tests you added.
+
+Key considerations and pitfalls to avoid
+- Do not over-broaden validation: keep strict checks for non-templated names. Only accept braces when they form part of double-curly brace templating. Allow names that combine static text with templating segments.
+- Do not rely on brittle grep patterns or unsupported flags. Validate findings by reading the files directly.
+- Be mindful of the file naming typos: validatior.py and test_k8_valicator.py.
+- The debug log “template 0 from file base-rendered.yaml is not a valid k8s template, reason: the key apiVersion does not exist in template structure” is about a different validation condition (missing apiVersion). Your fix targets acceptance of templating braces; do not regress other required Kubernetes fields.
+- Do not commit changes. Provide the modified files and test changes locally for validation only.
+
+Deliverables at the end of the task
+- A modified K8sValidator in checkov/kubernetes/parser/validatior.py that accepts templated names using double-curly braces.
+- A unit test added to tests/kubernetes/parser/test_k8_valicator.py that demonstrates the bug and confirms the fix:
+  - Valid templated names pass.
+  - Parser retains templates containing templated names.
+  - Invalid non-templated names still fail.
+- Evidence from running the tests that the fix works as intended.

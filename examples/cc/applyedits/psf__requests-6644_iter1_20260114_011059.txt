@@ -1,0 +1,92 @@
+You are given a code repository in the current directory (/testbed).
+
+Bug description:
+Leading slash in URI followed by colon fails. Specifically, a request like:
+requests.get('http://127.0.0.1:10000//v:h')
+should return Response [200], but currently crashes with urllib3.exceptions.LocationParseError: Failed to parse: //v:h.
+
+Root cause and constraints:
+- The crash is triggered in urllib3.util.url.parse_url when it is given a string starting with “//” that includes a colon in the first segment, e.g., “//v:h”. urllib3 interprets this as an authority (host:port) rather than a path, fails to parse, and raises LocationParseError.
+- In Requests, for non-proxied HTTP requests, HTTPAdapter.request_url returns request.path_url and passes it to urllib3’s ConnectionPool.urlopen as the url parameter. If path_url begins with “//”, urllib3 misinterprets it as an authority. This only crashes when the first path segment contains a colon.
+- A previous attempt fixed this by always adding an extra slash for any path starting with “//” (making it “///…”). While this avoids the crash, it changes the request path semantics for cases that don’t actually trigger the crash.
+
+Goal:
+Implement a minimal, targeted fix in Requests so that:
+- The crash is avoided for paths that start with “//” and have a colon in the first segment (before the next slash, query, or fragment).
+- The path is left unchanged in other cases (do not alter semantics unnecessarily).
+- The fix should be localized to the adapter path used by urllib3 (HTTPAdapter.request_url) and should not change proxy behavior.
+
+Important improvements over prior attempts:
+- Add unit tests covering query and fragment delimiters to validate first-segment parsing, and ensure inputs already starting with “///” remain unchanged.
+- Keep the change strictly in the non-proxy branch; add a unit test to show proxy behavior is unchanged.
+- Avoid unnecessary checks (e.g., isinstance(url, str)) and avoid broad path rewrites.
+
+Steps:
+
+1) Write tests to reproduce the bug and guard the fix
+- Add a new test module under tests, for example tests/test_regression_double_slash_colon.py.
+
+Include:
+- Integration test that reproduces the crash and verifies the fix:
+  - Use the repository’s existing local test server/fixture to make a request to a URL like http://127.0.0.1:<port>//v:h and assert response.status_code == 200.
+  - In the Requests repository, the local server fixture is typically available via tests.testserver.Server.basic_response_server. If that symbol isn’t available in this repo, search the tests directory for the existing local HTTP server fixture used by other tests and use the equivalent “basic” echo/response endpoint to serve 200 OK. Do not depend on external network.
+  - The path component in the request must be exactly “//v:h” to exercise the bug.
+
+- Unit-level tests for HTTPAdapter.request_url behavior to ensure minimal, targeted change in the non-proxy path:
+  - Build a PreparedRequest with a URL whose path_url is “//v:h”. Call HTTPAdapter().request_url(prepared_request, proxies=None) and assert it returns “///v:h” (i.e., exactly one extra leading slash added).
+  - Build a PreparedRequest with a URL whose path_url is “//no-colon”. Call the same method and assert it returns “//no-colon” unchanged (i.e., the fix is only applied when the first segment contains a colon).
+  - Additional focused edge cases to validate delimiter handling and non-regression:
+    - “//v:h?x” returns “///v:h?x”.
+    - “//v:h#x” returns “///v:h#x”.
+    - “///v:h” remains “///v:h” unchanged (already safe form should not be modified).
+    - “//seg/with:colon” remains “//seg/with:colon” unchanged (colon occurs in a later segment, not the first).
+  - Proxy behavior unchanged:
+    - Prepare a request with URL “http://example.com//v:h” and call HTTPAdapter().request_url(prepared_request, proxies={'http': 'http://127.0.0.1:3128'}). Assert that the returned value is the full URL (starts with “http://example.com//v:h”) and that no extra slash was injected. This confirms the fix is strictly scoped to the non-proxy branch.
+
+Notes for tests:
+- Keep tests focused on this edge case. Do not modify other tests.
+- Use PreparedRequest from requests to build requests for unit tests. For example, use PreparedRequest(); req.prepare(method='GET', url='http://host//v:h') to derive path_url.
+- For the integration test, ensure the request is non-proxied and goes to the local test server fixture.
+
+2) Locate the appropriate code to fix
+- Open requests/adapters.py and find HTTPAdapter.request_url(self, request, proxies). This method computes the URL string that will be passed into urllib3’s ConnectionPool.urlopen.
+- We only want to modify the non-proxy path, where the method currently returns request.path_url verbatim.
+
+3) Implement a precise, low-impact fix
+- In HTTPAdapter.request_url, in the non-proxy branch:
+  - Set url = request.path_url.
+  - If url starts with “//”, determine the end of the first path segment after the leading slashes by locating the earliest of the next “/”, “?”, or “#”. If none are present, use the end of the string.
+  - Extract first_seg = url[2:end].
+  - If “:” appears in first_seg, prefix a single “/” to url (so “//v:h” becomes “///v:h”). Otherwise, leave url unchanged.
+  - Return the (possibly adjusted) url.
+- Do not modify behavior when proxies are in use. Only the non-proxy branch should contain this workaround.
+- Add a clear inline comment explaining:
+  - Why the extra slash is added only for “//” paths whose first segment contains a colon.
+  - That this avoids urllib3’s parse_url ambiguity, where such paths may be interpreted as an authority.
+  - That this is a targeted workaround intended to be revisited if urllib3 changes its behavior.
+
+Implementation sketch for the non-proxy branch:
+- url = request.path_url
+- if url.startswith("//"):
+  - Compute the earliest index among the next “/”, “?”, “#” occurring at or after position 2; if none, use len(url).
+  - first_seg = url[2:end]
+  - if ":" in first_seg:
+    - url = "/" + url
+- return url
+
+4) Run tests
+- Run the test suite. Ensure your new tests pass and that no existing tests fail.
+- If anything fails, iterate on the implementation until all tests pass.
+
+5) Clean up
+- After validating the fix, delete the temporary test file(s) you added under tests so the repository is left with only the source code changes applied.
+- Do not commit your edits; leave the repository with the source code changes applied and without the temporary tests.
+
+Acceptance criteria:
+- Integration test: requests.get(...) to a path like “//v:h” against the local test server no longer raises LocationParseError and returns a 200 response.
+- Unit tests:
+  - HTTPAdapter.request_url adds exactly one extra slash only when the path starts with “//” and the first segment contains a colon, including when followed by query or fragment (“//v:h?x”, “//v:h#x”).
+  - Paths starting with “//” that do not have a colon in the first segment remain unchanged, including “//no-colon”, “///v:h”, and “//seg/with:colon”.
+  - Proxy behavior is unchanged: in the proxy branch request_url returns the full URL and does not inject slashes.
+- The change is minimal, localized to HTTPAdapter.request_url’s non-proxy code path, and clearly commented.
+- No other behavior changes; all existing tests pass.

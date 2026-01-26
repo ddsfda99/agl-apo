@@ -1,0 +1,49 @@
+diff --git a/bookmarks/tests/test_settings_export_view.py b/bookmarks/tests/test_settings_export_view.py
+index 303f3d9..c815326 100644
+--- a/bookmarks/tests/test_settings_export_view.py
++++ b/bookmarks/tests/test_settings_export_view.py
+@@ -29,8 +29,9 @@ class SettingsExportViewTestCase(TestCase, BookmarkFactoryMixin):
+ 
+         self.assertEqual(response.status_code, 200)
+         self.assertEqual(response["content-type"], "text/plain; charset=UTF-8")
+-        self.assertEqual(
+-            response["Content-Disposition"], 'attachment; filename="bookmarks.html"'
++        self.assertRegex(
++            response["Content-Disposition"],
++            r'^attachment; filename="bookmarks_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.html"$'
+         )
+ 
+         for bookmark in Bookmark.objects.all():
+diff --git a/bookmarks/views/settings.py b/bookmarks/views/settings.py
+index abce0ce..3d6d2fc 100644
+--- a/bookmarks/views/settings.py
++++ b/bookmarks/views/settings.py
+@@ -240,7 +240,8 @@ def bookmark_export(request: HttpRequest):
+         file_content = exporter.export_netscape_html(list(bookmarks))
+ 
+         response = HttpResponse(content_type="text/plain; charset=UTF-8")
+-        response["Content-Disposition"] = 'attachment; filename="bookmarks.html"'
++        timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
++        response["Content-Disposition"] = f'attachment; filename="bookmarks_{timestamp}.html"'
+         response.write(file_content)
+ 
+         return response
+diff --git a/package-lock.json b/package-lock.json
+index ea5f9ee..5dbe78b 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "linkding",
+-  "version": "1.36.0",
++  "version": "1.41.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "linkding",
+-      "version": "1.36.0",
++      "version": "1.41.0",
+       "license": "MIT",
+       "dependencies": {
+         "@hotwired/turbo": "^8.0.6",

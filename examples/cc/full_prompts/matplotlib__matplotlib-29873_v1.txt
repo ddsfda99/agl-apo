@@ -1,0 +1,106 @@
+You are working in a Matplotlib code repository. Your task is to fix a crash in Axes.pie/pyplot.pie when input contains NaN/Inf, and to validate the fix with tests. Follow the workflow steps strictly and incorporate the improvements identified in the evaluation.
+
+Problem summary
+- Matplotlib’s Axes.pie raises a low-level ValueError (“cannot convert float NaN to integer”) when the input x contains NaN/Inf.
+- Desired behavior: filter out non-finite inputs (NaN/Inf) and proceed, or raise a clear, user-friendly ValueError.
+- We will implement filtering non-finite values, while preserving existing error semantics and user-friendly messages for other misuse scenarios.
+
+Strict workflow
+1) Carefully read and understand the requirements.
+2) Write a minimal reproduction test case first to confirm and understand the original failure and lock down expected behavior.
+3) Locate the bug or the place where the new feature should be implemented based on error messages or function names.
+4) Implement the fix or new feature in the appropriate files.
+5) Run the reproduction tests and full test suite to validate your implementation. If tests fail, debug and fix the issues.
+6) Clean up any temporary test files you created and verify the cleanup.
+
+Implementation requirements and guidance
+- Code location: lib/matplotlib/axes/_axes.py, function Axes.pie. The pyplot wrapper in lib/matplotlib/pyplot.py may inherit docstrings, so ensure the behavior is documented in Axes.pie’s docstring.
+- Root cause and approach:
+  - When x contains NaN, the sum sx becomes NaN. Normalization and subsequent calculations propagate NaNs, eventually hitting code paths that attempt to convert NaN to integer.
+  - Fix by filtering out non-finite values (NaN/Inf) from x before normalization, but only after validating labels/explode lengths against the original x length to preserve existing error messages and avoid NumPy boolean index errors.
+- Maintain existing semantics:
+  - Preserve the existing clear error messages for labels/explode length mismatches.
+  - Preserve handling of negative values as currently implemented.
+  - Preserve return semantics (wedges, texts, autotexts).
+  - Do not silently change behavior in unrelated areas (color cycling, hatches, defaults, etc.).
+
+Ordering of checks and filtering (important)
+- Convert input x to a NumPy array of float type and validate dimensionality.
+- Compute finite_mask on the original x without modifying labels/explode yet.
+- If no finite values at all, raise a clear, user-friendly ValueError: "Wedge sizes 'x' must contain at least one finite value".
+- Validate labels/explode against the original x length before applying the finite_mask:
+  - If labels is not None and len(labels) != len(orig_x), raise the existing clear ValueError: "'labels' must be of length 'x', not {len(labels)}".
+  - If explode is not None and len(explode) != len(orig_x), raise the existing clear ValueError: "'explode' must be of length 'x', not {len(explode)}".
+- After length validation, apply the finite_mask to x; and if provided, apply the same mask to labels and explode to keep them aligned.
+- After filtering, check for degenerate cases:
+  - If sum(x) <= 0 after filtering, raise a clear, user-friendly ValueError such as: "Wedge sizes 'x' must sum to a positive value".
+- Continue with the existing pie logic (normalization, angles, wedge creation, defaults, auto labels, etc.).
+
+Suggested pseudocode for the critical section (use actual code in the implementation):
+- orig_x = np.asarray(x, np.float64)
+- validate 1D
+- finite_mask = np.isfinite(orig_x)
+- if not np.any(finite_mask): raise ValueError("Wedge sizes 'x' must contain at least one finite value")
+- if labels is not None and len(labels) != len(orig_x): raise ValueError("'labels' must be of length 'x', not {len(labels)}")
+- if explode is not None and len(explode) != len(orig_x): raise ValueError("'explode' must be of length 'x', not {len(explode)}")
+- x = orig_x[finite_mask]
+- if labels is not None: labels = np.asarray(labels, dtype=object)[finite_mask].tolist()
+- if explode is not None: explode = np.asarray(explode, np.float64)[finite_mask].tolist()
+- if np.sum(x) <= 0: raise ValueError("Wedge sizes 'x' must sum to a positive value")
+- proceed with normalization and plotting
+
+Documentation update
+- Update Axes.pie’s docstring to note that non-finite values (NaN/Inf) in x are filtered out, and that providing data where all values are non-finite or where the sum after filtering is not positive will raise a clear ValueError.
+- If pyplot.pie’s docstring is separate, ensure it reflects the same behavior, or that it inherits from Axes.pie so the updated docstring is visible.
+
+Tests
+Write tests first to reproduce the issue, then expand to validate the fix. Place tests in lib/matplotlib/tests and use pytest. Use a non-interactive backend (Agg). Ensure figures are closed in tests.
+
+Create a test file: lib/matplotlib/tests/test_pie_nan.py with the following tests (describe the assertions; implement actual code accordingly):
+- test_pie_filters_nans_and_aligns_labels_and_explode:
+  - Setup: fig, ax = plt.subplots(); x = [10, 20, np.nan, 40]; labels = ["A", "B", "C", "D"]; explode = [0.1, 0.0, 0.3, 0.2].
+  - Action: wedges, texts, autotexts = ax.pie(x, labels=labels, explode=explode, autopct="%1.1f%%")
+  - Assert: len(wedges) == 3; the labels text strings correspond to ["A", "B", "D"]; explode distances on the wedges correspond to [0.1, 0.0, 0.2] in the same order; no exception raised.
+  - Close the figure.
+- test_pie_raises_on_all_non_finite:
+  - x = [np.nan, np.inf, -np.inf]
+  - Assert that calling ax.pie(x) raises ValueError with message containing "at least one finite value".
+- test_pie_labels_length_mismatch_with_nan_preserves_error_message:
+  - x = [10, np.nan, 20]
+  - labels = ["A", "B"] (wrong length)
+  - Assert that ax.pie(x, labels=labels) raises ValueError matching the existing message: "'labels' must be of length 'x', not 2" (adapt as needed to match exact wording used in the library).
+- test_pie_explode_length_mismatch_with_nan_preserves_error_message:
+  - x = [10, np.nan, 20]
+  - explode = [0.1] (wrong length)
+  - Assert that ax.pie(x, explode=explode) raises ValueError matching the existing message: "'explode' must be of length 'x', not 1".
+- test_pie_raises_on_zero_sum_after_filtering:
+  - x = [0, 0, np.nan]
+  - Assert that ax.pie(x) raises ValueError with message containing "sum to a positive value" (or the exact message you implement).
+- Optional sanity check: test_pie_colors_behavior_with_nan:
+  - Provide a short list of colors to ax.pie alongside NaNs and assert the number of wedges matches the number of finite entries and no error is raised.
+
+Running and validating
+- Step 2: Run the reproduction test before code changes to confirm the original failure (the NaN case should error before the fix).
+- Step 4: Implement the fix in lib/matplotlib/axes/_axes.py following the ordering above. Update the docstring accordingly.
+- Step 5: Rerun the tests:
+  - pytest -q lib/matplotlib/tests/test_pie_nan.py
+  - If passing, run a broader test subset or full test suite if feasible.
+- Debug and iterate until tests pass.
+
+Cleanup
+- Remove the temporary test file you added once validation is complete.
+- Verify cleanup by listing the directory after removal to ensure the file is gone.
+
+Constraints
+- Do not commit your edits; we will commit later.
+- Do not change unrelated behavior; keep existing error messages for other cases intact.
+- Ensure the fix is robust against common misuse scenarios (labels/explode length mismatches) and does not leak low-level NumPy index errors.
+
+Acceptance criteria
+- Axes.pie filters out non-finite x values before normalization and wedge creation.
+- If all x values are non-finite, a clear ValueError is raised.
+- If sum of x after filtering is not positive, a clear ValueError is raised.
+- Labels and explode are validated against the original x length before filtering; mismatches raise the existing, user-friendly ValueErrors.
+- Tests for NaN filtering, all-non-finite error, labels/explode mismatch with NaNs, and zero-sum after filtering pass.
+- Docstring updated to reflect the new behavior.
+- Temporary test file cleanup is verified.

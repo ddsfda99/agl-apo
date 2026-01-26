@@ -1,0 +1,144 @@
+You are working in the Matplotlib repository in the current directory. Your task is to implement a feature that improves the error message shown when array sizes are mismatched in bar() and barh(), so that the message mentions parameter names and their shapes instead of generic “arg N”.
+
+Do not commit your changes.
+
+1) Understand the requirements
+- Current behavior: When array lengths don’t match, Axes.bar() calls numpy.broadcast_arrays on inputs and raises a ValueError originating from NumPy with a generic message that mentions “arg 2” and “arg 3” but not parameter names.
+- Desired behavior: Detect the mismatch in Axes.bar() (which barh() defers to with orientation='horizontal') and re-raise a ValueError that:
+  - Preserves only the initial NumPy phrase: “shape mismatch: objects cannot be broadcast to a single shape.”
+  - Clearly states which named parameters mismatch and shows their shapes, using correct parameter names per orientation.
+  - For horizontal bars (barh), the typical mismatch is between y (labels) and width (data). For vertical bars (bar), it is often between x and height.
+- Important details from previous failures you must address:
+  - Do not reuse NumPy’s full error string because it may include “arg N” text. Use exactly the leading phrase above.
+  - Treat None, scalars, and size-1 arrays/lists as broadcastable scalars (shape ()). This avoids incorrectly flagging default scalar parameters like left or height as mismatches.
+  - Focus mismatch detection on the primary data parameters first (x/height/width/bottom for vertical, left/height/width/y for horizontal). Only include style parameters (linewidth, hatch) if the mismatch is exclusively there.
+
+2) Write reproduction tests
+Create a new test file at lib/matplotlib/tests/test_bar_parameter_mismatch_message.py with the following tests. Ensure figures are cleaned up.
+
+import pytest
+from matplotlib import pyplot as plt
+
+def test_barh_parameter_mismatch_error_message_contains_names():
+    # Missing comma leading to a 2-length labels vs 3-length data mismatch
+    arg_k = ["foo", "bar" "baz"]  # -> ["foo", "barbaz"], length 2
+    arg_n = [1, 2, 3]
+
+    with pytest.raises(ValueError) as excinfo:
+        plt.barh(arg_k, arg_n)
+    msg = str(excinfo.value)
+    # Check base phrasing is kept and that the specific params are named
+    assert "shape mismatch: objects cannot be broadcast to a single shape." in msg
+    assert "Mismatch is between" in msg
+    # For horizontal bars in this scenario, mismatch is between y and width
+    assert "y" in msg and "width" in msg
+    assert "(3,)" in msg
+    assert "(2,)" in msg
+    plt.close("all")
+
+def test_bar_parameter_mismatch_error_message_contains_names():
+    x = [0, 1]       # length 2
+    height = [3, 4, 5]  # length 3
+
+    with pytest.raises(ValueError) as excinfo:
+        plt.bar(x, height)
+    msg = str(excinfo.value)
+    assert "shape mismatch: objects cannot be broadcast to a single shape." in msg
+    assert "Mismatch is between" in msg
+    assert "x" in msg and "height" in msg
+    assert "(2,)" in msg
+    assert "(3,)" in msg
+    plt.close("all")
+
+3) Locate the implementation point
+- Open lib/matplotlib/axes/_axes.py.
+- Find Axes.bar(). barh() defers to bar() with orientation='horizontal', so fixing bar() covers both.
+- Identify where numpy broadcasting happens; it is a call similar to:
+  np.broadcast_arrays(np.atleast_1d(x), height, width, y, linewidth, hatch)
+  Note: In vertical orientation, the fourth argument corresponds to bottom; in horizontal orientation, it corresponds to y.
+
+4) Implement the fix
+- Wrap the np.broadcast_arrays call in try/except ValueError.
+- On ValueError, construct and raise a clearer message that includes named parameters and shapes.
+- Preserve only the initial NumPy phrase. Do not propagate the rest of NumPy’s message to avoid “arg N” leakage. Use:
+  base_msg = "shape mismatch: objects cannot be broadcast to a single shape."
+- Use different parameter name mappings depending on orientation:
+  - For orientation == 'vertical' (bar): values/names for mismatch scanning should be:
+    - Primary: [x, height, width, bottom] with names ["x", "height", "width", "bottom"]
+    - All: [x, height, width, bottom, linewidth, hatch] with names ["x", "height", "width", "bottom", "linewidth", "hatch"]
+  - For orientation == 'horizontal' (barh): values/names for mismatch scanning should be:
+    - Primary: [left, height, width, y] with names ["left", "height", "width", "y"]
+    - All: [left, height, width, y, linewidth, hatch] with names ["left", "height", "width", "y", "linewidth", "hatch"]
+- Shape detection must treat None, scalars, and size-1 arrays or lists as broadcastable “scalar” shape (). Implement a helper:
+  - def get_shape(v):
+      if v is None:
+          return ()
+      arr = np.asarray(v)
+      if arr.ndim == 0 or arr.size == 1:
+          return ()
+      return tuple(arr.shape)
+- Mismatch detection:
+  - Among the primary parameters, find the first pair of non-scalar entries (shape not equal to ()) whose shapes differ; report that pair.
+  - If no mismatch found among primary parameters but broadcasting still failed, fall back to scanning the full list including linewidth and hatch and report the first mismatching non-scalar pair.
+- Raise a new ValueError with the combined message. Do not include NumPy’s “arg N” text. Example for horizontal mismatch:
+  "shape mismatch: objects cannot be broadcast to a single shape. Mismatch is between y with shape (2,) and width with shape (3,)."
+- Suggested structure:
+
+try:
+    np.broadcast_arrays(np.atleast_1d(x), height, width, y, linewidth, hatch)
+except ValueError:
+    base_msg = "shape mismatch: objects cannot be broadcast to a single shape."
+    if orientation == "vertical":
+        vals_all = [x, height, width, bottom, linewidth, hatch]
+        names_all = ["x", "height", "width", "bottom", "linewidth", "hatch"]
+        vals_primary = [x, height, width, bottom]
+        names_primary = ["x", "height", "width", "bottom"]
+    else:
+        vals_all = [left, height, width, y, linewidth, hatch]
+        names_all = ["left", "height", "width", "y", "linewidth", "hatch"]
+        vals_primary = [left, height, width, y]
+        names_primary = ["left", "height", "width", "y"]
+
+    def get_shape(v):
+        if v is None:
+            return ()
+        arr = np.asarray(v)
+        if arr.ndim == 0 or arr.size == 1:
+            return ()
+        return tuple(arr.shape)
+
+    def find_mismatch(vals, names):
+        shapes = [get_shape(v) for v in vals]
+        idxs = [i for i, s in enumerate(shapes) if s != ()]
+        for i in range(len(idxs)):
+            for j in range(i + 1, len(idxs)):
+                a, b = idxs[i], idxs[j]
+                if shapes[a] != shapes[b]:
+                    return names[a], shapes[a], names[b], shapes[b]
+        return None
+
+    info = find_mismatch(vals_primary, names_primary)
+    if info is None:
+        info = find_mismatch(vals_all, names_all)
+
+    if info is not None:
+        n1, s1, n2, s2 = info
+        raise ValueError(f"{base_msg} Mismatch is between {n1} with shape {s1} and {n2} with shape {s2}.")
+    else:
+        raise ValueError(base_msg)
+
+5) Run tests and iterate
+- Run only the new tests first:
+  pytest lib/matplotlib/tests/test_bar_parameter_mismatch_message.py -q
+- If they pass, run a broader subset to ensure no unintended breakage:
+  pytest -k bar -q
+- If failures occur, adjust mismatch detection so that:
+  - The message starts exactly with the required phrase and does not include “arg N”.
+  - Scalars and size-1 arrays are treated as broadcastable scalars.
+  - Primary data parameters are prioritized over style parameters.
+- Do not change unrelated behavior.
+
+6) Clean up
+- Keep the new test file.
+- Close any figures created in tests with plt.close("all") as shown.
+- Do not commit your changes.
