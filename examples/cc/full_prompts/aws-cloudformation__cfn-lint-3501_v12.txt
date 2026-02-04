@@ -1,0 +1,131 @@
+You are an expert Python engineer working on the cfn-lint repository in the current workspace. Fix a bug in rule W2001 (“Parameter not used”) where parameters referenced inside an OpenAPI/Swagger file included via Fn::Transform (AWS::Include) are incorrectly reported as unused.
+
+This prompt is intentionally strict because previous attempts failed by (a) not grounding work in an actual failing test, (b) getting the repo root wrong (/workspace vs /testbed), and (c) chasing unrelated “include” concepts (schema overrides) instead of template transforms and W2001’s real data sources.
+
+Goal
+- When a template contains an AWS::ApiGateway::RestApi Body that uses:
+  Body:
+    Fn::Transform:
+      Name: AWS::Include
+      Parameters:
+        Location: ./api-specification.yml
+- and the included OpenAPI YAML contains CloudFormation intrinsics like Fn::Sub that reference parameters (for example ${PetLambdaArn}, ${UserPoolArn}),
+- then W2001 must NOT flag those Parameters as unused, even if they are not referenced anywhere else in the parent template.
+
+Critical constraints (must follow)
+1) No file I/O in W2001 or any lint rule.
+   - Do not read the Location file from disk inside W2001 (or any rule).
+2) The fix must be hermetic/deterministic in tests and CI.
+3) Do not weaken W2001 globally.
+   - No behavior changes for templates that do not use Fn::Transform Name: AWS::Include.
+4) Security: do not introduce behavior where lint rules read arbitrary template-provided paths.
+5) Do not parse an included OpenAPI document as if it were a full CloudFormation template inside W2001.
+6) Do not update integration snapshots to “accept” new warnings. If an integration test changes, find and fix the unintended behavior.
+
+High-level approach you must take
+- Keep W2001 as a consumer of already-decoded template structure and/or metadata produced by the decode/transform system.
+- Implement AWS::Include handling in the decode/transform layer that already resolves transforms/includes, so that:
+  - either included content is inlined into the template AST before rules run, or
+  - references found in included content are surfaced to rules via existing reference-collection mechanisms (for example transform_pre maps used by W2001).
+- Then W2001 will naturally see those parameter references and stop producing the false positives.
+
+Absolute “do not repeat” lessons from previous failures
+- First establish the real failing behavior with a minimal reproducer test and an assertion that fails before the fix.
+- Do not waste time on unrelated “IncludeResourceTypes/ExcludeResourceTypes” schema override code. That is not AWS::Include.
+- Immediately lock onto the correct repository root. If any file read fails, locate the root by searching for pyproject.toml or src/cfnlint/__init__.py and use that path consistently.
+- Avoid huge globs/greps across the entire repo; search in narrow directories first.
+
+What to deliver
+A) Reproduction test(s) (write these first)
+1) Add a focused unit test that reproduces the false positive:
+   - Template fixture with Parameters PetLambdaArn and UserPoolArn.
+   - A resource AWS::ApiGateway::RestApi with Body using Fn::Transform AWS::Include with a Location pointing to an OpenAPI YAML fixture.
+   - Included OpenAPI fixture contains Fn::Sub that references ${PetLambdaArn} and ${UserPoolArn}.
+   - Expected: W2001 produces NO warnings about those two parameters.
+2) The test must not rely on process CWD.
+   - Use the repository’s established fixture patterns and template-loading utilities so relative paths resolve consistently in the decode/transform layer (not inside the rule).
+3) After your fix, ensure the following integration tests have zero snapshot/count/exit-code change:
+   - test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+   - test/integration/test_quickstart_templates_non_strict.py::test_templates
+   - test/integration/test_quickstart_templates_non_strict.py::test_module_integration
+   Especially ensure no changes for test/fixtures/templates/quickstart/openshift.yaml.
+
+B) Implementation requirements
+1) First, identify exactly how W2001 currently decides whether a parameter is “used”.
+   - Locate W2001 implementation file and document (in your own working notes) which data structures it reads (for example cfn.transform_pre["Ref"], cfn.transform_pre["Fn::Sub"], or any post-transform template search).
+2) Find where Fn::Transform and AWS::Include are processed today.
+   - Search the codebase for “Fn::Transform”, “AWS::Include”, “transform”, and “Location” in decode/template/transform subsystems (not rules).
+   - There should be a place where templates are decoded and transforms are applied or expanded. That is where include reading (if any) belongs.
+3) Implement include expansion or reference extraction there, not in W2001.
+   - Preferred safest option: inline the included YAML into the template AST during decode/transform, so all rules see it naturally.
+   - If full inlining is too risky, implement a minimal reference-extraction mechanism that:
+     - finds occurrences of Ref targets and Fn::Sub variable references within the included object,
+     - merges them into the same precomputed reference maps W2001 already uses.
+   - This must happen in decode/transform stage only.
+4) Path resolution must match existing project behavior.
+   - Reuse existing helper(s) for resolving template-relative paths.
+   - Do not invent new heuristics. Do not rely on CWD.
+5) Exception handling:
+   - Do not swallow broad exceptions silently.
+   - Failures to resolve an include should behave predictably and must not change lint results for templates that do not use AWS::Include.
+
+C) Mandatory validation / regression control
+1) Ensure your new unit test fails before the fix and passes after the fix.
+2) Run at least unit tests plus the three integration tests listed above.
+3) If any integration test changes:
+   - Do NOT update snapshots.
+   - Instead, compare actual vs expected findings (JSON output is best) and fix the root cause so results revert.
+
+Step-by-step process you must follow (do not skip)
+1) Determine repository root path and use it consistently.
+   - If you ever hit “file does not exist”, stop and locate pyproject.toml and src/cfnlint to confirm root.
+2) Create the reproduction test and fixtures first.
+   - Put the template and included OpenAPI YAML under the existing test fixtures structure used by other template-based rule tests.
+   - Ensure Location points to the fixture file in the same way other include/relative-path tests do in this repo.
+3) Identify where W2001 gets “used parameter” references from.
+   - Read the W2001 code and note whether it relies on transform_pre and/or template post-transform.
+   - Also inspect any existing fixtures around parameters and transforms (there are fixtures named used_transform_removed.*). Read them to understand intended behavior, and do not break it.
+4) Identify where transforms/includes are applied and where reference maps are built.
+5) Implement the smallest, most contained change in the transform/decode layer that causes included content references to appear in the data source W2001 already uses.
+   - Do not add new deep scans of the full template for all cases.
+   - Only add behavior triggered when Fn::Transform Name == AWS::Include is present.
+6) Run tests; ensure no regressions; remove any debug artifacts.
+
+Useful sample inputs (for your fixtures)
+Template (api.cfn or api.yaml fixture):
+- Parameters:
+  - PetLambdaArn: Type String
+  - UserPoolArn: Type String
+- Resources:
+  - Api:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Body:
+          Fn::Transform:
+            Name: AWS::Include
+            Parameters:
+              Location: ./api-specification.yml
+
+OpenAPI (api-specification.yml fixture):
+- Include CloudFormation intrinsics inside the OpenAPI structure, for example:
+  - x-amazon-apigateway-integration:
+      uri:
+        Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PetLambdaArn}/invocations
+  - components:
+      securitySchemes:
+        Cognito:
+          x-amazon-apigateway-authorizer:
+            providerARNs:
+              - Fn::Sub: ${UserPoolArn}
+
+Non-negotiable guardrails
+- No rule-level file reads.
+- No new global scanning that changes unrelated templates.
+- No snapshot updates to mask regressions.
+- Do not commit changes.
+
+Deliverable quality bar
+- Correct fix located in transform/decode layer so W2001 becomes correct “naturally”.
+- Deterministic behavior in all test harnesses.
+- Zero integration snapshot regressions (especially openshift.yaml).
+- New focused unit test and fixtures included and passing.

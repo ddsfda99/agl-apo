@@ -1,0 +1,166 @@
+diff --git a/falcon/__init__.py b/falcon/__init__.py
+index 169f8bf..afd170f 100644
+--- a/falcon/__init__.py
++++ b/falcon/__init__.py
+@@ -59,7 +59,6 @@ from falcon.util import BufferedReader
+ from falcon.util import CaseInsensitiveDict
+ from falcon.util import code_to_http_status
+ from falcon.util import Context
+-from falcon.util import create_task
+ 
+ # NOTE(kgriffs): Hosting only because this was previously referenced
+ #   in the docs as falcon.deprecated
+@@ -69,7 +68,6 @@ from falcon.util import ETag
+ from falcon.util import get_argnames
+ from falcon.util import get_bound_method
+ from falcon.util import get_http_status
+-from falcon.util import get_running_loop
+ from falcon.util import http_cookies
+ from falcon.util import http_date_to_dt
+ from falcon.util import http_now
+diff --git a/falcon/asgi/app.py b/falcon/asgi/app.py
+index 92b3ac2..00f6089 100644
+--- a/falcon/asgi/app.py
++++ b/falcon/asgi/app.py
+@@ -39,7 +39,6 @@ from falcon.typing import SinkPrefix
+ from falcon.util.misc import is_python_func
+ from falcon.util.sync import _should_wrap_non_coroutines
+ from falcon.util.sync import _wrap_non_coroutine_unsafe
+-from falcon.util.sync import get_running_loop
+ from falcon.util.sync import wrap_sync_to_async
+ 
+ from ._asgi_helpers import _validate_asgi_scope
+@@ -905,7 +904,7 @@ class App(falcon.app.App):
+         # if not callbacks:
+         #     return
+ 
+-        loop = get_running_loop()
++        loop = asyncio.get_running_loop()
+ 
+         for cb, is_async in callbacks:
+             if is_async:
+diff --git a/falcon/asgi/ws.py b/falcon/asgi/ws.py
+index 3879a6e..686739a 100644
+--- a/falcon/asgi/ws.py
++++ b/falcon/asgi/ws.py
+@@ -598,7 +598,7 @@ class _BufferedReceiver:
+         self._asgi_receive = asgi_receive
+         self._max_queue = max_queue
+ 
+-        self._loop = falcon.get_running_loop()
++        self._loop = asyncio.get_running_loop()
+ 
+         self._messages: Deque[dict] = collections.deque()
+         self._pop_message_waiter = None
+diff --git a/falcon/testing/client.py b/falcon/testing/client.py
+index 79744d8..629fd97 100644
+--- a/falcon/testing/client.py
++++ b/falcon/testing/client.py
+@@ -36,8 +36,6 @@ from falcon.testing.srmock import StartResponseMock
+ from falcon.util import async_to_sync
+ from falcon.util import CaseInsensitiveDict
+ from falcon.util import code_to_http_status
+-from falcon.util import create_task
+-from falcon.util import get_running_loop
+ from falcon.util import http_cookies
+ from falcon.util import http_date_to_dt
+ from falcon.util import to_query_str
+@@ -831,7 +829,7 @@ async def _simulate_request_asgi(
+     resp_event_collector = helpers.ASGIResponseEventCollector()
+ 
+     if not _one_shot:
+-        task_req = create_task(app(http_scope, req_event_emitter, resp_event_collector))
++        task_req = asyncio.create_task(app(http_scope, req_event_emitter, resp_event_collector))
+ 
+         if _stream_result:
+             # NOTE(kgriffs): Wait until the response has been started and give
+@@ -876,13 +874,13 @@ async def _simulate_request_asgi(
+         # NOTE(kgriffs): We assume this is a Falcon ASGI app, which supports
+         #   the lifespan protocol and thus we do not need to catch
+         #   exceptions that would signify no lifespan protocol support.
+-        task_lifespan = get_running_loop().create_task(
++        task_lifespan = asyncio.get_running_loop().create_task(
+             app(lifespan_scope, lifespan_event_emitter, lifespan_event_collector)
+         )
+ 
+         await _wait_for_startup(lifespan_event_collector.events)
+ 
+-        task_req = create_task(app(http_scope, req_event_emitter, resp_event_collector))
++        task_req = asyncio.create_task(app(http_scope, req_event_emitter, resp_event_collector))
+         req_event_emitter.disconnect()
+         await task_req
+ 
+@@ -1108,7 +1106,7 @@ class ASGIConductor:
+         scope = helpers.create_scope_ws(path=path, **kwargs)
+         ws = helpers.ASGIWebSocketSimulator()
+ 
+-        task_req = create_task(self.app(scope, ws._emit, ws._collect))
++        task_req = asyncio.create_task(self.app(scope, ws._emit, ws._collect))
+ 
+         return _WSContextManager(ws, task_req)
+ 
+@@ -2112,7 +2110,7 @@ class _WSContextManager:
+         self._task_req = task_req
+ 
+     async def __aenter__(self):
+-        ready_waiter = create_task(self._ws.wait_ready())
++        ready_waiter = asyncio.create_task(self._ws.wait_ready())
+ 
+         # NOTE(kgriffs): Wait on both so that in the case that the request
+         #   task raises an error, we don't just end up masking it with an
+diff --git a/falcon/util/__init__.py b/falcon/util/__init__.py
+index dfb239c..cb6fb66 100644
+--- a/falcon/util/__init__.py
++++ b/falcon/util/__init__.py
+@@ -45,8 +45,6 @@ from falcon.util.structures import CaseInsensitiveDict
+ from falcon.util.structures import Context
+ from falcon.util.structures import ETag
+ from falcon.util.sync import async_to_sync
+-from falcon.util.sync import create_task
+-from falcon.util.sync import get_running_loop
+ from falcon.util.sync import runs_sync
+ from falcon.util.sync import sync_to_async
+ from falcon.util.sync import wrap_sync_to_async
+@@ -92,6 +90,16 @@ def __getattr__(name: str) -> ModuleType:
+         )
+         return json
+ 
++    if name in ('create_task', 'get_running_loop'):
++        # NOTE(kgriffs): Soft-deprecated in the docs; emit warning in 4.x.
++        import warnings
++        warnings.warn(
++            f'falcon.util.{name} is deprecated; use asyncio.{name} instead.',
++            DeprecatedWarning,
++        )
++        import asyncio  # Lazy import to avoid unconditional dependency here
++        return getattr(asyncio, name)
++
+     # fallback to the default implementation
+     mod = sys.modules[__name__]
+     return ModuleType.__getattr__(mod, name)
+diff --git a/tests/asgi/_asgi_test_app.py b/tests/asgi/_asgi_test_app.py
+index 7dccc8f..56a3445 100644
+--- a/tests/asgi/_asgi_test_app.py
++++ b/tests/asgi/_asgi_test_app.py
+@@ -73,7 +73,7 @@ class Things:
+             safely_values.append((a, b, c))
+ 
+         cms = falcon.util.wrap_sync_to_async(callmesafely, threadsafe=False)
+-        loop = falcon.util.get_running_loop()
++        loop = asyncio.get_running_loop()
+ 
+         # NOTE(caselit): on windows it takes more time so create less tasks
+         # NOTE(vytas): Tests on non-x86 platforms are run using software
+diff --git a/tests/asgi/test_sync.py b/tests/asgi/test_sync.py
+index 83d6d39..fcd67e5 100644
+--- a/tests/asgi/test_sync.py
++++ b/tests/asgi/test_sync.py
+@@ -50,7 +50,7 @@ def test_sync_helpers():
+             cmus = falcon.util.wrap_sync_to_async(callme_unsafely, threadsafe=True)
+             cms = falcon.util.wrap_sync_to_async(callme_safely, threadsafe=False)
+ 
+-            loop = falcon.util.get_running_loop()
++            loop = asyncio.get_running_loop()
+ 
+             # NOTE(kgriffs): create_task() is used here, so that the coroutines
+             #   are scheduled immediately in the order created; under Python

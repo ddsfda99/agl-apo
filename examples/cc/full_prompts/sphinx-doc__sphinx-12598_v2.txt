@@ -1,0 +1,113 @@
+You are an expert in Sphinx’s LaTeX builder. Your task is to fix the regression related to admonitions so that LaTeX builds succeed in the two scenarios below, while strictly preserving existing test expectations and behavior unless you have a failing test that justifies a code change.
+
+Goal
+- Make LaTeX builds succeed when:
+  - A figure directive is nested inside an admonition (e.g., seealso).
+  - A sphinxadmonition appears inside a tabulary/table context.
+
+Critical directives based on prior failures
+- Do not modify or remove any existing tests. Do not add new test roots. Work only within tests/test_builders/test_build_latex.py using the established helpers.
+- Do not change the existing behavior for figures inside admonitions unless a failing test demands it. Specifically, do not replace \begin{figure}[H] with non-floating wrappers like sphinxfigure-in-table for admonitions. Existing tests expect \begin{figure}[H] in admonitions; keep that intact.
+- Keep changes minimal and targeted. Do not introduce unrelated refactors (e.g., removesuffix replacements, visit_reference tweaks) unless a failing test directly requires it.
+- If the baseline already passes and you cannot reproduce the described regressions with a focused new test, do not force behavioral changes. Document the non-reproduction and stop; do not destabilize the suite.
+
+Context and acceptance criteria
+- The issue is “LaTeX regression for admonitions.” After a recent change, nesting a figure inside a seealso admonition causes LaTeX “Not in outer par mode” at \begin{figure}, and putting a sphinxadmonition inside a tabulary leads to “Missing \endgroup inserted.”
+- Acceptance criteria:
+  - A minimal document that contains a seealso directive with an inner figure builds via the LaTeX builder without error. This must preserve the upstream expectation where admonition renders a figure as \begin{figure}[H] unless it is in a context (e.g., table cell) where floats are not permitted.
+  - A sphinxadmonition placed inside a tabulary builds cleanly without grouping errors. No “Missing \endgroup inserted,” and the table closes properly.
+  - Existing tests in tests/test_builders/test_build_latex.py continue to pass unmodified.
+
+Process guardrails and reliability
+- Immediately run the test suite for the LaTeX builder before editing. Use focused, targeted test runs rather than running everything. Start with tests/test_builders/test_build_latex.py.
+- Only add tests if needed and do not alter existing ones. Keep them minimal and consistent with existing patterns. Do not create new test roots.
+- Do not attempt broad file listings like **/*. Instead, use ripgrep/grep for targeted strings: “visit_figure”, “visit_admonition”, “sphinxadmonition”, “sphinxfigure-in-table”, “tabulary”.
+- If you encounter any environment or provider error, do not terminate. Retry the command or use a fallback. Surface errors clearly and continue with static analysis if necessary.
+
+Step-by-step tasks
+
+1) Baseline
+- Run: pytest -q tests/test_builders/test_build_latex.py
+- If it passes, do not change existing tests. Proceed to Step 2 only if you can add focused regression tests that reproduce the described issues without changing current expectations. If you cannot reproduce, stop and document.
+
+2) Add targeted regression tests (only if needed and reproducible, and without changing existing tests)
+- In tests/test_builders/test_build_latex.py, add two minimal tests using existing helpers and patterns in this file. Do not add new test roots or external files.
+
+  a) Figure inside seealso admonition:
+  - Build a minimal source string with:
+    .. seealso::
+    
+       .. figure:: path/to/image.png
+          :width: 50%
+          :align: center
+    
+          A caption inside admonition.
+  - Use a tiny placeholder image generated inline under a temp dir, or mark ignore_missing_images if identical to other tests’ approach.
+  - Build LaTeX and assert:
+    - The .tex contains \begin{figure}[H] inside the admonition, matching current upstream expectations.
+    - The LaTeX build log (if the test harness compiles) does not include “Not in outer par mode.”
+  - If the log cannot be captured without installing LaTeX, restrict to asserting the .tex contains the expected figure[H] and does not emit table-specific wrappers in admonitions.
+
+  b) sphinxadmonition inside tabulary:
+  - Prepare a minimal tabulary with a cell containing a standard admonition (e.g., note or seealso) with some paragraph text.
+  - Build LaTeX. If the test harness supports running LaTeX (using the existing skip_if_stylefiles_notfound or similar patterns), compile and assert that the log does not include “Missing \endgroup inserted,” and \end{tabulary} closes cleanly.
+  - Also assert the generated .tex places admonition content in the table cell without introducing floats. Do not assert for new wrappers unless already used in the table path by Sphinx.
+
+- If these tests cannot reliably reproduce the described issues in the current repository state, do not add them. Instead, document the non-reproduction and skip code changes.
+
+3) Locate the relevant code
+- Inspect:
+  - sphinx/writers/latex.py: visit_figure, depart_figure, visit_admonition and depart_admonition (or specific admonition node visitors like visit_seealso), visit_table, and flags indicating in_table context. Confirm existing special casing for figures in tables (e.g., non-floating path).
+  - sphinx/texinputs/sphinx.sty and included style files (e.g., sphinxlatexadmonitions.sty) for definitions of sphinxadmonition and any wrappers used in tables.
+- Search for “sphinxadmonition”, “figure”, “captionof”, “sphinxfigure-in-table”, and “tabulary”.
+
+4) Implement the fixes (only if a failing test justifies them)
+- Primary fix: ensure figures do not use LaTeX floats in contexts where floats are prohibited, notably inside tables/tabulary. Preserve current behavior for figures inside admonitions outside tables.
+  - In sphinx/writers/latex.py:
+    - Track when you are inside an admonition via a boolean or stack (e.g., self.in_admonition True on visit, reset on depart). Only use this to augment existing table logic, not to alter admonition behavior globally.
+    - Modify visit_figure so that if the figure is inside a table or inside an admonition which itself is inside a table/tabulary, the non-floating code path is used. Reuse the same non-floating code path already used for figures in tables. Do not introduce sphinxfigure-in-table into admonitions outside table contexts. Do not change the existing behavior of \begin{figure}[H] for admonitions unless tests demonstrate failure.
+    - Ensure depart_figure complements this logic.
+  - Do not use wrapfigure inside tables or admonitions-in-tables; keep non-floating as above.
+
+- Secondary fix: make the sphinxadmonition environment robust in tabulary context.
+  - Review sphinx/texinputs/sphinxlatexadmonitions.sty (included by sphinx.sty) for admonition environment begin/end code.
+  - If a failing test indicates “Missing \endgroup inserted,” balance grouping: ensure any \begingroup has a matching \endgroup in the environment end code. Consider adding \ignorespaces at begin and \unskip\ignorespacesafterend at end if appropriate for table cells.
+  - Avoid changing admonition definitions unless a failing test demonstrates the grouping error.
+
+- Do not introduce unrelated changes:
+  - Do not replace str.removesuffix usage unless a failing test shows Python compatibility issues.
+  - Do not change list concatenation to append anywhere unless a failing test points to an actual bug.
+  - Be defensive with self.elements access only if a test points to a KeyError.
+
+5) Re-run tests and iterate
+- Re-run: pytest -q tests/test_builders/test_build_latex.py
+- Ensure:
+  - All pre-existing tests pass unchanged.
+  - Any newly added regression tests pass.
+- If failure persists, inspect the generated .tex and latex logs captured by the test harness. Adjust the writer or sty definitions minimally and retry.
+- Run the broader test suite if needed to confirm no regressions.
+
+6) Clean up
+- Remove any temporary files created by tests if not already handled by pytest fixtures.
+- Ensure no debugging prints remain.
+- Do not commit your edits. We will commit later.
+
+Implementation notes and hints
+- For figures in non-outer-par contexts like tables/tabulary, Sphinx already uses a non-floating approach. Reuse that verbatim. Do not apply the table-specific non-float wrapper to admonitions outside tables.
+- For admonitions, prefer the current behavior expected by upstream tests: figures inside admonitions render as \begin{figure}[H] unless forbidden by the containing context. Your changes must not alter this unless a reproducible failing test demands it.
+- The LaTeX error “Not in outer par mode” indicates a float attempted inside a box/minipage/table cell. Eliminate floats only in those contexts.
+- The LaTeX error “Missing \endgroup inserted” at \end{tabulary} indicates unbalanced grouping. Ensure admonition environments have matched begin/end groups.
+
+What to deliver
+- If you can reproduce the regressions without altering upstream expectations, add two new minimal tests in tests/test_builders/test_build_latex.py that now pass, following the constraints above.
+- Modifications to sphinx/writers/latex.py to:
+  - Track in_admonition context only to correctly avoid floats when the admonition is inside a table/tabulary, while preserving figure[H] in admonitions otherwise.
+- If a failing test requires it, minimal modifications to sphinx/texinputs/sphinxlatexadmonitions.sty to balance grouping for sphinxadmonition inside tabulary.
+- All tests in tests/test_builders/test_build_latex.py remain green, with zero changes to existing tests.
+
+Runbook for debugging if tests still fail
+- If you see “Not in outer par mode,” inspect the generated .tex. Ensure no \begin{figure} appears inside a tabulary cell. If present, confirm your in_admonition signal propagates and triggers the table’s non-float path when inside a table/tabulary.
+- If caption/labeling is off for non-float figures in table cells, compare the table path and reuse its macros and sequencing exactly.
+- If “Missing \endgroup inserted” persists, isolate a minimal LaTeX showing admonition in tabulary and check environment definitions in sphinxlatexadmonitions.sty. Add missing \endgroup or ensure balanced grouping.
+
+Do not commit your edits. We will commit later.

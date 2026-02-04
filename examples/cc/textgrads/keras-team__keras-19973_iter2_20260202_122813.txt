@@ -1,0 +1,80 @@
+### What went wrong (why the agent “failed”)
+
+The agent fixed the *symptom* (symbolic call raising) by removing the `query_shape[-1] != value_shape[-1]` check in `MultiHeadAttention.compute_output_shape()`, but it did **not** ensure the repository test suite still passes. Running the project’s own tests immediately exposed a regression:
+
+- `keras/src/layers/attention/multi_head_attention_test.py::test_shape_mismatch_error_query_value_dim_mismatch` started failing with:
+  - **TypeError: `'int' object is not subscriptable`** at `key_shape[1:-1]`
+
+This happened because that test passes `key_shape=2` (an `int`, intentionally) and previously the method would raise earlier (on query/value last-dim mismatch) before touching `key_shape`. After removing the first guard, the code now reaches slicing `key_shape` and crashes.
+
+So the agent’s change **broke an existing test contract**: even if we think the query/value check was wrong, removing it requires either:
+1) updating the tests to the new intended behavior, **and/or**
+2) making `compute_output_shape()` robust to invalid `key_shape` argument types (raise a clean `ValueError` instead of crashing).
+
+The agent did neither, and then stopped with a narrative response rather than completing the fix.
+
+---
+
+### Specific review findings / mistakes
+
+#### 1) “Fix” was incomplete: changed behavior without updating callers/tests
+- The agent removed a validation check that tests depended on.
+- In Keras, `compute_output_shape()` is part of API behavior for both users and internal shape inference. If you loosen constraints, you must adjust tests and ensure other invariants still hold.
+
+#### 2) Introduced a crash (TypeError) instead of a controlled error
+- `key_shape` is assumed to be a tuple-like shape (`key_shape[1:-1]`).
+- The test passing an `int` is a strong signal that `compute_output_shape()` is expected to **validate types** and raise a meaningful `ValueError`, not crash.
+- The agent even noticed this in the writeup, but did not implement the needed validation.
+
+#### 3) The reproduction test was misleading relative to the layer’s config
+- The test claims “query=16, value=8 should be allowed” and uses `MultiHeadAttention(num_heads=8, key_dim=key_dim // num_heads)` → `key_dim=2`.
+- This doesn’t actually exercise the public `value_dim` parameter. The layer *projects* value anyway, but if the intention is “value feature dim can differ”, the canonical test should include `value_dim` use or explicitly verify behavior across backends.
+
+#### 4) Didn’t run the full relevant test suite until late—and then didn’t fix failures
+- They ran only their temp test first, then later ran `multi_head_attention_test.py` and saw a failure.
+- At that point, the agent should have continued until all tests passed.
+
+#### 5) Confusion around the broken pytest node id
+- They attempted:  
+  `pytest ...::MultiHeadAttentionTest::test_shape_mismatch_error` and got “not found”.
+- This is because it’s a `unittest.TestCase` with parameterized names; the node ids differ. Not fatal, but shows weak pytest targeting literacy.
+
+---
+
+### What needs to change to make tests pass (high-level guidance)
+
+To pass the suite, you need to address both:
+
+1) **Desired behavior:** allow query feature dim != value feature dim (symbolic and eager consistent).
+2) **API robustness:** `compute_output_shape()` must handle invalid `key_shape` inputs gracefully (and/or tests must be updated).
+
+Concretely, you must do *at least one* of these paths:
+
+#### Path A (preferred if behavior change is correct): Update tests + add type validation
+- Update `test_shape_mismatch_error` to no longer expect an error for `query/value` feature mismatch.
+- Keep (or improve) errors for invalid `key_shape` / `value_shape` mismatches.
+- Add explicit type checks in `compute_output_shape()`:
+  - If `key_shape` is not `None` and is not tuple/list/`TensorShape`-like, raise a `ValueError` with a clear message.
+  - Same for `query_shape` / `value_shape` if needed (defensive programming).
+
+This prevents the current TypeError and makes the API stable.
+
+#### Path B: Keep the old check (minimal change) but then you haven’t solved the original inconsistency
+- Reintroducing the check would make tests pass but would re-break the reported bug. So this doesn’t meet the task goal.
+
+---
+
+### Additional subtlety the agent missed
+
+`compute_output_spec()` currently constructs attention score shape as `(batch, num_heads, length, length)` where `length = query.shape[1]`. That assumes S==T for scores, which isn’t always true for cross-attention (query length != value/key length). This isn’t what failed here, but if you’re touching shape logic, it’s worth sanity-checking.
+
+---
+
+### Summary
+
+The agent failed because it:
+- removed a validation guard without updating dependent tests and without adding replacement validation,
+- caused a TypeError in `compute_output_shape()` for invalid `key_shape` types,
+- and stopped after seeing the regression instead of iterating to green tests.
+
+To improve: always run the project’s tests after behavioral changes, update tests coherently with intended API semantics, and ensure shape inference functions validate inputs and raise controlled errors rather than crashing.

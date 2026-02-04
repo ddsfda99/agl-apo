@@ -1,0 +1,143 @@
+You are an expert Matplotlib contributor tasked with fixing a nondeterministic spacing bug in constrained layout. Follow the process steps below exactly, and respect the constraints that caused previous attempts to fail.
+
+Task description to implement:
+[Bug]: Nondeterministic behavior with subplot spacing and constrained layout
+Summary:
+- When constrained layout is enabled and all spacings set to zero (h_pad, w_pad, wspace, hspace, axes.labelpad, tick directions “in”), two subplots intended to be abutted show nondeterministic spacing in notebook display. The result becomes deterministic (zero space) if fig.canvas.draw() is called or when saving the figure.
+
+Goal:
+- Make constrained layout deterministically compute zero spacing between subplots in this example without having to call fig.canvas.draw() manually.
+- Implement a minimal, safe fix in the layout engine.
+- Validate the change with targeted, temporary tests or scripts without permanently adding files to the repository.
+- Do not commit your edits.
+
+Important constraints and improvements based on prior failures:
+- Do not add new test files to the repository. Use a temporary script alongside local changes to validate behavior and remove it when done.
+- Avoid running the full pytest suite; run only targeted tests related to constrained layout if needed.
+- Minimize repository edits. Implement the fix in the appropriate layout engine code and avoid touching unrelated files.
+- If your environment shows a safety reminder about not modifying code after reading files, plan your change first, make the minimal edit without browsing unrelated files, and validate via targeted scripts. Do not introduce broad or exploratory edits.
+- Do not commit any changes.
+
+Steps to complete:
+
+1) Carefully read and understand the requirements
+- The user wants zero spacing between the two axes deterministically, given rcParams set to zero spacing and tight axis limits to avoid tick label spillover. In notebooks, the current behavior is nondeterministic until an explicit draw or save occurs.
+- This strongly suggests that constrained layout measurements depend on draw-state and renderer interactions; doing layout without a stabilized draw can produce slight differences that show up between runs.
+
+2) Write a reproduction test case to confirm the bug or understand expected behavior
+- Create a temporary Python script (not added to the repo) that reproduces the issue. Name it something like /tmp/repro_constrained_layout.py. Example content:
+
+  - Use Matplotlib from the repository in the current directory.
+  - Run the original example code in a loop to detect nondeterminism in spacing positions.
+  - Measure subplot positions via ax.get_position().bounds and compute the gap between right edge of the left axes and left edge of the right axes.
+
+Suggested temporary script:
+
+import matplotlib
+matplotlib.use("Agg")  # use a non-interactive backend to avoid notebook variances
+import matplotlib.pyplot as plt
+import numpy as np
+
+rc = {
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "figure.constrained_layout.use": True,
+    "figure.constrained_layout.h_pad": 0,
+    "figure.constrained_layout.w_pad": 0,
+    "figure.constrained_layout.wspace": 0,
+    "figure.constrained_layout.hspace": 0,
+    "axes.labelpad": 0,
+}
+
+def compute_gap():
+    with plt.style.context(rc):
+        fig, axes = plt.subplots(1, 2, figsize=(6, 2), sharey=True)
+        for ax in axes.flat:
+            ax.set_xlim(-0.1, 1.1)
+        # Trigger a draw to run the layout engine deterministically
+        fig.canvas.draw()
+        pos0 = axes[0].get_position().bounds
+        pos1 = axes[1].get_position().bounds
+        right0 = pos0[0] + pos0[2]
+        left1 = pos1[0]
+        return left1 - right0
+
+gaps = [compute_gap() for _ in range(20)]
+print("Gaps:", gaps)
+print("Max abs gap:", max(abs(g) for g in gaps))
+
+- Before the fix, you may see small nonzero gaps or variability across runs. After the fix, gaps should be consistently zero (or below a tiny numerical tolerance like < 1e-12).
+
+3) Locate the bug or the place for the fix
+- Hypothesis: ConstrainedLayoutEngine performs layout computations based on tight bounding boxes and artist sizes, which can be affected by renderer draw-state. TightLayoutEngine.execute already wraps its size calculations in a renderer._draw_disabled context to stabilize measurements, while ConstrainedLayoutEngine.execute does not.
+- Therefore, constrained layout should also disable actual rendering during layout computation to ensure stable measurements.
+
+- Use grep to find the relevant code:
+  - Search for “ConstrainedLayoutEngine” and its “execute” method. Common location: lib/matplotlib/layout_engine/constrained_layout.py or similar path under lib/matplotlib/layout_engine/.
+  - Also search for TightLayoutEngine.execute to see how it uses renderer._draw_disabled.
+
+Commands to use:
+- grep -R "class ConstrainedLayoutEngine" -n lib
+- grep -R "def execute" -n lib/matplotlib/layout_engine
+- grep -R "_draw_disabled" -n lib
+
+- In ConstrainedLayoutEngine.execute(fig, renderer), identify the code that triggers constrained layout, typically calling a function like do_constrained_layout(fig, renderer, ...) or similar logic to build/update the layoutgrid and compute margins.
+
+4) Implement the fix
+- Wrap the constrained layout execution body inside renderer._draw_disabled to stabilize artist size measurement. This mirrors TightLayoutEngine’s approach and aligns with Figure.draw_without_rendering behavior.
+
+- Minimal patch concept:
+  - In ConstrainedLayoutEngine.execute(self, fig, renderer), add:
+
+with renderer._draw_disabled():
+    # existing constrained layout computation
+    # e.g., make_layoutgrid / do_constrained_layout calls, updates to layoutboxes, etc.
+
+- Do not change behavior outside execute, and do not alter unrelated code paths.
+- Example patch (adjust paths and names to match the actual code you find):
+
+File: lib/matplotlib/layout_engine/constrained_layout.py
+Locate: class ConstrainedLayoutEngine(...):
+  def execute(self, fig, renderer):
+      # existing code that computes constrained layout
+      # Change to:
+      with renderer._draw_disabled():
+          # original body goes here
+
+- If the code obtains the renderer internally, keep using the passed-in renderer argument consistently. Do not introduce extra draws. Do not call fig.canvas.draw() here.
+
+5) Run the reproduction test again to validate your implementation
+- Re-run the temporary script /tmp/repro_constrained_layout.py and inspect the gaps printed. They should be consistently zero or below a negligible tolerance across runs.
+- Additionally, run a few targeted Matplotlib tests related to constrained layout to ensure no regressions. Avoid the full suite.
+
+Suggested targeted tests:
+- pytest lib/matplotlib/tests/test_constrainedlayout.py::test_constrained_layout_simple
+- pytest lib/matplotlib/tests/test_constrainedlayout.py -k "colorbar or suptitle or legend"
+
+- If your environment is slow, start with just the reproduction script. If tests fail, inspect only constrained layout related failures first.
+
+6) Clean up any temporary test files
+- Delete /tmp/repro_constrained_layout.py when done.
+- Do not commit your repository edits. Keep them local only per instructions.
+
+Additional validation and cautions:
+- Interactions to sanity-check manually:
+  - Figures with colorbars, shared axes, suptitles, legends.
+  - Nested GridSpecs and subfigures using constrained layout.
+  - Savefig with bbox_inches="tight" or pad_inches="layout".
+  - Twinned axes (twinx/twiny) and manual set_position adjustments.
+- Confirm that disabling draw via renderer._draw_disabled during layout does not interfere with expected layout computations. Constrained layout should only need artist extents and tightbbox values, which are accessible without actual drawing in a disabled-draw context.
+
+Rationale for the fix:
+- The nondeterminism stems from constrained layout computing artist sizes/tight bounding boxes in a draw-dependent state. Using renderer._draw_disabled ensures those measurements are gathered in a stable, non-rendering pass, making layout deterministic. TightLayoutEngine already does this; aligning ConstrainedLayoutEngine with that approach is consistent and low risk.
+
+Deliverables:
+- Implement the minimal change to ConstrainedLayoutEngine.execute wrapping its body in renderer._draw_disabled.
+- A temporary reproduction script showing deterministic zero spacing.
+- Brief notes of targeted tests you ran and their results.
+- Confirmation of cleanup and no committed changes.
+
+Remember:
+- Do not add files to the repository permanently.
+- Do not run the full pytest suite unless necessary.
+- Do not commit any changes.

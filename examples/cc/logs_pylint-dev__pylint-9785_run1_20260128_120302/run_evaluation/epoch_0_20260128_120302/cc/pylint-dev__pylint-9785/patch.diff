@@ -1,0 +1,50 @@
+diff --git a/pylint/checkers/typecheck.py b/pylint/checkers/typecheck.py
+index 67852d38f..5076a20c2 100644
+--- a/pylint/checkers/typecheck.py
++++ b/pylint/checkers/typecheck.py
+@@ -1609,9 +1609,42 @@ accessed. Python regular expressions are accepted.",
+                 pass
+             elif not overload_function:
+                 # Unexpected keyword argument.
+-                self.add_message(
+-                    "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
+-                )
++                # Special-case typing_extensions.TypeVar which supports
++                # 'default' and 'infer_variance' keyword arguments even when
++                # the stdlib typing.TypeVar does not. Astroid may sometimes
++                # infer typing.TypeVar for calls to typing_extensions.TypeVar
++                # due to runtime guards in typing_extensions, which can lead
++                # to false positives. Avoid emitting E1123 in that scenario.
++                def _is_typing_extensions_typevar(func_node: nodes.NodeNG) -> bool:
++                    # Detect calls of the form "typing_extensions.TypeVar(...)"
++                    if isinstance(func_node, nodes.Attribute):
++                        inferred_mod = safe_infer(func_node.expr)
++                        return (
++                            isinstance(inferred_mod, nodes.Module)
++                            and inferred_mod.name == "typing_extensions"
++                            and func_node.attrname == "TypeVar"
++                        )
++                    # Detect calls of the form "TypeVar(...)" where TypeVar was imported from typing_extensions
++                    if isinstance(func_node, nodes.Name) and func_node.name == "TypeVar":
++                        try:
++                            import_nodes = func_node.lookup(func_node.name)[1]
++                            if import_nodes:
++                                imp = import_nodes[0]
++                                return (
++                                    isinstance(imp, nodes.ImportFrom)
++                                    and imp.modname == "typing_extensions"
++                                )
++                        except IndexError:
++                            return False
++                    return False
++
++                if _is_typing_extensions_typevar(node.func) and keyword in {"default", "infer_variance"}:
++                    # Skip reporting for typing_extensions.TypeVar extra keywords
++                    pass
++                else:
++                    self.add_message(
++                        "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
++                    )
+ 
+         # 3. Match the **kwargs, if any.
+         if node.kwargs:

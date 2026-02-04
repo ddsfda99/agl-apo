@@ -1,0 +1,99 @@
+You are an expert Keras contributor working in a code repository in the current directory.
+
+Task: Fix an inconsistency/bug in `keras.layers.MultiHeadAttention` where `query` and `value` last-dimension mismatches are sometimes allowed for eager tensors but rejected for symbolic `keras.Input()` tensors due to a shape-inference-time assertion. Make behavior consistent, correct, and backend-agnostic without breaking the repository test suite (including hidden tests).
+
+Observed behavior to reproduce
+- Eager (for at least one backend), this often works even when `query.shape[-1] != value.shape[-1]`:
+  - `query: (batch, seq, 16)`, `value: (batch, seq, 8)`
+  - `mha = MultiHeadAttention(num_heads=8, key_dim=2)`
+- Symbolic tensors (`keras.Input`) may raise:
+  - “The last dimension of `query_shape` and `value_shape` must be equal ... 16, 8”
+
+High-level intent / API contract to preserve
+- MultiHeadAttention projects `query`, `key`, and `value` independently. Therefore, `query` and `value` feature dimensions should be allowed to differ as long as the attention dimensions are compatible (batch dims and attention axes).
+- However, do not “fix by deletion”. Ensure:
+  - runtime `call()` works (or errors cleanly) for the same cases that symbolic building allows
+  - shape inference (`compute_output_shape` / `compute_output_spec`) matches actual runtime behavior
+  - hidden tests and other test files continue to pass
+
+Critical constraints learned from prior failures and review
+1) Do not simply delete the validation and stop. You must maintain robust input validation and consistent error behavior.
+2) If you relax/remove a validation check in `compute_output_shape()` or `compute_output_spec()`, you MUST harden these functions against invalid inputs and raise clean `ValueError`s (not `TypeError`).
+   - There is an existing test that calls `compute_output_shape(key_shape=2)` (an `int`). Your code must detect and raise `ValueError` before any slicing/indexing crashes.
+3) Avoid overly strict “shape type” checks.
+   - Do not require `collections.abc.Sequence` specifically; hidden tests may pass `TensorShape` or other shape-like objects.
+   - Prefer existing Keras utilities for shape normalization if available in this repo (search for helpers like `standardize_shape`, `normalize_shape`, or similar). If none, implement minimal, permissive validation:
+     - accept objects that can be converted to a tuple of ints/None via `tuple(x)` OR have `__len__` and `__getitem__` safely
+     - reject plain `int` (and other non-indexable scalars) with a clear `ValueError`
+4) Do not introduce brittle tests.
+   - When asserting error messages, use resilient regex fragments (e.g., `value.*key.*except.*last`) rather than matching a full sentence verbatim.
+5) Do not assume only one test file matters.
+   - Before finalizing, search the repo for references to the old error message and any tests that may encode the previous behavior. Update them as needed.
+6) Ensure consistency across:
+   - `compute_output_shape`
+   - `compute_output_spec`
+   - `build`
+   - `call`
+   If you allow a mismatch in one place but another still rejects it (or crashes), hidden tests may fail.
+
+What you need to deliver
+- Code changes making `MultiHeadAttention` accept `query.shape[-1] != value.shape[-1]` consistently for both eager and symbolic usage, across backends, as long as other required constraints are met.
+- Shape inference must be correct and must not crash on invalid shape objects; raise `ValueError` with helpful messages.
+- Update/extend unit tests accordingly.
+- Keep behavior stable for truly invalid cases (e.g., mismatched non-feature dims where attention requires equality).
+- Ensure all relevant tests pass (at least the MHA test file plus any other impacted tests you discover).
+
+Mandatory step-by-step workflow
+1) Reproduce via tests (required)
+   - Add a focused unit test that builds a symbolic graph:
+     - `query = keras.Input(shape=(seq_len, query_dim))`
+     - `value = keras.Input(shape=(seq_len, value_dim))` where `value_dim != query_dim`
+     - `mha = MultiHeadAttention(num_heads=8, key_dim=2)` (or similar)
+     - call the layer and assert it builds successfully and output shape is correct
+   - Also add (or extend) a test that compares eager vs symbolic behavior if feasible in the repo’s testing style.
+2) Locate the failing assertion
+   - Search for the exact substring:
+     - `The last dimension of `query_shape` and `value_shape` must be equal`
+   - Inspect the implementation file (likely `keras/src/layers/attention/multi_head_attention.py`) for:
+     - `compute_output_shape`
+     - `compute_output_spec`
+     - `build`
+     - `call`
+3) Implement the fix carefully
+   - Remove/relax only the incorrect constraint requiring `query_shape[-1] == value_shape[-1]`.
+   - Preserve and/or improve legitimate constraints (examples: `key` and `value` must match on all dims except last; attention axes constraints; rank checks).
+   - Ensure any error message that remains uses correct formatting (watch for missing f-strings).
+   - Harden shape inference:
+     - Before any indexing/slicing like `key_shape[1:-1]`, validate that `query_shape`, `value_shape`, `key_shape` are shape-like.
+     - If invalid (e.g., `int`), raise `ValueError` with a clear message indicating which argument is invalid and what type was received.
+     - Use existing Keras shape utilities if available; otherwise use a permissive “try to tuple()” approach:
+       - attempt `shape = tuple(shape)` inside a try/except, and raise `ValueError` if conversion fails
+       - explicitly reject scalar integers early
+   - Ensure `compute_output_spec` mirrors `compute_output_shape` behavior and does not reintroduce the rejected mismatch.
+   - Ensure runtime `call` path does not assume query/value dims match; if some internal projection requires a known dim, it should come from the actual tensor shape at build time, not from an equality check.
+4) Update and/or add tests comprehensively
+   - Find the existing test that expected an error for query/value last-dim mismatch (likely in `keras/src/layers/attention/multi_head_attention_test.py`).
+     - Update it to reflect correct behavior (no error) if the old expectation is now wrong.
+   - Add/adjust a test ensuring `compute_output_shape()` raises `ValueError` (not `TypeError`) for invalid `key_shape` types such as an `int`.
+   - Search the repository for the old error message string and update any impacted tests to the new intended behavior.
+5) Run tests
+   - Run at minimum:
+     - `pytest keras/src/layers/attention/multi_head_attention_test.py -q`
+   - Then run any additional tests that reference MHA or shape inference that you find via grep/search (at least the ones affected by your edits).
+   - If failures arise, fix them rather than narrowing the test scope.
+6) Clean up
+   - Do not leave temporary scripts or debug files outside the test suite.
+
+Engineering requirements (to avoid hidden-test failures)
+- Do not introduce backend-specific conditionals unless already present in the file and truly necessary.
+- Keep changes minimal and targeted, but ensure cross-method consistency (shape inference vs runtime).
+- Keep validation permissive for legitimate shape-like objects; only reject truly invalid types (like `int`) with `ValueError`.
+- Avoid brittle error-message assertions in tests; prefer robust regex fragments.
+- If you change public behavior, ensure tests reflect the new contract and that runtime behavior truly supports it (not just shape inference).
+
+Final output requirements
+- Do not commit changes.
+- When finished, summarize briefly:
+  - files modified and key functions changed
+  - tests added/modified
+  - commands run and outcomes (include test command output status)

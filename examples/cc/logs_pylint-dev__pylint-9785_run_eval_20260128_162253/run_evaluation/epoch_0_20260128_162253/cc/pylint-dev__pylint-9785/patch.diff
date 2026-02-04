@@ -1,0 +1,82 @@
+diff --git a/pylint/checkers/typecheck.py b/pylint/checkers/typecheck.py
+index 67852d38f..d8074fa8f 100644
+--- a/pylint/checkers/typecheck.py
++++ b/pylint/checkers/typecheck.py
+@@ -1433,11 +1433,54 @@ accessed. Python regular expressions are accepted.",
+             )
+ 
+     # pylint: disable = too-many-branches, too-many-locals, too-many-statements
++    def _is_te_typevar_call(
++        self,
++        node: nodes.Call,
++        called: CallableObjects | None,
++        original_called_qname: str | None,
++    ) -> bool:
++        """Return True if node is a call to typing_extensions.TypeVar.
++
++        We need robust detection because astroid can infer different structures
++        depending on typing_extensions version and import style.
++        Cases handled:
++        - The originally inferred callable has qname "typing_extensions.TypeVar".
++        - The resolved callable is a FunctionDef whose parent is a ClassDef with
++          qname "typing_extensions.TypeVar" (e.g., __init__ of the TypeVar class).
++        - The call is via attribute access where base module is typing_extensions,
++          e.g., ``typing_extensions.TypeVar(...)`` or ``te.TypeVar(...)``.
++        """
++        if original_called_qname == "typing_extensions.TypeVar":
++            return True
++
++        try:
++            if isinstance(called, nodes.FunctionDef) and isinstance(called.parent, nodes.ClassDef):
++                parent_qname = called.parent.qname()
++                if parent_qname == "typing_extensions.TypeVar":
++                    return True
++        except Exception:
++            # Be permissive; if we can't inspect, fall through.
++            pass
++
++        # Attribute-based detection: te.TypeVar(...)
++        if isinstance(node.func, nodes.Attribute) and node.func.attrname == "TypeVar":
++            base = safe_infer(node.func.expr)
++            if isinstance(base, nodes.Module):
++                # Prefer qname if available, else name
++                base_qname = base.qname() if hasattr(base, "qname") else base.name
++                if base_qname == "typing_extensions":
++                    return True
++
++        return False
++
+     def visit_call(self, node: nodes.Call) -> None:
+         """Check that called functions/methods are inferred to callable objects,
+         and that passed arguments match the parameters in the inferred function.
+         """
+         called = safe_infer(node.func)
++        original_called_qname = (
++            called.qname() if called is not None and hasattr(called, "qname") else None
++        )
+ 
+         self._check_not_callable(node, called)
+ 
+@@ -1609,9 +1652,19 @@ accessed. Python regular expressions are accepted.",
+                 pass
+             elif not overload_function:
+                 # Unexpected keyword argument.
+-                self.add_message(
+-                    "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
+-                )
++                # Special-case typing_extensions.TypeVar which accepts extra keywords
++                # like "default" (PEP 696) and "infer_variance" (PEP 695) that
++                # astroid may not reflect in the signature.
++                if self._is_te_typevar_call(node, called, original_called_qname) and keyword in {
++                    "default",
++                    "infer_variance",
++                }:
++                    # Skip emitting E1123 for these keywords.
++                    pass
++                else:
++                    self.add_message(
++                        "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
++                    )
+ 
+         # 3. Match the **kwargs, if any.
+         if node.kwargs:

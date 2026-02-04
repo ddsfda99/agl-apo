@@ -1,0 +1,27 @@
+diff --git a/pylint/checkers/typecheck.py b/pylint/checkers/typecheck.py
+index 67852d38f..7913f9895 100644
+--- a/pylint/checkers/typecheck.py
++++ b/pylint/checkers/typecheck.py
+@@ -1609,9 +1609,19 @@ accessed. Python regular expressions are accepted.",
+                 pass
+             elif not overload_function:
+                 # Unexpected keyword argument.
+-                self.add_message(
+-                    "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
+-                )
++                # Allow PEP 696/695 keywords for typing/typing_extensions TypeVar.
++                allow_typevar_pep_keywords = False
++                if isinstance(called, nodes.FunctionDef) and isinstance(called.parent, nodes.ClassDef):
++                    try:
++                        typevar_qname = called.parent.qname()
++                    except Exception:
++                        typevar_qname = None
++                    if typevar_qname in {"typing.TypeVar", "typing_extensions.TypeVar"} and keyword in {"default", "infer_variance"}:
++                        allow_typevar_pep_keywords = True
++                if not allow_typevar_pep_keywords:
++                    self.add_message(
++                        "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
++                    )
+ 
+         # 3. Match the **kwargs, if any.
+         if node.kwargs:

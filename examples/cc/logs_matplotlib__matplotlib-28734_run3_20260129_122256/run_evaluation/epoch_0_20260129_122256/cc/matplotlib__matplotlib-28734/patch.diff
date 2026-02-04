@@ -1,0 +1,67 @@
+diff --git a/lib/matplotlib/_constrained_layout.py b/lib/matplotlib/_constrained_layout.py
+index b960f363e9..be0e7acacc 100644
+--- a/lib/matplotlib/_constrained_layout.py
++++ b/lib/matplotlib/_constrained_layout.py
+@@ -288,9 +288,17 @@ def compress_fixed_aspect(layoutgrids, fig):
+     layoutgrids[fig].edit_margin_min('left', w)
+     layoutgrids[fig].edit_margin_min('right', w)
+ 
+-    h = np.sum(extrah) / 2
+-    layoutgrids[fig].edit_margin_min('top', h)
+-    layoutgrids[fig].edit_margin_min('bottom', h)
++    # For vertical extra space due to fixed-aspect compression, prefer adding
++    # it below the subplots if a suptitle is present so the suptitle remains
++    # visually close to the plots. Otherwise, split evenly as before.
++    h_total = np.sum(extrah)
++    if (getattr(fig, "_suptitle", None) is not None and
++            fig._suptitle.get_in_layout()):
++        layoutgrids[fig].edit_margin_min('bottom', h_total)
++    else:
++        h = h_total / 2
++        layoutgrids[fig].edit_margin_min('top', h)
++        layoutgrids[fig].edit_margin_min('bottom', h)
+     return layoutgrids
+ 
+ 
+diff --git a/lib/matplotlib/tests/test_constrainedlayout.py b/lib/matplotlib/tests/test_constrainedlayout.py
+index 4dc4d9501e..15c9f41e50 100644
+--- a/lib/matplotlib/tests/test_constrainedlayout.py
++++ b/lib/matplotlib/tests/test_constrainedlayout.py
+@@ -695,3 +695,37 @@ def test_layout_leak():
+     gc.collect()
+     assert not any(isinstance(obj, mpl._layoutgrid.LayoutGrid)
+                    for obj in gc.get_objects())
++
++
++def test_compressed_suptitle_spacing():
++    """
++    Adding a suptitle to a compressed layout should not introduce extra
++    spacing between the suptitle and the top row of plots. Any additional
++    vertical space due to compression should be placed below the subplots.
++
++    We compare the gap between the suptitle and the top axes in 'compressed'
++    versus 'constrained' layouts and ensure compressed is not larger.
++    """
++    # Helper to build figure
++    def build(fig_layout):
++        fig, (ax0, ax1) = plt.subplots(
++            nrows=2, figsize=(4, 10), layout=fig_layout,
++            gridspec_kw={"height_ratios": (1 / 4, 3 / 4), "hspace": 0}
++        )
++        ax0.axis("equal")
++        ax0.set_box_aspect(1/3)
++        ax1.axis("equal")
++        ax1.set_box_aspect(1)
++        fig.suptitle("Title")
++        fig.draw_without_rendering()
++        renderer = fig.canvas.get_renderer()
++        supbbox = fig._suptitle.get_tightbbox(renderer)
++        supbbox_fig = fig.transFigure.inverted().transform_bbox(supbbox)
++        gap = ax0.get_position().y1 - supbbox_fig.y0
++        return fig, gap
++
++    fig_constrained, gap_constrained = build("constrained")
++    fig_compressed, gap_compressed = build("compressed")
++
++    # Compare absolute gap sizes (distance between suptitle and top axes).
++    assert abs(gap_compressed) <= abs(gap_constrained) + 1e-3

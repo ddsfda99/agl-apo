@@ -1,0 +1,68 @@
+You are given a code repository in the current directory.
+
+## Task
+Add first-class support for the cookie attribute **`Partitioned`** in `Response.set_cookie()` (Falcon’s own cookie/header generator), in a way that is compatible with current Python versions and Falcon’s existing cookie implementation.
+
+Chrome is rolling out third-party cookie restrictions; cookies intended for third-party contexts may require the **`Partitioned`** attribute (CHIPS). CPython is adding support in 3.13 (see issue/PR below), but Falcon can’t rely on stdlib behavior alone because Falcon generates cookie headers itself.
+
+References:
+- CPython issue: https://github.com/python/cpython/issues/112713
+- CPython PR: https://github.com/python/cpython/pull/112714
+- CHIPS / Partitioned: https://developers.google.com/privacy-sandbox/3pcd/chips
+- Cookie countdown blog: https://developers.google.com/privacy-sandbox/blog/cookie-countdown-2024jan
+
+## Requirements
+1. **`Response.set_cookie()` must accept a new kwarg**: `partitioned` (boolean or None).
+   - If `partitioned=True`, emit the `Partitioned` attribute in the `Set-Cookie` header for that cookie.
+   - If `partitioned=False`, do not emit it.
+   - If `partitioned is None`, preserve existing behavior unless requirement (2) applies.
+
+2. **Automatic behavior (only if required by the codebase’s expectations/tests):**
+   - If `partitioned is None` and the cookie is being set with `same_site='None'` (case-insensitive), then automatically enable Partitioned (equivalent to `partitioned=True`).
+   - Important: This auto-enable decision must be based on the **normalized/validated** `same_site` value (after Falcon’s existing lowercasing/validation/capitalization logic), not the raw user input.
+
+3. **Ordering bug avoidance (critical):**
+   - Previous attempts failed because setting `self._cookies[name]['partitioned'] = True` too early was later undone by subsequent operations in `set_cookie()` (notably the `same_site` normalization block), resulting in the stored morsel showing `partitioned: ''` and the rendered header missing `Partitioned`.
+   - Therefore: **apply the `partitioned` assignment only after `same_site` has been normalized and written to the morsel**, i.e., near the end of `set_cookie()` after all other attribute assignments that might mutate/reset reserved/flag attributes.
+
+4. **Backport/compatibility approach:**
+   - Falcon may already backport other cookie attributes (e.g., SameSite) by updating `http.cookies.Morsel._reserved`. Follow that established style.
+   - Avoid brittle hacks:
+     - Do not implement substring scanning of header values to “detect” Partitioned.
+     - Do not add complicated workarounds in the testing client to compensate for headers missing `Partitioned`.
+   - Keep any stdlib monkey-patching minimal and consistent with Falcon’s existing approach. If you must patch `Morsel._reserved` to render `Partitioned`, do it in the same place and style as Falcon’s existing attribute backports. Avoid relying on internal/private stdlib details beyond what Falcon already uses.
+
+5. **Tests:**
+   - Add a focused reproduction test that fails on current main and passes after your fix.
+   - The test must assert that the actual `Set-Cookie` header includes `Partitioned` when expected.
+   - Prefer adding a new test endpoint/resource or a dedicated test rather than modifying existing tests in a way that changes unrelated semantics (e.g., don’t change an existing handler’s `secure` settings just to make Partitioned appear).
+   - Do not “fix” failures by teaching the test client to guess Partitioned; the source of truth is the `Set-Cookie` header that Falcon generates.
+
+6. **Secure + SameSite=None note:**
+   - Real browsers require `Secure` when `SameSite=None`. Falcon may or may not enforce this today. Do not introduce unrelated behavior changes unless the repository already enforces it. Your tests should include `secure=True` when using `same_site='None'`.
+
+## Implementation guidance (what to do)
+Follow these steps:
+1. Read and understand Falcon’s current cookie/header generation path:
+   - Locate `Response.set_cookie()` and how Falcon turns cookies into `Set-Cookie` headers.
+   - Identify where SameSite is handled and any existing reserved attribute backports.
+2. Write a reproduction test:
+   - Case A: `resp.set_cookie(..., same_site='None', secure=True, partitioned=True)` emits `Partitioned`.
+   - Case B (if auto-enable is required): `resp.set_cookie(..., same_site='None', secure=True)` emits `Partitioned` due to auto-enable.
+   - Ensure the test checks the actual header string (e.g., contains `Partitioned` as an attribute).
+3. Implement:
+   - Add `partitioned` kwarg and document it in the docstring as appropriate.
+   - Patch `Morsel` reserved attribute mapping if Falcon needs it to render `Partitioned`.
+   - In `set_cookie()`, apply `partitioned` at the correct time:
+     - Normalize/validate same_site first and set `samesite` on the morsel.
+     - Then decide on auto-enable (based on normalized same_site).
+     - Then set `self._cookies[name]['partitioned'] = True` if needed.
+4. Run tests; if failures occur, debug the header generation rather than adding parsing hacks.
+5. Remove any temporary debug/test files you created.
+
+## Non-goals / avoid
+- Do not add brittle parsing in `falcon.testing` that scans for the word “partitioned”.
+- Do not modify unrelated behavior or existing test resources unless unavoidable.
+- Do not commit changes.
+
+Now implement the feature with correct ordering and robust test coverage.

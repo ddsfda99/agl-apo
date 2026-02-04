@@ -1,0 +1,44 @@
+diff --git a/lib/matplotlib/axis.py b/lib/matplotlib/axis.py
+index f258fa904c..5bec7aac41 100644
+--- a/lib/matplotlib/axis.py
++++ b/lib/matplotlib/axis.py
+@@ -1053,8 +1053,7 @@ class Axis(martist.Artist):
+             )
+         return self._translate_tick_params(self._minor_tick_kw, reverse=True)
+ 
+-    @staticmethod
+-    def _translate_tick_params(kw, reverse=False):
++    def _translate_tick_params(self, kw, reverse=False):
+         """
+         Translate the kwargs supported by `.Axis.set_tick_params` to kwargs
+         supported by `.Tick._apply_params`.
+@@ -1096,10 +1095,25 @@ class Axis(martist.Artist):
+             'labeltop': 'label2On',
+         }
+         if reverse:
+-            kwtrans = {
+-                oldkey: kw_.pop(newkey)
+-                for oldkey, newkey in keymap.items() if newkey in kw_
+-            }
++            # When translating back, choose axis-appropriate synonyms
++            # for ambiguous keys (tick1On/tick2On, label1On/label2On).
++            kwtrans = {}
++            # Axis-specific naming for the first/second tick and label.
++            is_x = getattr(self, 'axis_name', None) == 'x'
++            # Handle simple reverse mappings.
++            simple_reverse = {'size': 'length', 'tickdir': 'direction', 'labelrotation': 'rotation'}
++            for newkey, oldkey in simple_reverse.items():
++                if newkey in kw_:
++                    kwtrans[oldkey] = kw_.pop(newkey)
++            # Handle ambiguous boolean flags using axis context.
++            if 'tick1On' in kw_:
++                kwtrans['bottom' if is_x else 'left'] = kw_.pop('tick1On')
++            if 'tick2On' in kw_:
++                kwtrans['top' if is_x else 'right'] = kw_.pop('tick2On')
++            if 'label1On' in kw_:
++                kwtrans['labelbottom' if is_x else 'labelleft'] = kw_.pop('label1On')
++            if 'label2On' in kw_:
++                kwtrans['labeltop' if is_x else 'labelright'] = kw_.pop('label2On')
+         else:
+             kwtrans = {
+                 newkey: kw_.pop(oldkey)

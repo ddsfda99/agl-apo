@@ -1,0 +1,37 @@
+diff --git a/babel/localedata.py b/babel/localedata.py
+index 2aabfd1..96f38fa 100644
+--- a/babel/localedata.py
++++ b/babel/localedata.py
+@@ -160,11 +160,28 @@ def load(name: os.PathLike[str] | str, merge_inherited: bool = True) -> dict[str
+                         parent = "root" if len(parts) == 1 else "_".join(parts[:-1])
+                 data = load(parent).copy()
+             filename = resolve_locale_filename(name)
+-            with open(filename, 'rb') as fileobj:
+-                if name != 'root' and merge_inherited:
+-                    merge(data, pickle.load(fileobj))
++            try:
++                with open(filename, 'rb') as fileobj:
++                    if name != 'root' and merge_inherited:
++                        merge(data, pickle.load(fileobj))
++                    else:
++                        data = pickle.load(fileobj)
++            except FileNotFoundError:
++                # If a locale with a modifier (e.g. "ja_JP@mod") does not have
++                # its own data file, fall back to the base locale without the
++                # modifier (e.g. "ja_JP"). This prevents a FileNotFoundError
++                # during data loading while still allowing modifiers to be
++                # retained in the Locale identifier.
++                base = name.partition('@')[0]
++                if base != name:
++                    filename = resolve_locale_filename(base)
++                    with open(filename, 'rb') as fileobj:
++                        if name != 'root' and merge_inherited:
++                            merge(data, pickle.load(fileobj))
++                        else:
++                            data = pickle.load(fileobj)
+                 else:
+-                    data = pickle.load(fileobj)
++                    raise
+             _cache[name] = data
+         return data
+     finally:

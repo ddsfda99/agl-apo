@@ -1,0 +1,110 @@
+You are given a code repository in the current directory.
+
+## Task
+Add first-class support for the cookie attribute `Partitioned` in `Response.set_cookie()` (Falcon’s own cookie/header generator), compatible with current Python versions and Falcon’s existing cookie implementation.
+
+Chrome is rolling out third-party cookie restrictions; cookies intended for third-party contexts may require the `Partitioned` attribute (CHIPS). CPython is adding support in 3.13, but Falcon can’t rely on stdlib behavior alone because Falcon generates cookie headers itself.
+
+References:
+- CPython issue: https://github.com/python/cpython/issues/112713
+- CPython PR: https://github.com/python/cpython/pull/112714
+- CHIPS / Partitioned: https://developers.google.com/privacy-sandbox/3pcd/chips
+- Cookie countdown blog: https://developers.google.com/privacy-sandbox/blog/cookie-countdown-2024jan
+
+---
+
+## Critical constraints from previous failures (read carefully)
+1. **Falcon in this repo is Cythonized.** The runtime `falcon.response.Response.set_cookie` is a `cyfunction` from a compiled `.so`, not the pure-Python `falcon/response.py`.  
+   Therefore: **do not implement the feature by editing only `falcon/response.py`**. You must locate and modify the Cython source that produces the `.so` (likely `falcon/response.pyx` or similar), or otherwise modify the canonical implementation actually imported at runtime.
+
+2. **Do not rely on import-time monkey patches.** Previous attempts to monkey-patch in `falcon.util` did not take effect due to import order and/or Cython method constraints. Implement the feature in the canonical source instead.
+
+3. **Tests must not assume `Result.headers['set-cookie']` exists.** Falcon’s test client omits cookies from `result.headers`; cookies are exposed via `result.cookies`. If you need the raw header string, pull it from a raw header list in the test harness (only if already supported). Prefer asserting via `result.cookies` and/or any existing cookie parsing utilities in the tests.
+
+4. **Ordering bug avoidance is critical.** Previous attempts set `self._cookies[name]['partitioned'] = True` too early and later operations reset it (e.g., SameSite normalization).  
+   Therefore: **apply `partitioned` only after SameSite has been normalized and written to the morsel**, near the end of `set_cookie()` after all other attribute assignments that might mutate/reset reserved/flag attributes.
+
+---
+
+## Requirements
+1. `Response.set_cookie()` must accept a new kwarg: `partitioned` (boolean or None).
+   - If `partitioned=True`, emit the `Partitioned` attribute in the `Set-Cookie` header for that cookie.
+   - If `partitioned=False`, do not emit it.
+   - If `partitioned is None`, preserve existing behavior unless requirement (2) applies.
+
+2. Automatic behavior (only if required by the codebase’s expectations/tests):
+   - If `partitioned is None` and the cookie is being set with `same_site='None'` (case-insensitive), then automatically enable Partitioned (equivalent to `partitioned=True`).
+   - This auto-enable decision must be based on the **normalized/validated** `same_site` value (after Falcon’s existing lowercasing/validation/capitalization logic), not the raw user input.
+   - Do not invent other auto-rules (e.g., requiring Secure) unless Falcon already enforces them; tests should set `secure=True` when `same_site='None'`.
+
+3. Backport/compatibility approach:
+   - Falcon may already backport cookie attributes by updating `http.cookies.Morsel._reserved` (e.g., `SameSite`). Follow that style.
+   - Keep any stdlib patching minimal and consistent with existing Falcon approach. Avoid new hacks.
+
+4. Tests:
+   - Add a focused regression test that fails on current main and passes after your fix.
+   - The test must assert that the generated cookie includes `Partitioned` when expected.
+   - Prefer using existing cookie testing patterns (likely `result.cookies[...]`) rather than `result.headers['set-cookie']`.
+   - Do not “fix” by teaching the test client to guess Partitioned; the source of truth is Falcon’s generated cookie output.
+
+---
+
+## Implementation plan you must follow (do these steps explicitly)
+### Step 0: Confirm the real runtime implementation location
+Before changing code, run quick checks to confirm what file is imported:
+- `python -c "import falcon, inspect; import falcon.response; print(falcon.response.__file__); print(falcon.response.Response.set_cookie); print(type(falcon.response.Response.set_cookie))"`
+If it points to a compiled module, **find the corresponding Cython source** in the repo (search for `set_cookie` implementation and/or `Response` in `.pyx`, `.pxi`, etc.). Implement the change there.
+
+### Step 1: Locate Falcon’s cookie generation path
+- Find `Response.set_cookie()` in the Cython source.
+- Identify how it uses `http.cookies.Morsel` and how Falcon serializes cookies into headers.
+- Find where `SameSite` is normalized/validated and written to the morsel.
+- Find where Falcon patches `Morsel._reserved` today (if it does) for attributes like `SameSite`. This is the likely place to add `Partitioned`.
+
+### Step 2: Add the `Partitioned` attribute support in the cookie serializer
+- Ensure `Partitioned` is recognized as a reserved attribute by `Morsel` so it will render when set.
+  - Follow Falcon’s existing style: patch `http.cookies.Morsel._reserved` once in the appropriate Falcon module initialization path already used for other cookie attribute backports.
+  - Use the correct casing: `Partitioned` in the final header attribute.
+- Add `partitioned` kwarg to `set_cookie` signature in the canonical implementation used at runtime (Cython).
+- Implement logic:
+  - Normalize/validate `same_site` as Falcon already does and set it on the morsel.
+  - Only after that, decide whether `partitioned` should be enabled:
+    - If `partitioned is True`: set the morsel attribute so it renders `Partitioned`.
+    - If `partitioned is False`: ensure it is not set.
+    - If `partitioned is None`: keep existing behavior, unless the repository’s tests/expectations require auto-enable for normalized SameSite=None; if implementing auto-enable, do it based on the normalized SameSite value (not raw input).
+  - Apply the assignment near the end of `set_cookie()` to avoid being overwritten by later operations.
+
+### Step 3: Add a regression test that matches Falcon’s testing model
+- Do not use `result.headers['set-cookie']` because cookies are not included there.
+- Follow existing patterns in `tests/test_cookies.py` (or similar):
+  - Use `result.cookies` to access parsed cookies and their attributes if supported.
+  - If existing cookie parsing does not expose the Partitioned flag, assert against the raw cookie output using an existing raw-header capture facility already present in the tests. Do not add brittle substring scanning in production code; test-only access to the raw header is OK if it already exists in the harness.
+- Required test case (explicit enable):
+  - Endpoint sets cookie with `same_site='None'`, `secure=True`, `partitioned=True`.
+  - Assert the serialized cookie contains the `Partitioned` attribute.
+- Optional test case (auto-enable):
+  - Only add if the suite indicates this behavior is expected/required.
+  - Endpoint sets cookie with `same_site='None'`, `secure=True`, `partitioned` omitted.
+  - Assert `Partitioned` is present due to auto-enable.
+
+### Step 4: Run tests and validate end-to-end
+- Ensure the new kwarg is accepted at runtime (no `TypeError`).
+- Ensure `Partitioned` is actually rendered in the cookie output.
+- Ensure no unrelated behavior changes.
+
+---
+
+## Non-goals / avoid
+- Do not implement substring scanning of headers in production to “detect” Partitioned.
+- Do not add import-time monkey patches in unrelated modules to override Cython methods.
+- Do not modify unrelated cookie semantics (e.g., enforce Secure for SameSite=None) unless the repo already does.
+- Do not change existing tests’ meaning just to make Partitioned appear.
+
+---
+
+## Deliverables
+- Code changes implementing `partitioned` in the canonical (runtime) `Response.set_cookie` implementation.
+- Minimal, focused tests proving `Partitioned` is emitted when requested (and auto-enabled only if required by existing expectations).
+- Keep changes localized and consistent with Falcon’s existing cookie attribute backport pattern.
+
+Now implement the feature correctly (in the Cythonized Response implementation), with correct ordering, and add robust tests that validate cookie output using Falcon’s established testing approach.

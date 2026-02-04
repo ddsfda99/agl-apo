@@ -1,0 +1,81 @@
+Summary of what happened
+- The agent correctly identified the W2001 rule (Parameters not used) and the path where that logic lives: src/cfnlint/rules/parameters/Used.py. They also inspected Template internals (search_deep_keys, transform_pre) and context transforms.
+- They created a reproduction: a CloudFormation template with AWS::ApiGateway::RestApi using Fn::Transform Name: AWS::Include to bring in an OpenAPI spec that references parameters via Fn::Sub. They added a unit test expecting W2001 not to flag those parameters.
+- To make that test pass, they modified the Used rule to suppress W2001 entirely whenever any RestApi Body uses AWS::Include. The single new unit test passed.
+- Running the full test suite showed integration tests failures (quickstart templates) with mismatched expected counts/exit code. The agent assumed those were unrelated and stopped there.
+
+Key problems and why the agent failed
+1. Overly broad suppression logic
+   - Change made: In Used.match, as soon as any AWS::ApiGateway::RestApi has Properties.Body Fn::Transform Name: AWS::Include, the code skips emitting W2001 for all parameters not found by Ref/Sub anywhere in the template.
+   - Why this is problematic:
+     - It disables W2001 globally for the entire template, not just the parameters actually used inside the included OpenAPI spec. That creates false negatives by allowing legitimately unused parameters to pass silently whenever a RestApi uses AWS::Include.
+     - There is no scoping to the specific RestApi instance or to parameters plausibly used by the include; it is a blanket suppression.
+     - This approach is fragile and can mask real issues in templates that happen to include an API spec.
+
+2. Insufficient test coverage and validation
+   - They added one “positive” unit test that verifies the suppression in the include case, but did not add negative tests to assert:
+     - W2001 still fires for unused parameters when there is NO AWS::Include.
+     - W2001 still fires in templates that use AWS::Include but have parameters that are not referenced in the included spec (important if we implement a more precise approach).
+     - Non-ApiGateway uses of Fn::Transform (e.g., other resource types) aren’t incorrectly suppressed.
+   - They did not isolate the integration failures to confirm whether their change impacted those tests. Assuming unrelated and proceeding is risky for a core rule change.
+
+3. Not investigating integration failures
+   - The full test run showed three integration tests failing (quickstart templates), with counts and exit codes deviating from expected. Although the failure messages weren’t W2001-related, it’s still necessary to run the failing tests individually before and after the change to verify if the change contributed.
+   - The agent didn’t attempt to reproduce only the quickstart test failures or revert the change to confirm causality.
+
+4. Coding practices that could cause unintended side effects
+   - The new code includes a broad try/except that swallows exceptions (except Exception). This makes debugging harder and can mask real issues.
+   - The logic is hard-coded to AWS::ApiGateway::RestApi only and ignores other potential valid uses of AWS::Include (this may be fine if the bug scope was only RestApi, but it should be explicitly justified).
+   - The change doesn’t leverage existing Template/context capabilities to compute used refs via Ref and Fn::Sub in a way that accounts for “include” content, leading to a binary on/off behavior.
+
+How to improve to pass all tests
+1. Narrow the suppression to avoid global disabling of W2001
+   - Ideal approach: If the include Location points to a local file (relative path, file://), attempt to parse the included YAML/JSON and extract references with existing mechanisms:
+     - Use the same search_deep_keys for “Ref” and “Fn::Sub” on the included content.
+     - For Fn::Sub strings in the included content, use cfn.get_sub_parameters to extract parameter names.
+     - Merge these discovered parameter names into the “used” set alongside transform_pre “Ref” and “Fn::Sub” found in the main template.
+     - If parsing fails or the include Location is remote (S3/HTTP), document the limitation and be conservative: either skip suppression entirely (preferred to avoid false negatives), or suppress only for parameters that are clearly intended to be consumed by RestApi Include (but with no way to know, blanket suppression risks hiding real issues).
+   - If you must suppress, scope it: Only suppress W2001 for the specific parameters you can confirm are used within the included content. Avoid suppressing all parameters just because one RestApi uses include.
+
+2. Strengthen unit tests
+   - Keep the existing positive include test.
+   - Add tests:
+     - A negative test where an unused parameter remains flagged W2001 when there’s no include.
+     - If you implement parsing of local included file content, add a test where the included file doesn’t reference one of the parameters; ensure W2001 still fires for that unused parameter.
+     - A test verifying that templates with Fn::Transform in other resource types do not globally suppress W2001.
+   - This makes sure your change doesn’t introduce false negatives outside the intended edge case.
+
+3. Investigate the integration failures properly
+   - Run only the failing tests:
+     - pytest -q test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+     - pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_module_integration
+     - pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+   - Compare their outputs before and after your change. If differences persist, identify whether your change influenced counts/exit code. Even if failures aren’t W2001, confirm your patch didn’t affect global behavior (for example, by accidentally short-circuiting certain scanning logic).
+   - If your change is benign, the failures may be environmental; however, tests expect exact counts/exit codes, so they need to pass as-is. Don’t assume unrelated; prove it.
+
+4. Clean coding practices
+   - Avoid broad exception swallowing in the rule. If structure anomalies occur, it’s better to log and continue with default behavior rather than silently changing the rule outcome.
+   - Keep the logic explicit, documented, and focused on the RestApi include case; explain why the solution is constrained in scope.
+   - Maintain type checks and guardrails to avoid TypeErrors deep inside the rule logic.
+
+5. Alignment with existing Template/context logic
+   - Template.transform_pre currently captures “Ref”, “Fn::Sub”, “Fn::FindInMap”, “Transform”, and “Fn::ForEach”. It does not capture nested Fn::Transform contents beyond the main template.
+   - If you choose to parse local include files as described above, use the same utilities (search_deep_keys, get_sub_parameters) to remain consistent with the framework.
+
+Practical plan to fix with minimal risk
+- Change Used.match to:
+  - Continue collecting refs/subs from the main template as before.
+  - For any RestApi that has Body Fn::Transform Name: AWS::Include and where Location is a local file path:
+    - Load and parse that file (YAML/JSON).
+    - Find “Ref” and “Fn::Sub” in the included content.
+    - Extract parameters via get_sub_parameters and add to the “used” set.
+  - Only suppress W2001 for parameters found in those sets. Do not globally suppress for all parameters.
+- Update tests as outlined above.
+- Re-run unit tests and integration tests; if integration failures persist, isolate and confirm whether your change affects them.
+
+Why this will help pass all tests
+- The fix addresses the core complaint (parameters referenced within an AWS::Include’d OpenAPI spec) without globally hiding W2001.
+- Additional unit test coverage will guard against regressions and validate correct scoping.
+- Proper isolation and validation of integration failures ensures your contribution doesn’t inadvertently break assumptions embedded in expected counts/exit codes.
+
+In short: The agent’s fix made one unit test pass by disabling W2001 too broadly, but they didn’t verify the wider impact and brushed off integration failures. The correct approach is to treat AWS::Include carefully: detect and parse local includes to extract references and mark only those parameters as used, keep W2001 active otherwise, and validate via targeted tests and isolated integration runs.

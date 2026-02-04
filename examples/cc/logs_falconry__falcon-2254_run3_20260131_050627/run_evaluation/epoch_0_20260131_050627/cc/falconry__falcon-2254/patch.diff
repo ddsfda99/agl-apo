@@ -1,0 +1,56 @@
+diff --git a/falcon/util/sync.py b/falcon/util/sync.py
+index c32c3a3..54e21ad 100644
+--- a/falcon/util/sync.py
++++ b/falcon/util/sync.py
+@@ -1,4 +1,6 @@
+ import asyncio
++import inspect
++from falcon.util.deprecation import DeprecatedWarning
+ from concurrent.futures import ThreadPoolExecutor
+ from functools import partial
+ from functools import wraps
+@@ -54,8 +56,42 @@ class _ActiveRunner:
+ _active_runner = _ActiveRunner(getattr(asyncio, 'Runner', _DummyRunner))
+ _one_thread_to_rule_them_all = ThreadPoolExecutor(max_workers=1)
+ 
+-create_task = asyncio.create_task
+-get_running_loop = asyncio.get_running_loop
++import warnings
++
++def _warn_asyncio_alias(name: str) -> None:
++    frame = inspect.currentframe()
++    # Do not warn for Falcon internal usage; walk up until external caller
++    caller_mod = ''
++    if frame is not None:
++        f = frame.f_back  # get_running_loop/create_task frame
++        while f is not None:
++            mod = f.f_globals.get('__name__', '')
++            if not mod.startswith('falcon.'):
++                caller_mod = mod
++                break
++            f = f.f_back
++
++    if caller_mod.startswith('falcon.'):
++        return
++
++    warnings.warn(
++        f'falcon.{name} is deprecated and will be removed in Falcon 5.0. '
++        f'Use asyncio.{name} instead.',
++        category=DeprecatedWarning,
++        stacklevel=2,
++    )
++
++
++def get_running_loop() -> asyncio.AbstractEventLoop:
++    _warn_asyncio_alias('get_running_loop')
++    return asyncio.get_running_loop()
++
++
++def create_task(coro: Awaitable[Any], *, name: Optional[str] = None) -> asyncio.Task:
++    _warn_asyncio_alias('create_task')
++    if name is not None:
++        return asyncio.create_task(coro, name=name)
++    return asyncio.create_task(coro)
+ 
+ 
+ def wrap_sync_to_async_unsafe(func: Callable[..., Any]) -> Callable[..., Any]:

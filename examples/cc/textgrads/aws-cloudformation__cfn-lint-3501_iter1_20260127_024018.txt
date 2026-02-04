@@ -1,0 +1,85 @@
+Here is a detailed review of the coding agent’s execution trace and why it failed, along with actionable improvements.
+
+What went wrong
+
+1) Misuse of tools and initial environment assumptions
+- The agent tried to use EnterPlanMode and got an error: “Enter plan mode?” This is noise and indicates the agent didn’t have a clear plan or that the tool isn’t available/appropriate in this environment.
+- They attempted to grep in /workspace, which doesn’t exist here. The correct root is /testbed. This cost time and added confusion.
+
+2) Unnecessary and risky code changes to production
+- The agent modified src/cfnlint/rules/parameters/Used.py to read local files referenced by Fn::Transform Name: AWS::Include under AWS::ApiGateway::RestApi Body. This is a significant change to the linter’s behavior:
+  - It introduces file I/O and parsing external documents at lint time (JSON/YAML) for “Include.” That’s beyond the scope of the original Used rule, which only inspects the template structure and its pre-transform keys (transform_pre).
+  - It affects performance (creating additional Template instances per resource and reading files from disk).
+  - It potentially changes behavior in integration tests and adds security/safety concerns for arbitrary file access.
+  - It was done without confirming that such behavior is desired by the project (the project typically avoids heavy transforms or external reads in simple rules).
+
+3) Breaking integration tests: counts changed
+- Integration tests failed early: quickstart templates expected 35 failures for “I” checks, got 36. The agent’s change appears unrelated to “I” rules (they modified W2001), but any change in core behavior or template processing can ripple into other rules. Even if the change was targeted, altering production code without verifying its impact on the integration suite violates the “minimal scope” principle and the agent’s own TODO (“Verify integration tests quickstart templates counts remain unchanged”).
+- The agent did not ensure the integration baseline remained stable before submitting the change.
+
+4) Writing new tests using the wrong abstraction
+- The agent added test/unit/rules/parameters/test_used_include.py and wrote tests that call rule.match(cfn) directly and then asserted on m.rule.id. That’s incorrect:
+  - rule.match returns a list of RuleMatch objects. RuleMatch instances do not have a .rule attribute; they carry a message and a path. The attribute error proves the mismatch: “‘RuleMatch’ object has no attribute ‘rule’”.
+  - When you need rule metadata like rule.id, you should run the rule through the Rules engine to produce Match objects, which do include rule information. Alternatively, for direct match-output tests, assert on message content and path rather than m.rule.id.
+- Because of this, all newly added tests failed with AttributeError, independent of the code change.
+
+5) Unvetted behavior design for AWS::Include
+- Scanning included files (local path resolution and JSON/YAML parsing) to collect Refs/Subs is not something the Used rule originally does. cfn-lint’s transform handling is centralized; rules typically rely on cfn.transform_pre and the template model rather than adding ad-hoc file parsing in a rule. The agent’s approach introduces new implicit guarantees:
+  - It attempts to resolve relative paths based on cfn.filename, which may be unknown or not correct.
+  - It ignores remote includes (which is good for safety), but the behavior for local includes may not be consistent across the suite or desired at all.
+  - It filters pseudo-params only by AWS:: prefix, not “aws:” variables, and assumes Name equality with template Parameters, which is okay here but still fragile.
+
+6) Broad exception swallowing and added imports
+- The new code uses broad “except Exception: pass” blocks around critical logic. This hides failures that could explain integration count changes and makes debugging harder.
+- It added imports (json, logging, os, urllib.parse) that might not be used (urlparse is imported but unused) and increases complexity in this rule.
+
+7) Lack of adherence to project testing patterns and helpers
+- The project provides BaseRuleTestCase and helpers that already validate rules in a consistent way. The new tests bypassed these and instead rolled a custom run_rule function, causing mismatches and errors.
+
+8) Planning vs. execution disconnect
+- The agent created TODOs that promised a minimal scope, tests, and integration verification, but in practice:
+  - They created new tests using the wrong abstraction.
+  - They changed production behavior broadly without first validating it against integration counts.
+  - They did not update or align existing tests that already target W2001 and SubParameter usage patterns.
+
+How to improve
+
+A) Don’t change production behavior without confirming scope and integration impact
+- If the task is to review and diagnose, do that first. If a code change is needed, keep it minimal and verify integration counts. In this case, modifying the Used rule to read external files is risky and likely out-of-scope for a simple parameter-usage check.
+- Use the existing Template methods and transform_pre structures. If Include support is required, consider whether the decoding/transformation layer should populate transform_pre or another standardized structure, rather than ad-hoc file reads in a rule.
+
+B) Fix test methodology
+- When you call rule.match(cfn), you get RuleMatch instances, which don’t carry rule metadata. Assert on message content, path, and number of matches instead of m.rule.id.
+- If you need to assert rule IDs, run the rule via the Rules engine (Rules.run returns Match objects that have .rule and .message).
+- Prefer using the project’s BaseRuleTestCase and helper methods to maintain consistency and avoid boilerplate errors.
+
+C) Respect integration tests baseline
+- The integration suite is sensitive to changes. Before submitting any change, run the full suite and ensure counts match the expectations. If they don’t, revisit the change. The agent’s own TODOs mention verifying quickstart counts but they didn’t do so successfully.
+
+D) Avoid file I/O in a simple lint rule
+- Reading and parsing included files inside the Used rule breaks separation of concerns and could introduce performance and security concerns. If Include/Transform handling is desired, it should be handled in the transform/decode layer and surfaced in a way that rules can consume uniformly.
+
+E) Use sets and built-in caches properly, avoid heavy object creation per resource
+- If you must scan content, prefer set operations for refs/subs to avoid duplicates.
+- Re-using cfn.search_deep_keys and cfn.get_sub_parameters on the same Template is fine, but creating new Template instances repeatedly (even for included content) is heavy and can interfere with caching/lru mechanisms and the graph/context building.
+
+F) Clean up exception handling and imports
+- Avoid broad exception swallowing; log errors where appropriate.
+- Remove unused imports (e.g., urlparse was unused).
+- Keep rule files lightweight; do not add heavy dependencies without need.
+
+G) Understand existing rule behavior, tests, and related helpers
+- Test files test/unit/rules/parameters/test_used.py already validate W2001 behavior including transforms and language extensions. Before creating new tests, check whether existing tests cover the desired scenarios or how they expect the behavior to be.
+
+Summary of root causes of failure
+- The agent changed production code in a way that impacted the integration baseline (quickstart counts), violating minimal scope and breaking tests unrelated to their change.
+- They introduced new unit tests that assumed the wrong output type (RuleMatch vs Match), causing AttributeError failures.
+- They added risky behavior (file I/O) to a rule that wasn’t designed to read and parse external resources, which likely caused unintended side effects.
+
+Recommended corrective actions
+- Revert the changes to Used.py that perform file I/O and ad-hoc Include parsing.
+- Remove or fix test_used_include.py to use the correct abstraction:
+  - Either assert on messages and paths returned by rule.match, or run via Rules.run to get Match with .rule.id available.
+- Rerun the full test suite to ensure integration counts are back to expected.
+- If Include support is truly required for W2001, propose handling it at the transformation layer or add an opt-in feature, and quantify the effect on integration tests before making the change.
+- Stick to project testing patterns (BaseRuleTestCase and helpers).

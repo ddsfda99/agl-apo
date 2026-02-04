@@ -1,0 +1,73 @@
+diff --git a/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py b/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
+index 7056f9165..fb24b5428 100644
+--- a/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
++++ b/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
+@@ -17,23 +17,30 @@ class WAFACLCVE202144228(BaseResourceCheck):
+         self.evaluated_keys = ["rule"]
+         rules = conf.get("rule") or []
+         for idx_rule, rule in enumerate(force_list(rules)):
++            if not isinstance(rule, dict):
++                # malformed rule (can happen when dynamic blocks are present) - skip
++                continue
+             self.evaluated_keys = [f"rule/[{idx_rule}]/statement"]
+             statement = rule.get("statement")
+             if statement:
+                 self.evaluated_keys = [f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement"]
+-                if not isinstance(statement, list):
++                if not isinstance(statement, list) or not statement:
+                     return CheckResult.UNKNOWN
+-                managed_group = statement[0].get("managed_rule_group_statement")
++                first_stmt = statement[0]
++                if not isinstance(first_stmt, dict):
++                    # unexpected structure from parser, skip to next rule
++                    continue
++                managed_group = first_stmt.get("managed_rule_group_statement")
+                 if managed_group:
+                     self.evaluated_keys = [f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/name"]
+-                    if managed_group[0] and managed_group[0].get("name") == ["AWSManagedRulesKnownBadInputsRuleSet"]:
++                    if managed_group[0] and isinstance(managed_group[0], dict) and managed_group[0].get("name") == ["AWSManagedRulesKnownBadInputsRuleSet"]:
+                         self.evaluated_keys.append(
+                             f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule"
+                         )
+                         excluded_rules = managed_group[0].get("excluded_rule") or []
+                         # rule 'Log4JRCE' should not be set to count
+                         for idx_excluded_rule, excluded_rule in enumerate(force_list(excluded_rules)):
+-                            if excluded_rule and excluded_rule.get("name") == ["Log4JRCE"]:
++                            if excluded_rule and isinstance(excluded_rule, dict) and excluded_rule.get("name") == ["Log4JRCE"]:
+                                 self.evaluated_keys = [
+                                     f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/name",
+                                     f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule/[{idx_excluded_rule}]/name",
+@@ -43,7 +50,9 @@ class WAFACLCVE202144228(BaseResourceCheck):
+                         self.evaluated_keys.append(
+                             f"rule/[{idx_rule}]/override_action/[0]/none"
+                         )
+-                        override_action = rule.get("override_action")
++                        override_action = rule.get("override_action") or []
++                        if not isinstance(override_action, list) or not override_action or not isinstance(override_action[0], dict):
++                            return CheckResult.FAILED
+                         # check for group override
+                         override_action_none = override_action[0].get("none")
+                         # Terraform plan includes both keys, but one is a dict and the not chosen one a list
+diff --git a/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py b/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
+index 7e97c5dd4..7f6d0d0ae 100644
+--- a/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
++++ b/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
+@@ -27,6 +27,9 @@ class WAFRuleHasAnyActions(BaseResourceCheck):
+ 
+         if isinstance(rules, list):
+             for rule in rules:
++                if not isinstance(rule, dict):
++                    # unexpected structure (can occur with dynamic blocks); skip this entry
++                    continue
+                 passing = False
+                 if "action" in rule and rule['action'] != [{}]:
+                     passing = True
+@@ -36,7 +39,7 @@ class WAFRuleHasAnyActions(BaseResourceCheck):
+                 statements = rule.get('statement')
+                 if statements and isinstance(statements, list):
+                     for statement in statements:
+-                        if statement.get('managed_rule_group_statement'):
++                        if isinstance(statement, dict) and statement.get('managed_rule_group_statement'):
+                             passing = True
+ 
+                 if not passing:

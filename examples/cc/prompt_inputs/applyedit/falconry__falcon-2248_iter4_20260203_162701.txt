@@ -1,0 +1,212 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+Add support for 'partitioned' attribute to set_cookie()
+As stated in a [Google announcement](https://developers.google.com/privacy-sandbox/blog/cookie-countdown-2024jan) , Chrome disabled third-party cookies for 1% of users as of 4th January 2024. 
+
+We need support for [the 'Partitioned' attribute](https://developers.google.com/privacy-sandbox/3pcd/chips) in cookies. I think adding Partitioned automatically would be good if same_site is None.
+
+CPython developers have decided to add support for it in version 3.13.
+
+- Issue: https://github.com/python/cpython/issues/112713
+- PR: https://github.com/python/cpython/pull/112714
+
+The above PR includes [a patch](https://github.com/python/cpython/pull/112714#issuecomment-1946292244),  but it is not compatible with Falcon due to Falcon having its own header generator.
+
+So, here is a very dirty monkey patch for Falcon users who need it today:
+
+```
+# Monkey patch for the Partitioned attribute for 3rd party cookies
+#
+#  Usage:
+#    response.set_cookie('mycookie', 'value', path='/', same_site='None', secure=True)
+#    response._cookies['mycookie']['partitioned'] = True
+#
+#  See:
+#     https://github.com/python/cpython/pull/112714#issuecomment-1946292244
+#
+Morsel_reserved: dict[str, str] = getattr(cookies.Morsel, '_reserved', {})
+if "partitioned" not in Morsel_reserved:
+    Morsel_reserved['partitioned'] = 'Partitioned'
+    getattr(cookies.Morsel, '_flags', set()).add('partitioned')
+```
+
+To use it, follow these steps. `secure=True` is needed with `same_site='None'`
+
+```
+response.set_cookie('mycookie', 'value', path='/', same_site='None', secure=True)
+response._cookies['mycookie']['partitioned'] = True
+```
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+The agent ultimately got the tests to pass, but it “failed” relative to the prompt’s intent in several important ways, and it took a long detour because it misunderstood Falcon’s build/runtime layout (pure-Python vs compiled extension). Here’s what went wrong, where, and how to improve.
+
+---
+
+## 1) Major wrong assumption: editing `falcon/response.py` would affect runtime
+### What happened
+The agent added `partitioned` to `falcon/response.py`’s `Response.set_cookie()` signature and logic. But the repo is using a compiled extension:
+
+- `falcon.response` is **`/testbed/falcon/response.cpython-311-x86_64-linux-gnu.so`**
+- not `/testbed/falcon/response.py`
+
+This is why:
+- `inspect.signature(falcon.Response.set_cookie)` still showed the *old* signature without `partitioned`
+- tests failed with: `TypeError: set_cookie() got an unexpected keyword argument 'partitioned'`
+
+### Why this is a failure
+The requested change is to “Add support to set_cookie()” in Falcon. Implementing it in a file that is not used at runtime does not satisfy the requirement in a maintainable way.
+
+### How to improve
+Before implementing anything, the agent should have confirmed which module is imported:
+
+- Check `falcon.response.__file__`
+- Check `type(falcon.Response)` and source module
+- Search for `.so`/Cython modules in the repo (`*.so`, `*.pyx`, `*.pxd`)
+
+Once the agent discovered the `.so`, it should have pivoted immediately to:
+- updating the **Cython** source (if available) and rebuilding, or
+- updating the build configuration to compile from modified sources, or
+- implementing a supported fallback path (see below), but only as last resort.
+
+---
+
+## 2) Patch location choice: `falcon/__init__.py` monkey patch is brittle and not aligned with project design
+### What happened
+To work around the compiled module, the agent monkey-patched `Response.set_cookie` inside `falcon/__init__.py`.
+
+### Why this is problematic
+- Import order sensitivity: any code importing `falcon.response` directly (or `from falcon.response import Response`) could bypass the patch if `falcon.__init__` isn’t imported first.
+- It makes Falcon’s public API depend on side effects at import time.
+- It’s not in the right layer: cookie/Morsel policy belongs in `falcon.util` or the response implementation, not the top-level package init.
+
+### How to improve
+A more robust approach (even if monkey patching is unavoidable) is:
+- apply the patch in the **module that defines cookies behavior** (e.g., `falcon.util.http_cookies` area) and
+- ensure it runs whenever the relevant module is imported, not only via `falcon/__init__.py`.
+
+Even better: actually update the compiled response module’s source (Cython) to accept the new kwarg and implement the logic.
+
+---
+
+## 3) Incorrect/extra behavior: forcing `Secure=True` when `same_site='None'`
+### What happened
+The agent added logic: if `same_site == 'None'` then set Secure, even if Falcon global defaults would not.
+
+### Why that’s risky
+While browsers *require* Secure for `SameSite=None` in many modern contexts, Falcon historically lets apps decide; forcing secure can be:
+- a backward-incompatible behavioral change
+- surprising for local/dev/test environments
+- possibly breaking tests or user expectations in other contexts
+
+The prompt says: “`secure=True` is needed with `same_site='None'`” and “adding Partitioned automatically would be good if same_site is None.”
+It does **not** explicitly require Falcon to auto-set Secure.
+
+### How to improve
+- Implement only what is required: `Partitioned` support + “auto Partitioned when SameSite=None”.
+- If enforcing Secure is desired, it should be a documented opt-in or at least guarded behind an option, not silently forced.
+- At minimum, add tests asserting the previous behavior does not change unexpectedly.
+
+---
+
+## 4) The Morsel patch was initially wrong / incomplete in behavior validation
+### What happened
+The agent tested:
+
+```py
+cookies.Morsel._reserved['partitioned'] = 'Partitioned'
+m['partitioned'] = True
+print(m.OutputString())  # "Partitioned=True"
+```
+
+Then later saw:
+
+```py
+SimpleCookie()['x']['partitioned'] = True
+# outputs "Partitioned" (flag-style)
+```
+
+### Why this matters
+There are two code paths:
+- reserved attributes printed as key-value
+- flags printed as bare attribute
+
+Chrome expects `Partitioned` as a flag attribute (no `=True`).
+
+The initial snippet misled the agent and should have triggered investigation earlier.
+
+### How to improve
+- Validate output using `SimpleCookie` and `Morsel.OutputString()` in the same way Falcon does.
+- Ensure `_flags` is updated whenever needed.
+- Add a unit test that specifically asserts `"; Partitioned"` appears, not `Partitioned=True`.
+
+---
+
+## 5) Test strategy issues
+### What happened
+The agent wrote a new test file that asserted the `Set-Cookie` header exists in `result.headers`, but Falcon testing’s `Result.headers` **does not reliably preserve multiple Set-Cookie headers**, and Set-Cookie handling is special-cased.
+
+They got away with it because they only set one cookie per response. This is fragile and may not reflect Falcon’s actual cookie behavior (multiple cookies, header duplication).
+
+### How to improve
+- Use `result.cookies` (already parsed) for semantic assertions when possible.
+- If validating raw `Set-Cookie`, inspect `result._headers` list (internal) or add a helper that extracts all `('Set-Cookie', ...)` pairs rather than `result.headers.get()`.
+- Add a test with multiple cookies to ensure Partitioned is rendered correctly alongside others.
+
+---
+
+## 6) Didn’t address the core requirement in a maintainable way for Falcon
+### What happened
+The final solution is essentially:
+- monkey patch `Response.set_cookie` at import time
+- monkey patch `http.cookies.Morsel.__setitem__`
+
+This is close to the “dirty monkey patch” the prompt explicitly described as a workaround, not the desired integrated solution.
+
+### How to improve (ideal direction)
+- Find and update Falcon’s actual cookie header generator (likely in the compiled response implementation).
+- If Falcon uses Cython for performance, update `.pyx` and rebuild.
+- Provide:
+  - public API support: `partitioned` kwarg in `set_cookie()`
+  - or documented supported way to set it via `_cookies[...]` with correct rendering (but the prompt asked for set_cookie support).
+- Add docs/release note, and ensure the behavior is consistent between WSGI and ASGI.
+
+---
+
+## Summary of concrete “misses”
+1. Implemented changes in `falcon/response.py` even though runtime uses `falcon/response...so`.
+2. Lost time debugging why signature didn’t change; should have checked module file path earlier.
+3. Introduced potentially unwanted auto-Secure behavior.
+4. Put monkey patch in `falcon/__init__.py`, making import order a risk.
+5. Test asserted raw headers in a way that doesn’t generalize to multiple Set-Cookie headers.
+6. Ended with a workaround-like solution rather than integrating into Falcon’s real cookie generation path.
+
+---
+
+## What the agent should do next (to be “real fix”, not monkey patch)
+- Locate Cython sources for `falcon.response` (e.g., `falcon/response.pyx` or similar) and implement:
+  - `partitioned` kwarg acceptance
+  - setting `morsel['partitioned']=True`
+  - “auto Partitioned when SameSite=None” logic
+- Ensure `falcon/util/__init__.py` only adds `partitioned` to Morsel reserved/flags (minimal backport), without invasive `__setitem__` patching.
+- Update `falcon.testing.Cookie` to expose `partitioned` if desired, and test via parsed cookies plus raw output string.
+
+This would satisfy the prompt’s intent: native Falcon support, compatible with Falcon’s own header generator, and aligned with how CPython is adding it.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

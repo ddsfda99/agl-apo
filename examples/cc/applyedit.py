@@ -13,6 +13,8 @@ from utils.cloudgpt_aoai import get_openai_token_provider
 BASE_DIR = Path(__file__).resolve().parent
 FULL_PROMPTS_DIR = BASE_DIR / "full_prompts"
 TEXTGRADS_DIR = BASE_DIR / "textgrads"
+PROMPT_INPUTS_DIR = BASE_DIR / "prompt_inputs" / "applyedit"
+PROMPT_OUTPUTS_DIR = BASE_DIR / "prompt_outputs" / "applyedit"
 OPTIMIZER_PROMPT = """You are an expert in coding agent prompt optimization.
 Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
 You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
@@ -26,10 +28,6 @@ the evaluations of previous failures:
 
 You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
 Return a complete revised prompt text that can be used directly as the user prompt.
-
-# Todo
-Do NOT introduce any {{...}} placeholders.
-If you need literal braces in the text, escape them as {{ and }}.
 """
 
 def load_single_case(dataset_path: Path) -> Optional[Dict[str, Any]]:
@@ -153,6 +151,13 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
         evaluations=evaluations,
     )
 
+    output_dir = BASE_DIR / "applyedits"
+    output_path = next_applyedit_path(output_dir, instance_id)
+    PROMPT_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    input_path = PROMPT_INPUTS_DIR / output_path.name
+    input_path.write_text(filled_prompt, encoding="utf-8")
+    print(f"Saved applyedit input prompt to {input_path}")
+
     token_provider = get_openai_token_provider()
     client = AsyncAzureOpenAI(
         api_version="2025-04-01-preview",
@@ -161,7 +166,7 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     )
 
     resp = await client.chat.completions.create(
-        model="gpt-5-20250807",
+        model="gpt-5.2-20251211",
         messages=[{"role": "user", "content": filled_prompt}],
     )
 
@@ -175,11 +180,14 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     print("=== Optimized dynamic ruleset ===")
     print(content if content else "[empty]")
 
-    output_dir = BASE_DIR / "applyedits"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = next_applyedit_path(output_dir, instance_id)
     output_path.write_text(content if content else "", encoding="utf-8")
     print(f"\nSaved applyedit output to {output_path}")
+
+    PROMPT_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_copy_path = PROMPT_OUTPUTS_DIR / output_path.name
+    output_copy_path.write_text(content if content else "", encoding="utf-8")
+    print(f"Saved applyedit output to {output_copy_path}")
 
 
 if __name__ == "__main__":

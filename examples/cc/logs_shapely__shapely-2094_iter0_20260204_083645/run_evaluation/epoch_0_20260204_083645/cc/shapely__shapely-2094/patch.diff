@@ -1,0 +1,128 @@
+diff --git a/shapely/wkt.py b/shapely/wkt.py
+index 7bc19c9..e48c72e 100644
+--- a/shapely/wkt.py
++++ b/shapely/wkt.py
+@@ -4,31 +4,109 @@ Also provides pickle-like convenience functions.
+ """
+ 
+ import shapely
+-
+-
+-def loads(data):
++import re
++
++
++def _close_ring_if_needed(ring_str):
++    # ring_str like "x y, x y, ..."
++    parts = [p.strip() for p in re.split(r",\s*", ring_str.strip()) if p.strip()]
++    if len(parts) < 1:
++        return ring_str
++    first = parts[0]
++    last = parts[-1]
++    if first != last:
++        parts.append(first)
++    return ", ".join(parts)
++
++
++def _fix_polygon_content(content):
++    # content contains one or more rings separated by ") , ("
++    rings = re.split(r"\)\s*,\s*\(", content.strip())
++    fixed_rings = [_close_ring_if_needed(r) for r in rings]
++    return "), (".join(fixed_rings)
++
++
++def _fix_multipolygon_content(content):
++    # content contains multiple polygons formatted like ((rings)), ((rings)), ...
++    # Split polygons on ")) , (("
++    polys = re.split(r"\)\)\s*,\s*\(\(", content.strip())
++    fixed_polys = []
++    for p in polys:
++        # remove leading '((' and trailing '))' if present in individual polygon
++        p_inner = p
++        if p_inner.startswith("(("):
++            p_inner = p_inner[2:]
++        if p_inner.endswith("))"):
++            p_inner = p_inner[:-2]
++        fixed = _fix_polygon_content(p_inner)
++        fixed_polys.append(f"(({fixed}))")
++    return ", ".join(fixed_polys)
++
++
++def _apply_fix_structure(wkt_str):
++    # Fix POLYGON rings
++    def fix_polygon_match(m):
++        prefix = m.group("prefix")
++        content = m.group("content")
++        fixed = _fix_polygon_content(content)
++        return f"{prefix} (({fixed}))"
++
++    wkt_fixed = re.sub(
++        r"(?P<prefix>POLYGON(?:\s+[A-Z]+)?)\s*\(\((?P<content>.*?)\)\)",
++        fix_polygon_match,
++        wkt_str,
++        flags=re.DOTALL,
++    )
++
++    # Fix MULTIPOLYGON rings
++    def fix_multipolygon_match(m):
++        prefix = m.group("prefix")
++        content = m.group("content")
++        fixed = _fix_multipolygon_content(content)
++        return f"{prefix} ({fixed})"
++
++    wkt_fixed = re.sub(
++        r"(?P<prefix>MULTIPOLYGON(?:\s+[A-Z]+)?)\s*\((?P<content>\(\(.*?\)\))\)",
++        fix_multipolygon_match,
++        wkt_fixed,
++        flags=re.DOTALL,
++    )
++
++    return wkt_fixed
++
++
++def loads(data, **kwargs):
+     """Load a geometry from a WKT string.
+ 
+     Parameters
+     ----------
+     data : str
+         A WKT string
++    **kwargs : optional
++        Keyword input options forwarded to :func:`~shapely.from_wkt`.
++        For example, ``on_invalid`` and ``fix_structure``.
+ 
+     Returns
+     -------
+     Shapely geometry object
+ 
+     """
+-    return shapely.from_wkt(data)
++    fix = kwargs.pop("fix_structure", False)
++    if fix:
++        data = _apply_fix_structure(data)
++    return shapely.from_wkt(data, **kwargs)
+ 
+ 
+-def load(fp):
++def load(fp, **kwargs):
+     """Load a geometry from an open file.
+ 
+     Parameters
+     ----------
+     fp :
+         A file-like object which implements a `read` method.
++    **kwargs : optional
++        Keyword input options forwarded to :func:`~shapely.wkt.loads`.
++        For example, ``on_invalid`` and ``fix_structure``.
+ 
+     Returns
+     -------
+@@ -36,7 +114,7 @@ def load(fp):
+ 
+     """
+     data = fp.read()
+-    return loads(data)
++    return loads(data, **kwargs)
+ 
+ 
+ def dumps(ob, trim=False, rounding_precision=-1, **kw):

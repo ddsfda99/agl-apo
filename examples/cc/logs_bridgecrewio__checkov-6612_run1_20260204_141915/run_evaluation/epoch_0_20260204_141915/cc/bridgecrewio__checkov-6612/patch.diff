@@ -1,0 +1,95 @@
+diff --git a/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py b/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
+index 7056f9165..3b9d7ed7e 100644
+--- a/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
++++ b/checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py
+@@ -17,34 +17,52 @@ class WAFACLCVE202144228(BaseResourceCheck):
+         self.evaluated_keys = ["rule"]
+         rules = conf.get("rule") or []
+         for idx_rule, rule in enumerate(force_list(rules)):
++            # ensure we have a dict-based rule block
++            if not isinstance(rule, dict):
++                # skip malformed entries
++                continue
++
+             self.evaluated_keys = [f"rule/[{idx_rule}]/statement"]
+             statement = rule.get("statement")
+             if statement:
+                 self.evaluated_keys = [f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement"]
+                 if not isinstance(statement, list):
+                     return CheckResult.UNKNOWN
+-                managed_group = statement[0].get("managed_rule_group_statement")
++                # pick the first valid dict statement
++                stmt0 = None
++                for st in statement:
++                    if isinstance(st, dict):
++                        stmt0 = st
++                        break
++                if stmt0 is None:
++                    # no valid statement objects found
++                    return CheckResult.UNKNOWN
++
++                managed_group = stmt0.get("managed_rule_group_statement")
+                 if managed_group:
+                     self.evaluated_keys = [f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/name"]
+-                    if managed_group[0] and managed_group[0].get("name") == ["AWSManagedRulesKnownBadInputsRuleSet"]:
+-                        self.evaluated_keys.append(
+-                            f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule"
+-                        )
+-                        excluded_rules = managed_group[0].get("excluded_rule") or []
+-                        # rule 'Log4JRCE' should not be set to count
+-                        for idx_excluded_rule, excluded_rule in enumerate(force_list(excluded_rules)):
+-                            if excluded_rule and excluded_rule.get("name") == ["Log4JRCE"]:
+-                                self.evaluated_keys = [
+-                                    f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/name",
+-                                    f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule/[{idx_excluded_rule}]/name",
+-                                ]
+-                                return CheckResult.FAILED
++                    if isinstance(managed_group, list) and managed_group and isinstance(managed_group[0], dict):
++                        if managed_group[0].get("name") == ["AWSManagedRulesKnownBadInputsRuleSet"]:
++                            self.evaluated_keys.append(
++                                f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule"
++                            )
++                            excluded_rules = managed_group[0].get("excluded_rule") or []
++                            # rule 'Log4JRCE' should not be set to count
++                            for idx_excluded_rule, excluded_rule in enumerate(force_list(excluded_rules)):
++                                if excluded_rule and excluded_rule.get("name") == ["Log4JRCE"]:
++                                    self.evaluated_keys = [
++                                        f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/name",
++                                        f"rule/[{idx_rule}]/statement/[0]/managed_rule_group_statement/[0]/excluded_rule/[{idx_excluded_rule}]/name",
++                                    ]
++                                    return CheckResult.FAILED
+ 
+                         self.evaluated_keys.append(
+                             f"rule/[{idx_rule}]/override_action/[0]/none"
+                         )
+-                        override_action = rule.get("override_action")
++                        override_action = rule.get("override_action") or []
+                         # check for group override
++                        if not isinstance(override_action, list) or not override_action or not isinstance(override_action[0], dict):
++                            return CheckResult.FAILED
+                         override_action_none = override_action[0].get("none")
+                         # Terraform plan includes both keys, but one is a dict and the not chosen one a list
+                         if not override_action_none or not isinstance(override_action_none[0], dict):
+diff --git a/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py b/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
+index 7e97c5dd4..05f4d3f0f 100644
+--- a/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
++++ b/checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py
+@@ -27,6 +27,9 @@ class WAFRuleHasAnyActions(BaseResourceCheck):
+ 
+         if isinstance(rules, list):
+             for rule in rules:
++                if not isinstance(rule, dict):
++                    # malformed rule entries should be considered failing
++                    return CheckResult.FAILED
+                 passing = False
+                 if "action" in rule and rule['action'] != [{}]:
+                     passing = True
+@@ -36,7 +39,7 @@ class WAFRuleHasAnyActions(BaseResourceCheck):
+                 statements = rule.get('statement')
+                 if statements and isinstance(statements, list):
+                     for statement in statements:
+-                        if statement.get('managed_rule_group_statement'):
++                        if isinstance(statement, dict) and statement.get('managed_rule_group_statement'):
+                             passing = True
+ 
+                 if not passing:

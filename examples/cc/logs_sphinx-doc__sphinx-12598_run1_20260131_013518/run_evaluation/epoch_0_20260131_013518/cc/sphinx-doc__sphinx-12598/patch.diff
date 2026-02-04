@@ -1,0 +1,196 @@
+diff --git a/sphinx/texinputs/make.bat.jinja b/sphinx/texinputs/make.bat.jinja
+index da2805afd..275fd1232 100644
+--- a/sphinx/texinputs/make.bat.jinja
++++ b/sphinx/texinputs/make.bat.jinja
+@@ -1,50 +1,50 @@
+-@ECHO OFF
+-
+-REM Command file for Sphinx documentation
+-
+-pushd %~dp0
+-
+-{% if latex_engine in ('platex', 'uplatex') -%}
+-REM latexmkrc is read then overridden by latexmkjarc
+-set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
+-{% else -%}
+-set PDFLATEX=latexmk -pdf -dvi- -ps-
+-{% endif %}
+-set "LATEXOPTS= "
+-
+-{% if xindy_use -%}
+-set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
+-{% if latex_engine == 'pdflatex' -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
+-{% endif -%}
+-{% endif -%}
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
+-{% endif -%}
+-set XINDYOPTS=%XINDYOPTS% -I xelatex
+-{% endif -%}
+-
+-
+-if "%1" == "" goto all-pdf
+-
+-if "%1" == "all-pdf" (
+-	:all-pdf
+-	for %%i in (*.tex) do (
+-		%PDFLATEX% %LATEXMKOPTS% %%i
+-	)
+-	goto end
+-)
+-
+-if "%1" == "all-pdf-ja" (
+-	goto all-pdf
+-)
+-
+-if "%1" == "clean" (
+-	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
+-	goto end
+-)
+-
+-:end
+-popd
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++pushd %~dp0
++
++{% if latex_engine in ('platex', 'uplatex') -%}
++REM latexmkrc is read then overridden by latexmkjarc
++set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
++{% else -%}
++set PDFLATEX=latexmk -pdf -dvi- -ps-
++{% endif %}
++set "LATEXOPTS= "
++
++{% if xindy_use -%}
++set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
++{% if latex_engine == 'pdflatex' -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
++{% endif -%}
++{% endif -%}
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
++{% endif -%}
++set XINDYOPTS=%XINDYOPTS% -I xelatex
++{% endif -%}
++
++
++if "%1" == "" goto all-pdf
++
++if "%1" == "all-pdf" (
++	:all-pdf
++	for %%i in (*.tex) do (
++		%PDFLATEX% %LATEXMKOPTS% %%i
++	)
++	goto end
++)
++
++if "%1" == "all-pdf-ja" (
++	goto all-pdf
++)
++
++if "%1" == "clean" (
++	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
++	goto end
++)
++
++:end
++popd
+diff --git a/sphinx/writers/latex.py b/sphinx/writers/latex.py
+index 1b2f193ba..d0f011353 100644
+--- a/sphinx/writers/latex.py
++++ b/sphinx/writers/latex.py
+@@ -306,6 +306,7 @@ class LaTeXTranslator(SphinxTranslator):
+         self.in_term = 0
+         self.needs_linetrimming = 0
+         self.in_minipage = 0
++        self.in_seealso = 0
+         self.no_latex_floats = 0
+         self.first_document = 1
+         self.this_is_the_title = 1
+@@ -966,10 +967,16 @@ class LaTeXTranslator(SphinxTranslator):
+     def visit_seealso(self, node: Element) -> None:
+         self.body.append(BLANKLINE)
+         self.body.append(r'\begin{sphinxseealso}{%s:}' % admonitionlabels['seealso'] + CR)
++        # Track seealso context to avoid floating figures inside
++        self.in_seealso += 1
++        if self.table:
++            # Admonition-like environments inside tables are problematic for tabulary
++            self.table.has_problematic = True
+ 
+     def depart_seealso(self, node: Element) -> None:
+         self.body.append(BLANKLINE)
+-        self.body.append(r'\end{sphinxseealso}')
++        self.body.append(r'\end{sphinxseealso}' + CR)
++        self.in_seealso -= 1
+         self.body.append(BLANKLINE)
+ 
+     def visit_rubric(self, node: nodes.rubric) -> None:
+@@ -1540,7 +1547,8 @@ class LaTeXTranslator(SphinxTranslator):
+                                 BLANKLINE +
+                                 r'\mbox{}\par\vskip-\dimexpr\baselineskip+\parskip\relax' +
+                                 CR)  # avoid disappearance if no text next issues/11079
+-        elif self.in_minipage:
++        elif self.in_minipage or self.in_seealso:
++            # In minipage or seealso admonitions, avoid floating figures
+             self.body.append(CR + r'\begin{center}')
+             self.context.append(r'\end{center}' + CR)
+         else:
+@@ -1580,6 +1588,9 @@ class LaTeXTranslator(SphinxTranslator):
+     def visit_admonition(self, node: Element) -> None:
+         self.body.append(CR + r'\begin{sphinxadmonition}{note}')
+         self.no_latex_floats += 1
++        if self.table:
++            # Admonition inside table cells are problematic for tabulary
++            self.table.has_problematic = True
+ 
+     def depart_admonition(self, node: Element) -> None:
+         self.body.append(r'\end{sphinxadmonition}' + CR)
+@@ -1590,6 +1601,9 @@ class LaTeXTranslator(SphinxTranslator):
+         self.body.append(CR + r'\begin{sphinxadmonition}{%s}{%s:}' %
+                          (node.tagname, label))
+         self.no_latex_floats += 1
++        if self.table:
++            # Admonition inside table cells are problematic for tabulary
++            self.table.has_problematic = True
+ 
+     def _depart_named_admonition(self, node: Element) -> None:
+         self.body.append(r'\end{sphinxadmonition}' + CR)
+diff --git a/tests/roots/test-latex-figure-in-admonition/index.rst b/tests/roots/test-latex-figure-in-admonition/index.rst
+index e3d39d3ee..e0d6ec6bd 100644
+--- a/tests/roots/test-latex-figure-in-admonition/index.rst
++++ b/tests/roots/test-latex-figure-in-admonition/index.rst
+@@ -7,3 +7,7 @@ Test Figure in Admonition
+ 
+    .. figure:: img.png
+ 
++.. seealso::
++
++   .. figure:: img.png
++
+diff --git a/tests/test_builders/test_build_latex.py b/tests/test_builders/test_build_latex.py
+index 0786702b0..b9d627aec 100644
+--- a/tests/test_builders/test_build_latex.py
++++ b/tests/test_builders/test_build_latex.py
+@@ -1592,6 +1592,14 @@ def test_latex_figure_in_admonition(app, status, warning):
+     app.build(force_all=True)
+     result = (app.outdir / 'projectnamenotset.tex').read_text(encoding='utf8')
+     assert r'\begin{figure}[H]' in result
++    # ensure figure inside seealso is non-floating to avoid LaTeX parmode error
++    start = result.find(r'\begin{sphinxseealso}{See also:}')
++    end = result.find(r'\end{sphinxseealso}', start)
++    assert start != -1 and end != -1
++    seealso_block = result[start:end]
++    # The figure inside seealso should avoid floating figure environment
++    assert r'\begin{figure}[' not in seealso_block
++    assert r'\begin{center}' in seealso_block
+ 
+ 
+ def test_default_latex_documents():

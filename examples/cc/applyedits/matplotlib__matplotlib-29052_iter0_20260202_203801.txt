@@ -1,0 +1,64 @@
+You are a coding agent working inside a checked-out git repository located in the CURRENT DIRECTORY (do not assume `/workspace`; discover the repo root by running `pwd` and `ls`). Your goal is to fix a Matplotlib bug and add a regression test.
+
+## Task
+Fix: `matplotlib.colors.LinearSegmentedColormap.from_list` wrongly fails when the first element is a valid “(color, alpha)” tuple like `("green", 0.0)`. It is currently misinterpreted as a “(value, color)” mapping tuple if it appears as the first element.
+
+### Reproduction
+This should not raise:
+```py
+import matplotlib
+matplotlib.colors.LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])
+```
+Actual current error:
+`ValueError: Invalid RGBA argument: 0.0`
+
+## Critical constraints (read carefully)
+1. **Start by discovering the repository root**: run `pwd` and `ls`. Use paths relative to that directory only.
+2. **Do not read or reference any SWE-bench cache paths** (e.g. under `/root/.cache/...`). Only use the working tree you are in.
+3. **Reproduce via tests**: write a small regression test first (or locate existing tests) and run it with `pytest`. Do not guess.
+4. **Keep the fix minimal and backwards-compatible**: only adjust the logic that decides whether the input is “(value, color)” data vs plain colors.
+5. **Add regression coverage**: ensure the test fails before the fix and passes after.
+6. **No commits**.
+
+## Background / suspected location
+The issue is in `lib/matplotlib/colors.py` in `LinearSegmentedColormap.from_list`, around the logic that detects whether `colors` is a list of `(value, color)` pairs. The current detection incorrectly triggers for a valid color spec that is a 2-tuple `(color, alpha)`.
+
+## Expected behavior
+- A list like `[("green", 0.0), "green"]` should be treated as “colors with alpha”, not “(value, color)” mapping, and must not error.
+- Real `(value, color)` usage like `[(0.0, "red"), (1.0, "blue")]` must continue to work.
+
+## Guidance for implementing the fix
+The core bug is ambiguous tuple interpretation. The robust approach should:
+- Treat the input as a list of `(value, color)` pairs **only if it is unambiguous**.
+- Preferably require that **all** elements are 2-tuples of the form `(float, colorlike)` with the first item being numeric and the second item being colorlike, and that the numeric values are in increasing order (Matplotlib may already validate later; don’t duplicate too much).
+- Avoid classifying `(color, alpha)` as `(value, color)`:
+  - If the first element of the tuple is a string (like `"green"`), it is almost certainly colorlike, so it should not be treated as `(value, color)`.
+  - Handle grayscale colors: a single number in `[0,1]` can be colorlike; thus `(0.42, 0.5)` could be `(gray, alpha)` and must not be incorrectly treated as `(value, color)` just because the first element is numeric. This ambiguity means you should avoid relying on a single element; instead, decide based on the structure of the whole list and whether the *second* element looks like a valid color spec (e.g. `"red"` or `"#ff0000"` or 3/4-length RGB(A) tuple) rather than a plain alpha float.
+- A pragmatic rule that typically works:
+  - Consider it `(value, color)` only if the second element is clearly a color spec (string, hex, named color, or length-3/4 sequence), not a bare float/int alpha.
+  - And apply that rule across all elements (not just the first).
+- Ensure the fix doesn’t break existing documented behavior.
+
+## What to do step-by-step
+1. **Identify repo and test setup**
+   - Run `pwd`, `ls`.
+   - Confirm this is Matplotlib (look for `lib/matplotlib`, `pyproject.toml`, etc.).
+2. **Reproduce with a regression test**
+   - Find the appropriate test file for colormaps/colors (search within the repo for `from_list(` usage and existing tests).
+   - Add a new test that asserts no exception for:
+     - `LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])`
+   - Also add a test that confirms real `(value, color)` tuples still work, e.g.:
+     - `LinearSegmentedColormap.from_list("test", [(0.0, "red"), (1.0, "blue")])`
+3. **Run the test(s) to see failure**
+   - Run targeted tests with `pytest -q` (or the repo’s standard command).
+4. **Locate and patch the detection logic**
+   - Edit `lib/matplotlib/colors.py` in `LinearSegmentedColormap.from_list`.
+   - Modify tuple-detection so `(color, alpha)` is not misread as `(value, color)` when it appears first.
+   - Keep behavior for explicit `(value, color)` lists.
+5. **Re-run tests**
+   - First the targeted regression test, then (if feasible) a slightly broader subset.
+6. **Clean up**
+   - Remove any temporary scripts; keep only the proper test.
+
+## Output expectation
+Proceed with the above workflow using tool calls. Show the commands you run and the key outputs (especially failing/passing tests). Implement the smallest safe fix plus regression tests.

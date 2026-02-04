@@ -1,0 +1,122 @@
+## What went wrong (root causes)
+
+### 1) The C-ufunc signature was changed, but the ufunc registration was not
+The agent changed:
+
+```c
+static char from_wkt_dtypes[3] = {NPY_OBJECT, NPY_UINT8, NPY_OBJECT};
+```
+
+to
+
+```c
+static char from_wkt_dtypes[4] = {NPY_OBJECT, NPY_UINT8, NPY_BOOL, NPY_OBJECT};
+```
+
+and updated `from_wkt_func` to expect 3 inputs + 1 output.
+
+But `from_wkt` is registered via:
+
+```c
+DEFINE_CUSTOM(from_wkt, 2);
+```
+
+`DEFINE_CUSTOM(NAME, N_IN)` builds the ufunc with **N_IN inputs**. This remained `2`, so the generated ufunc still passes 2 input pointers + 1 output pointer. The updated `from_wkt_func` now reads `args[2]` as input and `args[3]` as output—this is out-of-bounds and will cause crashes or corrupted behavior (likely segfault during import or tests).
+
+**Fix needed:** update the registration to `DEFINE_CUSTOM(from_wkt, 3);` and ensure any associated shape/signature metadata is consistent.
+
+---
+
+### 2) `GEOSWKTReader_setFixStructure_r` was called unconditionally, but it may not exist
+Earlier in the trace, Grep showed no occurrences of `GEOSWKTReader_setFixStructure_r`, meaning it wasn’t previously used. That function is only available in certain GEOS versions. Calling it without guarding will fail compilation/linking when building against older GEOS.
+
+The project already uses version guards like `#if GEOS_SINCE_3_10_0`, `#if GEOS_SINCE_3_12_0`, etc. The agent did not add a guard for this GEOS API.
+
+**Fix needed:**
+- Add the correct GEOS version guard around `GEOSWKTReader_setFixStructure_r`.
+- Determine the right macro threshold (depends on when GEOS introduced it).
+- Provide fallback behavior when not supported (e.g., raise `UnsupportedGEOSVersionError` at Python level if `fix_structure=True`, or ignore with documented behavior).
+
+---
+
+### 3) Potentially wrong semantics: “strict” and “fix_structure” behavior may not match expectations
+The agent introduced `strict=None` as an alias and implemented:
+- `strict=False` ⇒ `fix_structure=True`
+- `strict=True` conflicts with `fix_structure=True`
+
+But:
+- There was no evidence in the repo that `strict` is a supported argument for `from_wkt` in this version (the only “strict=” grep hits were unrelated).
+- Adding `strict` can break API expectations or conflict with documented behavior/tests if the task expected `fix_structure` only (or expected a different default/interaction).
+
+Even if the new tests pass, existing tests might now fail due to:
+- docstring mismatches,
+- unexpected accepted kwargs,
+- changes in function signature affecting introspection or downstream wrappers.
+
+**Fix needed:** align exactly with the task’s required API (don’t introduce extra parameters unless required), and ensure docs/tests match.
+
+---
+
+### 4) `shapely.wkt.load()` was not updated to pass new options
+The agent updated `wkt.loads()` but **not** `wkt.load(fp)`. `load(fp)` currently does:
+
+```py
+data = fp.read()
+return loads(data)
+```
+
+So file-based loading cannot enable `fix_structure`/`strict`, which may be required by the intended feature/tests.
+
+**Fix needed:** update `load(fp, ...)` similarly, or explicitly decide not to support it and ensure tests/docs reflect that.
+
+---
+
+### 5) Missing updates in other call sites / public API surface
+`shapely.from_wkt` is re-exported from `shapely.io` via `__init__.py`. Adding new parameters in `io.from_wkt` is fine, but any higher-level wrappers, docs, or vectorized call patterns might assume exactly 2 inputs to the underlying ufunc. The agent updated only one Python wrapper (`io.from_wkt`) and `wkt.loads`, but not other internal users (e.g., `creation.py` or other modules that might call `lib.from_wkt` directly).
+
+**Fix needed:** search for direct `lib.from_wkt(` usage and update them, or keep `lib.from_wkt` signature stable by implementing fix-structure behavior in a different way.
+
+---
+
+## How the agent can improve (process issues)
+
+### A) Didn’t run the test suite or even build
+The trace shows no `pytest`, no `pip install -e .`, no compilation attempt. This would have immediately surfaced:
+- mismatch between `DEFINE_CUSTOM(from_wkt, 2)` and new dtype/args layout,
+- compilation/link errors for `GEOSWKTReader_setFixStructure_r`.
+
+### B) Made a high-risk C ABI change without auditing all linkage points
+Changing a ufunc signature requires updating:
+- dtype array length,
+- function arg indexing,
+- `DEFINE_CUSTOM(..., N_IN)` count,
+- any Python wrapper call sites.
+
+They updated only some of these.
+
+### C) Didn’t validate GEOS API availability by version
+They grepped and saw it didn’t exist in-tree, but didn’t check GEOS version macros or add conditional compilation.
+
+---
+
+## Concrete checklist to make it pass all tests
+
+1) **Fix ufunc registration**
+- Change `DEFINE_CUSTOM(from_wkt, 2);` → `DEFINE_CUSTOM(from_wkt, 3);`
+- Ensure the ufunc output index matches (`op1 = args[3]`).
+
+2) **Fix scalar-parameter checks**
+- In `from_wkt_func`, now both `is2` and `is3` must be checked (they did this part).
+
+3) **Guard `GEOSWKTReader_setFixStructure_r`**
+- Wrap the call with the correct `#if GEOS_SINCE_X_Y_Z` macro (or add a new macro in `geos.h` if needed).
+- If not supported and `fix_structure=True`, set `errstate` to a meaningful error or raise `UnsupportedGEOSVersionError` in Python before calling into `lib.from_wkt`.
+
+4) **Update Python surface consistently**
+- If `fix_structure` is required by the task, update both `wkt.loads` and `wkt.load`.
+- Avoid adding `strict` unless explicitly required; otherwise remove it to avoid breaking expectations.
+
+5) **Run compilation + pytest**
+- Rebuild extension and run `pytest -q` to confirm no segfaults and no API regressions.
+
+These are the key reasons the agent failed and the specific gaps to close so the patch can actually build and pass the suite.

@@ -1,0 +1,48 @@
+Here is a focused review of the coding agent’s execution trace, why it failed, and how to improve.
+
+What the agent did
+- Explored the repo and located the GetAtt-related code and tests.
+- Modified core logic:
+  - Added AWS::ServiceCatalog::CloudFormationProvisionedProduct dynamic Outputs support in src/cfnlint/schema/_getatts.py (mapping Outputs.<key> to a string type).
+  - Added ProvisionedProduct to the resource type exceptions in src/cfnlint/rules/functions/GetAttFormat.py, skipping format compatibility checks for its Outputs, similar to nested stacks and custom resources.
+- Added new unit tests for these cases:
+  - test/unit/rules/functions/test_getatt_servicecatalog.py
+  - test/unit/rules/functions/test_getatt_format_servicecatalog.py
+- Ran pytest and saw 3 failing integration tests in quickstart templates (openshift.yaml).
+- Concluded the integration failures were “unrelated,” as they weren’t tied to the ServiceCatalog changes.
+
+Why the tests failed
+- The failing tests were integration tests for quickstart templates, specifically openshift.yaml. They are not related to the newly added ServiceCatalog behavior.
+- The failures were due to a change in rule output counts and exit code: expected 35 matches but received 36; expected exit code 12 but got 14. The mismatch was caused by time-dependent rule E2533 (DeprecatedRuntimeUpdate) now firing for python3.8 in openshift.yaml.
+  - The repo’s test fixture test/fixtures/results/quickstart/openshift.json expects no E2533 match at the Lambda runtime line (810).
+  - Current dates in the test environment (today > 2025-03-31) cause E2533 to report an error for python3.8, adding one more match and flipping the exit code bitmask to include “error,” thus producing 14 instead of the expected 12.
+- The integration tests compare against fixed expected results JSON files and fixed exit codes. Any time-dependent rule output will cause mismatches unless handled deterministically.
+
+Where the agent did not do well
+- Solved the wrong problem relative to the failing tests. The changes and added unit tests addressed GetAtt for ServiceCatalog ProvisionedProduct (likely a separate feature request), but the failing tests were due to E2533 on openshift.yaml, which the agent neither inspected nor fixed.
+- Declared the integration failures “unrelated” and “normal for this environment.” While true in isolation, the test suite requires deterministic results; dismissing them leaves the suite failing.
+- Introduced new unit tests without ensuring the entire suite passes. Adding tests is fine, but the priority should be to get all existing tests to pass.
+- Did not isolate and fix the root cause of the integration failures. The trace shows the agent ran the whole suite, saw the three integration failures, but did not dig into why the counts changed. A quick grep showed AWS::Lambda::Function Runtime: python3.8 in openshift.yaml (line 810), which correlates with the E2533 failure that changed the counts.
+- Ignored the need for determinism in time-based rules in tests. Rules that depend on current_date must be controllable in test environments to prevent flaky results. There are unit tests that set rule.current_date explicitly for the lmbd rules, but the integration path uses the default datetime.today, making results drift over time.
+- Process-wise, the agent changed code immediately after reading files. They should first run the minimal failing test set, diagnose, and only then make the smallest possible change to fix those tests.
+
+How to improve
+- Diagnose integration failures first:
+  - Run the specific failing tests (like the agent eventually did) to capture the mismatch and inspect the underlying rule(s) that changed behavior.
+  - Confirm that E2533 is the source of the extra match and exit code difference in openshift.yaml.
+- Make time-dependent rules deterministic for integration tests:
+  - Provide a mechanism to freeze or inject current_date for the Lambda runtime deprecation rules (DeprecatedRuntimeUpdate, DeprecatedRuntimeCreate, DeprecatedRuntimeEol) during CLI/integration runs. For example, read a known environment variable or configuration option to set current_date, similar to how unit tests set rule.current_date explicitly.
+  - Alternatively, use a fixed “test date” if a certain testing flag is present. The existing unit tests demonstrate how to inject dates; the integration path needs a similar capability.
+  - The goal is to ensure the integration test results match the expected fixtures consistently, regardless of the actual date.
+- Verify changes against the entire test suite:
+  - After fixing determinism in the time-based rules, rerun the full pytest suite. The function-level tests should stay green, and the integration tests should match the expected counts and exit codes.
+- Keep changes minimal and targeted:
+  - The ServiceCatalog ProvisionedProduct GetAtt additions are fine and seem correct. They don’t affect the failing integration tests. But avoid adding tests or features unless they are part of the original failure scope. Focus on passing the existing tests first.
+- Validate the impact of GetAtt exceptions:
+  - The new branch in _getatts.py returns immediately after adding Outputs..*, similar to the Stack case. Ensure this is intended and that any readOnlyProperties that ProvisionedProduct might have are not required for GetAtt resolution. If necessary, combine dynamic Outputs with readOnlyProperties rather than returning early. This is not the source of the current failures but is a potential edge case to consider.
+
+Summary of root cause and fix direction
+- Root cause: A time-dependent rule (E2533) now triggers on a Lambda Runtime in openshift.yaml, causing integration test expected counts and exit codes to differ from the fixture.
+- Fix direction: Make the runtime deprecation rules deterministic under test by allowing current_date injection in CLI/integration runs, mirroring the approach used in existing unit tests. Once deterministic, the integration tests will stop drifting and should pass.
+
+By focusing on making time-dependent rules deterministic for integration tests and verifying against the full suite, the agent can ensure all tests pass.

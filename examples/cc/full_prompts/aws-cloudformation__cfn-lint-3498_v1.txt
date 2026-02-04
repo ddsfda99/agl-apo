@@ -1,0 +1,113 @@
+You are working in the root of the code repository. Your goal is to fix the bug described in the original prompt and validate it with both a minimal reproduction and the existing integration test fixtures. Follow these instructions precisely and do not commit changes.
+
+Context and goal
+- The bug: cfn-lint reports E3006 for resource types unavailable in a specified region, even when the resource has a Condition that evaluates to False for that region. Expected: only report E3006 if the resource’s Condition could evaluate to True in the given region. Otherwise, suppress E3006.
+- The previous attempt changed ResourceType rule logic without verifying the real cause and did not fix the likely underlying scenario generation bug in Conditions.build_scenarios when a region is supplied. You must address the scenario generation logic and then make sure ResourceType uses it correctly.
+
+Step-by-step plan
+1) Read and understand requirements
+- E3006 should be reported only if a resource type is unavailable in the specified region and the resource’s Condition can be True in that region.
+- If a resource has a Condition that cannot be True for that region, suppress E3006.
+- Provide a minimal reproduction to demonstrate the behavior.
+- Reconcile outputs against the test fixtures and fix any discrepancies by addressing regional scenario generation in Conditions and ResourceType rule logic.
+
+2) Create a minimal reproduction template to confirm the bug and expected behavior
+- Create a file named tmp_repro_global_accelerator.json in the repo root with the following contents. Note: escape all braces in text you paste. Use this exact snippet:
+
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "EnableGlobalAccelerator": {
+      "Type": "String",
+      "Default": "Yes",
+      "AllowedValues": ["Yes","No"]
+    }
+  },
+  "Conditions": {
+    "GAEnabledNotInChina": {
+      "Fn::And": [
+        { "Fn::Equals": [ { "Ref": "EnableGlobalAccelerator" }, "Yes" ] },
+        { "Fn::Not": [
+          { "Fn::Or": [
+            { "Fn::Equals": [ { "Ref": "AWS::Region" }, "cn-north-1" ] },
+            { "Fn::Equals": [ { "Ref": "AWS::Region" }, "cn-northwest-1" ] }
+          ] }
+        ] }
+      ]
+    }
+  },
+  "Resources": {
+    "MyListener": {
+      "Type": "AWS::GlobalAccelerator::Listener",
+      "Condition": "GAEnabledNotInChina",
+      "Properties": {
+        "AcceleratorArn": "arn:aws:globalaccelerator::123456789012:accelerator/abc",
+        "PortRanges": [ { "FromPort": 80, "ToPort": 80 } ],
+        "Protocol": "TCP"
+      }
+    }
+  }
+}
+
+- Run cfn-lint with the China region to reproduce the bug:
+  - cfn-lint --format json -r cn-north-1 -t tmp_repro_global_accelerator.json
+- Currently, you will likely see E3006 for AWS::GlobalAccelerator::Listener in cn-north-1 even though the Condition should make it False. After your fixes, E3006 should be suppressed for this case.
+
+3) Inspect expected results fixtures to understand integration failures and verify what differs
+- Open and read the expected results in:
+  - test/fixtures/results/quickstart/non_strict/openshift.json
+  - test/fixtures/results/quickstart/non_strict/… other files listed in the failing integration tests
+  - test/fixtures/results/quickstart/… as needed for strict runs
+- Compare the actual output to these JSON fixtures to determine which Rule.Id findings are in excess or missing. Do not assume E3006 is the only issue; verify via comparison.
+- Avoid external tools like jq. Use Python to parse JSON if you need to inspect output.
+
+4) Locate the most likely bug source and plan the fix
+- The regional scenario generation in cfnlint/conditions/conditions.py is likely incorrect when a region is supplied. Focus on Conditions.build_scenarios when region is not None.
+- Current logic uses itertools.starmap with build_scenerios_on_region and then incorrectly zips condition_names with a single iterator’s booleans, which does not produce the Cartesian product of possible booleans across all condition names. This can cause erroneous downstream behavior, including improper reporting of E3006 and other rule differences in integration tests.
+- You need to fix build_scenarios to:
+  - For each condition name, compute the list of boolean outcomes possible under the specified region using build_scenerios_on_region(name, region).
+  - Build the Cartesian product across all condition names to produce full scenario assignments.
+  - Yield dicts mapping each condition name to its boolean value in each product combination.
+
+5) Implement the fix
+- In cfnlint/conditions/conditions.py:
+  - Modify build_scenarios so that when region is supplied:
+    - condition_names = list of condition names from the template
+    - options_per_condition = [list(self.build_scenerios_on_region(name, region)) for name in condition_names]
+    - for combo in itertools.product(*options_per_condition):
+      - yield dict(zip(condition_names, combo))
+  - Ensure the non-region branch remains unchanged and correct.
+- In cfnlint/rules/resources/ResourceType.py:
+  - Ensure validation of resource type availability respects the resource’s Condition under the specified region as follows:
+    - If the resource has no Condition, validate as usual.
+    - If the resource has a Condition:
+      - Use the fixed regional scenarios to determine if the condition can be True under the region provided.
+      - Only report E3006 for the resource if the set of outcomes for its Condition includes True.
+      - If the condition can only be False for that region, skip E3006 for that resource.
+  - Do not make the logic stricter than necessary; the rule should only trigger when the resource could exist in that region and the type is not available.
+
+6) Validate with unit and integration tests
+- Run the minimal reproduction again:
+  - cfn-lint --format json -r cn-north-1 -t tmp_repro_global_accelerator.json
+  - Verify that E3006 is not reported for MyListener when GAEnabledNotInChina is the condition.
+- Run only the failing integration tests to iterate faster:
+  - pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+  - pytest -q test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+- If failures persist:
+  - Programmatically run cfn-lint with --format json against the corresponding templates, parse outputs in Python, count findings per Rule.Id, and compare to the fixture JSON to identify which rules differ.
+  - Confirm whether E3006 differences have been resolved. If other rule IDs differ, verify whether they are impacted by the scenarios logic and adjust accordingly.
+
+7) Debugging guidance
+- Do not rely on jq or other external tools that may not be installed.
+- Use Python to parse JSON output from cfn-lint to compare against fixture files.
+- Avoid path confusion. Run tests and commands from the repository root.
+- Inspect the actual messages versus expected fixtures to ensure you are fixing the correct cause.
+
+8) Clean up
+- Remove tmp_repro_global_accelerator.json after validation.
+- Do not commit any changes.
+
+Acceptance criteria
+- With -r cn-north-1, cfn-lint does not report E3006 for AWS::GlobalAccelerator::* resources when their Conditions are False for cn-north-1.
+- Integration tests for quickstart templates pass or at least no longer fail due to E3006 differences related to regional conditions.
+- The scenario generation in Conditions.build_scenarios produces correct combinations under a region, and downstream rules like ResourceType now honor Conditions when checking type availability.

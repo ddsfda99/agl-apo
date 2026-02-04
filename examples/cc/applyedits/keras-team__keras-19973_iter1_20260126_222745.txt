@@ -1,0 +1,105 @@
+You are given a code repository in the current directory.
+
+Task: Make eager execution in keras.layers.MultiHeadAttention consistent with symbolic execution by enforcing the same shape validations in the eager call path that currently exist in symbolic mode. Specifically:
+- Ensure a shape mismatch between the last dimensions of query and value raises a ValueError in eager mode, matching symbolic mode.
+- Also mirror any existing symbolic-mode validation for key/value non-last-dimension mismatches in eager mode, so errors are consistent across execution modes.
+- Do not relax or remove existing symbolic validations. Do not change the public API or existing tests’ expectations.
+
+Scope and constraints
+- Keep the fix minimal and localized to the eager execution path inside MultiHeadAttention.call().
+- Use Python-level static shape checks only (x.shape), not backend-specific ops or runtime graph assertions.
+- Match the exact error message text used in symbolic mode for each validation, including the “The last dimension of `query_shape` and `value_shape` must be equal” message.
+- Do not change or remove the existing symbolic-mode validation logic.
+- Do not modify existing tests.
+- Do not commit any changes; temporary tests you add for reproduction must be removed after verification.
+
+Step-by-step plan
+
+1) Understand requirements and intended behavior
+- The test suite requires that a mismatch in the last dimension of query and value must raise a ValueError containing: “The last dimension of `query_shape` and `value_shape` must be equal”.
+- Currently, symbolic mode enforces this via compute_output_shape/compute_output_spec, while eager mode does not.
+- There is also a symbolic-mode validation for key/value non-last-dimension mismatches; eager mode should mirror this validation and error message.
+- Your changes must make eager execution raise the same errors (with the same messages) under the same invalid inputs. Do not relax constraints.
+
+2) Reproduce the current bug with a temporary test
+- Create tests/tmp_test_mha_eager_shape_check.py that forces eager execution and demonstrates both mismatches:
+  - Case A: query last dim Dq != value last dim Dv (e.g., 16 vs 8). Expect ValueError with message containing “The last dimension of `query_shape` and `value_shape` must be equal”.
+  - Case B: key/value non-last-dimension mismatch (e.g., batch or sequence length differs while last dims may be equal). Expect ValueError whose message exactly matches the symbolic-mode message used for this validation. You must first locate the symbolic message string (see step 3) and assert against it.
+- Hints:
+  - If needed, set KERAS_BACKEND to the backend used in this repo.
+  - Use framework-native tensors (e.g., tf.Tensor if TensorFlow, torch.Tensor if PyTorch) to ensure eager execution.
+  - Example for Case A:
+    - batch_size = 2; seq_len = 4; num_heads = 2; Dq = 16; Dv = 8
+    - query: [batch_size, seq_len, Dq]
+    - key: [batch_size, seq_len, Dq]
+    - value: [batch_size, seq_len, Dv]
+    - mha = keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=Dq // num_heads)
+    - Expect ValueError when calling mha(query=query, value=value, key=key).
+  - Example for Case B:
+    - batch_size_q = 2; batch_size_kv = 3; seq_len = 4; D = 16
+    - query: [batch_size_q, seq_len, D]
+    - key: [batch_size_kv, seq_len, D]
+    - value: [batch_size_kv, seq_len, D]
+    - Expect ValueError on mha(query=query, value=value, key=key) with the symbolic-mode key/value mismatch message.
+
+3) Locate the relevant code and error messages
+- Search for the exact error strings used in symbolic mode:
+  - “The last dimension of `query_shape` and `value_shape` must be equal”
+  - The key/value non-last-dimension mismatch message (string in the code that validates compatibility of key/value shapes excluding the last dimension).
+- If grep or your search tool fails unexpectedly:
+  - Open keras/src/layers/attention/multi_head_attention.py directly and scan compute_output_shape and compute_output_spec.
+  - Use partial, case-insensitive searches for “query_shape”, “value_shape”, “key_shape”, “must be equal”, etc.
+  - Also check any helper methods or validation utilities referenced by MultiHeadAttention.
+- Identify the call() method where projections and attention are computed. This is where you will add eager-mode checks.
+
+4) Implement the fix (minimal, localized in call())
+- Do not remove or modify symbolic validations in compute_output_shape/compute_output_spec.
+- Add early validations in call(), before heavy computation:
+  - Ensure key defaults to value if key is None (as currently implemented), then perform checks using static shapes.
+  - Query/value last-dimension equality check:
+    - q_shape = getattr(query, "shape", None)
+    - v_shape = getattr(value, "shape", None)
+    - If both shapes are present and their last dims are statically known integers, and they differ:
+      - Raise ValueError with the exact message used in symbolic mode, extended to include the dims and shapes:
+        “The last dimension of `query_shape` and `value_shape` must be equal, but are {q_dim}, {v_dim}. Received: query_shape={q_shape}, value_shape={v_shape}”
+      - Make sure the leading sentence matches exactly the symbolic message. If the symbolic message already includes additional context, replicate it verbatim.
+  - Key/value non-last-dimension compatibility check:
+    - k_shape = getattr(key, "shape", None)
+    - v_shape as above.
+    - If ranks and non-last dims are statically known integers for both key and value, compare all axes except the last:
+      - If any differ, raise ValueError with the exact symbolic-mode error message used for this condition. Include the shapes in the message as they are in symbolic mode (if symbolic message includes shapes, replicate that; otherwise, append “Received: key_shape=..., value_shape=...” without changing the leading sentence).
+- Important:
+  - Only perform these checks when dims are statically known (ints). If any involved dim is None or not an int, skip and rely on symbolic validations.
+  - Do not introduce backend-specific ops or runtime assertions. Use Python-level shape metadata only.
+  - Keep the change small and contained inside call().
+
+5) Run tests to validate the fix
+- Run your temporary test file:
+  - Case A must now raise the ValueError with the standardized “The last dimension of `query_shape` and `value_shape` must be equal” message.
+  - Case B must raise the ValueError with the exact key/value mismatch message used in symbolic mode.
+- Run the broader test suite to catch regressions:
+  - Run pytest for the attention layers: pytest -q keras/src/layers/attention
+  - Preferably, run the full repository test suite to ensure broader integration remains intact.
+- Confirm that all existing tests which assert ValueError on shape mismatches continue to pass.
+
+6) Clean up
+- Remove the temporary test file tests/tmp_test_mha_eager_shape_check.py after verification.
+- Leave the working tree with only your code changes to MultiHeadAttention.call() and without any temporary test files.
+- Do not commit any changes.
+
+Hints and best practices
+- Error message consistency is crucial. Copy the exact leading sentence of the symbolic-mode message and add shape details only if symbolic mode already does so; otherwise, preserve the leading sentence exactly so tests that match substrings won’t break.
+- Place eager checks early in call() to fail fast, ideally right after resolving key=value when key is None and before projections/masking.
+- For shape checks, guard with isinstance(dim, int) and ensure ranks are known (len(shape) is not None). Skip checks with unknown dims to avoid breaking graph/dynamic contexts.
+- If your initial search for error messages fails, broaden search terms and inspect the file directly. Cross-check both compute_output_shape and compute_output_spec.
+
+Deliverables
+- Code changes implementing the eager-mode validations in MultiHeadAttention.call(), covering:
+  - query/value last-dimension equality
+  - key/value non-last-dimension compatibility
+- A temporary reproduction test file demonstrating both mismatches in eager mode (to be removed after verification).
+- Test execution logs showing:
+  - The temporary tests pass after your fix.
+  - The attention test suite passes.
+  - Ideally, the full repository tests pass.
+- No commits; remove the temporary test file before finalizing.

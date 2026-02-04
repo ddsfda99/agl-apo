@@ -1,0 +1,65 @@
+diff --git a/lib/matplotlib/lines.py b/lib/matplotlib/lines.py
+index 9629a82136..d2d4c7320d 100644
+--- a/lib/matplotlib/lines.py
++++ b/lib/matplotlib/lines.py
+@@ -1553,7 +1553,7 @@ class AxLine(Line2D):
+         """Return the *slope* value of the line."""
+         return self._slope
+ 
+-    def set_xy1(self, x, y):
++    def set_xy1(self, *args):
+         """
+         Set the *xy1* value of the line.
+ 
+@@ -1561,10 +1561,17 @@ class AxLine(Line2D):
+         ----------
+         x, y : float
+             Points for the line to pass through.
++        xy : (float, float)
++            Alternatively, pass a single (x, y) tuple.
+         """
++        if len(args) == 1:
++            (xy,) = args
++            x, y = xy
++        else:
++            x, y = args
+         self._xy1 = x, y
+ 
+-    def set_xy2(self, x, y):
++    def set_xy2(self, *args):
+         """
+         Set the *xy2* value of the line.
+ 
+@@ -1578,8 +1585,15 @@ class AxLine(Line2D):
+         ----------
+         x, y : float
+             Points for the line to pass through.
++        xy : (float, float)
++            Alternatively, pass a single (x, y) tuple.
+         """
+         if self._slope is None:
++            if len(args) == 1:
++                (xy,) = args
++                x, y = xy
++            else:
++                x, y = args
+             self._xy2 = x, y
+         else:
+             raise ValueError("Cannot set an 'xy2' value while 'slope' is set;"
+diff --git a/lib/matplotlib/lines.pyi b/lib/matplotlib/lines.pyi
+index 161f99100b..d4f88845e3 100644
+--- a/lib/matplotlib/lines.pyi
++++ b/lib/matplotlib/lines.pyi
+@@ -130,7 +130,13 @@ class AxLine(Line2D):
+     def get_xy1(self) -> tuple[float, float] | None: ...
+     def get_xy2(self) -> tuple[float, float] | None: ...
+     def get_slope(self) -> float: ...
++    @overload
++    def set_xy1(self, xy: tuple[float, float]) -> None: ...
++    @overload
+     def set_xy1(self, x: float, y: float) -> None: ...
++    @overload
++    def set_xy2(self, xy: tuple[float, float]) -> None: ...
++    @overload
+     def set_xy2(self, x: float, y: float) -> None: ...
+     def set_slope(self, slope: float) -> None: ...

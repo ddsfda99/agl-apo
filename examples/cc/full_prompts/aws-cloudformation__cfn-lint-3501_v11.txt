@@ -1,0 +1,89 @@
+You are an expert Python engineer working on cfn-lint in the current repository. Fix a bug in rule W2001 (“Parameter not used”) where parameters referenced inside an OpenAPI/Swagger file included via Fn::Transform (AWS::Include) are incorrectly reported as unused.
+
+Context
+- cfn-lint version referenced: 0.55.0
+- Template `api.cfn` uses:
+  Body:
+    Fn::Transform:
+      Name: AWS::Include
+      Parameters:
+        Location: ./api-specification.yml
+- The included `api-specification.yml` contains CloudFormation intrinsics like Fn::Sub that reference parameters (e.g., ${PetLambdaArn}, ${UserPoolArn}).
+- Today, if those parameters are not referenced directly in `api.cfn`, W2001 reports them as unused (false positive).
+
+Critical constraints (based on previous failed attempts)
+1) Do NOT implement this by having W2001 read files from disk.
+   - No file I/O in lint rules. No “open Location and parse YAML” inside W2001 (or any rule).
+   - Avoid any extra deep scans that can change results on unrelated templates (integration snapshots failed previously).
+2) The fix must be hermetic and deterministic across templates and test harnesses.
+3) Do not weaken W2001 globally or change outputs for templates that do not use AWS::Include.
+4) Security: do not introduce behavior that reads arbitrary paths specified by templates.
+5) Do not “parse included OpenAPI as a full CloudFormation Template” inside the rule.
+
+High-level approach you should take
+- Keep W2001 as a pure consumer of the already-decoded template structure and/or metadata produced by the template decoding / transform system.
+- Implement AWS::Include handling in the appropriate layer that already deals with transforms/includes (decode/transform stage), so that:
+  - either the included content is inlined into the template object before rules run, or
+  - references found in included content are surfaced to rules via existing “transform_pre” / reference-collection mechanisms.
+- Then W2001 will naturally see those parameter references and stop flagging them as unused.
+
+What to deliver
+A) Reproduction test(s)
+1) Add a focused unit test that reproduces the false positive:
+   - A template with Parameters PetLambdaArn and UserPoolArn.
+   - An AWS::ApiGateway::RestApi Body using Fn::Transform AWS::Include to include an OpenAPI YAML.
+   - The included YAML contains Fn::Sub with ${PetLambdaArn} and ${UserPoolArn}.
+   - Expected: W2001 should NOT warn on those parameters.
+2) The test must not rely on the process CWD. Use repository test fixture patterns already used in the project so relative paths are resolved consistently in the decode/transform layer (not in the rule).
+3) After the fix, run the full test suite (at least the unit tests plus the integration quickstart tests) and ensure:
+   - No integration snapshot count/exit-code changes, especially for test/fixtures/templates/quickstart/openshift.yaml.
+
+B) Implementation requirements
+1) Find existing code that handles Fn::Transform / AWS::Include.
+   - Search in the codebase for “AWS::Include”, “Fn::Transform”, “transform”, “include”, “Location”.
+   - There is likely a transform subsystem under cfnlint/template/transforms or decode logic that already performs include expansion for other rules.
+2) Implement include expansion or reference extraction there, not in W2001.
+   - The safest option is to inline the included YAML into the template AST at decode time, because then every rule benefits without special casing.
+   - If full inlining is too risky, implement a minimal mechanism that extracts “Refs” and “Fn::Sub ${Param}” occurrences from included content and merges that into the template’s precomputed reference map used by W2001. Do this in the transform/decode stage, not in W2001.
+3) Path resolution rules must match existing project behavior.
+   - Reuse existing helper functions for resolving template-relative paths. Do not invent new heuristics.
+4) If include reading already exists elsewhere in the project, reuse it rather than duplicating logic.
+5) Do not swallow broad exceptions silently. If you must handle failures, do so predictably and in a way that does not change lint results for templates without AWS::Include.
+
+C) Validation and regression control (mandatory)
+1) Before coding, identify how W2001 currently determines whether a parameter is “used”.
+   - Locate W2001 implementation and the data structures it relies on (for example, transform_pre/ref maps).
+2) After implementing the fix, explicitly verify:
+   - The new reproduction test passes.
+   - The integration tests that previously regressed remain unchanged:
+     - test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+     - test/integration/test_quickstart_templates_non_strict.py::test_templates
+     - test/integration/test_quickstart_templates_non_strict.py::test_module_integration
+3) If any integration test changes, do NOT update expected snapshots. Instead, find and eliminate the unintended new finding.
+   - To debug, run cfn-lint on the failing template with JSON output and compare to the expected results file to see exactly what new message appeared and why. Fix the root cause.
+
+Step-by-step instructions you must follow
+1) Understand the failing behavior and write the reproduction test first.
+2) Locate where transforms/includes are processed.
+3) Implement the fix in the transform/decode layer so that included OpenAPI content contributes parameter references.
+4) Ensure W2001 itself stays free of file I/O and does not add extra whole-template scans beyond what it already does.
+5) Run tests and ensure zero regressions in integration snapshots.
+6) Remove any temporary debugging artifacts; do not commit changes.
+
+Useful sample inputs (for your test fixtures)
+Template (api.cfn):
+- Parameters: PetLambdaArn (String), UserPoolArn (String)
+- Resource: AWS::ApiGateway::RestApi with Body using Fn::Transform AWS::Include Location pointing to an OpenAPI YAML fixture file.
+
+OpenAPI (api-specification.yml):
+- Contains:
+  - x-amazon-apigateway-integration.uri with Fn::Sub referencing ${PetLambdaArn}
+  - components.securitySchemes...providerARNs with Fn::Sub referencing ${UserPoolArn}
+
+Deliverable quality bar
+- Correct fix placed in the right architectural layer (transform/decode), not in W2001.
+- Deterministic behavior.
+- No new warnings/errors on unrelated templates (especially quickstart/openshift.yaml).
+- Tests added and all tests pass.
+
+Do not commit your edits.

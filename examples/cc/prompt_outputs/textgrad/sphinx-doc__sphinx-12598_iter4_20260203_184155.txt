@@ -1,0 +1,135 @@
+## Where the agent failed (and why)
+
+### 1) It didn’t actually reproduce the reported failures
+The prompt asks for *LaTeX build failures*:
+
+- `Not in outer par mode` when a `figure` is nested under `.. seealso::`
+- `Missing \endgroup inserted` when a `sphinxadmonition` appears inside `tabulary`
+
+The agent:
+- never ran `pytest` at all,
+- never ran `pdflatex/xelatex/lualatex` compilation via the existing `compile_latex_document()` helper,
+- never demonstrated either LaTeX error occurring before the fix or disappearing after the fix.
+
+So the changes were speculative and unvalidated.
+
+**How to improve:** Add/adjust a testroot + test that actually compiles LaTeX (or at least asserts the generated TeX structure that provokes the error, *and* ensure at least one test in CI triggers LaTeX compilation or has a strong enough TeX-output assertion).
+
+---
+
+### 2) The “test root” handling was confused and broken
+The trace shows multiple contradictory actions:
+
+- It searched for `tests/roots/*` using `Glob` and got “No files found” because it used the wrong path/pattern at that moment, despite `/testbed/tests/roots/...` existing.
+- It attempted to create a new root in a *different name* (`test-latex-figure-in-admonition`) while the existing test expects `test-latex-figure-in-admonition` already exists (it did).
+- It created an *extra* directory `test-latex-figure-in-admonition` (via `mkdir -p`), but that directory already existed in the repository listing.
+- It attempted to `Write` `index.rst` and got an error (“File has not been read yet”), because this environment requires reading before writing. It later succeeded, but only after extra churn.
+- It tried to `Glob` the root and got “No files found” because it used an absolute glob pattern that likely didn’t match the tool’s expectations.
+
+**Net result:** unnecessary edits and risk of corrupting an existing test root.
+
+**How to improve:** Before creating files/dirs, confirm the testroot exists (`ls tests/roots/test-latex-figure-in-admonition`). When adding new roots, keep naming consistent with the tests. Avoid editing shared fixtures like `test-root/markup.txt` unless you also update expected outputs.
+
+---
+
+### 3) It edited production test fixtures (then partially reverted)
+The agent edited `tests/roots/test-root/markup.txt` to add a `figure` inside `seealso`, then removed it later.
+
+Even temporarily, this is risky because:
+- `test_writer()` asserts **exact** LaTeX fragments derived from `test-root/markup.txt`. Any fixture change usually requires updating those asserts.
+- The agent did not update `test_writer()` assertions to include the figure output within `sphinxseealso`.
+- The agent did not run tests to confirm.
+
+**How to improve:** Don’t modify existing shared roots used by many tests; add a dedicated minimal testroot for the regression.
+
+---
+
+### 4) The core fix is likely incomplete / conceptually off in places
+
+#### 4a) `seealso` float suppression: plausible, but not proven
+They changed `visit_seealso()` to increment `no_latex_floats`, so `visit_figure()` uses `[H]` instead of `[htbp]`.
+
+That aligns with the observed LaTeX error (“Not in outer par mode”) which often happens when LaTeX tries to open a float in contexts that aren’t “outer paragraph mode” (lists/minipages/boxes). A `seealso` admonition is rendered as a custom environment (`sphinxseealso`) that may behave like a boxed/list context.
+
+But the agent never confirmed the TeX structure produced for `seealso` (and whether `[H]` is sufficient), nor whether `sphinxseealso` should be treated like other admonitions at a LaTeX macro level.
+
+**Better approach:** Ensure the LaTeX environment for `seealso` is treated as an admonition consistently, likely by using the same macro/environment (`sphinxadmonition`) or by ensuring `sphinxseealso` itself enters a safe context for figures (e.g., uses `\begin{sphinxShadowBox}` or similar). At least, add a regression test that fails pre-fix by compiling LaTeX.
+
+#### 4b) The `tabulary` + admonition fix is speculative and may not address the real cause
+They added `if self.table: self.table.has_problematic=True` inside `visit_admonition` and `_visit_named_admonition`, and also in `visit_seealso`.
+
+This forces table type to become `tabular` instead of `tabulary` (because `Table.get_table_type()` chooses `tabular` when `has_problematic` is set). That is a blunt workaround, but:
+
+- The reported failure is specifically “putting a sphinxadmonition in tabulary now fails”.
+- The agent did not create a reproduction that actually places an admonition inside a table cell that would otherwise be `tabulary`.
+- It’s possible the real regression is a missing grouping/`\par` management around `sphinxadmonition` when it is embedded into table cells, not that `tabulary` is inherently impossible.
+- Forcing `tabular` might change output layout and could break existing table rendering expectations/tests.
+
+**How to improve:** Create a dedicated latex-table fixture that produces a `tabulary` table with an admonition inside a cell, then ensure the fix either:
+- properly wraps the admonition so `tabulary` remains valid, or
+- explicitly documents/ensures Sphinx falls back to `tabular` (and updates expected outputs accordingly).
+
+Right now, no tests verify the fallback behavior and no existing expected `.tex` files were updated.
+
+---
+
+### 5) It broke/ignored existing tests and expectations
+There is already an assertion in `test_writer()` for a `sphinxseealso` block:
+
+```py
+assert ('\\begin{sphinxseealso}{See also:}\n\n'
+        '\\sphinxAtStartPar\n'
+        'something, ...\n'
+...
+        '\\end{sphinxseealso}\n\n' in result)
+```
+
+After the agent’s change, `visit_seealso()` now increments `no_latex_floats` *and* potentially marks tables problematic, but it does **not** change the output TeX for that `seealso` snippet (so this assert might still pass). However, once you add a figure inside that `seealso` in the same root, the snippet changes and the assert would fail unless updated. The agent almost did that by editing `markup.txt`, then reverted.
+
+More importantly: the regression is about LaTeX compilation errors, but the repository’s LaTeX tests often validate output fragments, not compilation. The agent did not add assertions that ensure `[H]` is used inside `seealso`.
+
+---
+
+### 6) The write attempts show poor tool discipline
+Repeated tool errors:
+- wrong base path (`/workspace` doesn’t exist),
+- writing without reading first (multiple times),
+- trying to `Read` a directory.
+
+This indicates the agent didn’t follow a reliable workflow and wasted steps, increasing risk.
+
+---
+
+## What the agent should have done instead (concrete improvement plan)
+
+1) **Add a focused regression testroot** (don’t touch `test-root`):
+   - `tests/roots/test-latex-admonition-regressions/`
+   - `conf.py`, `index.rst`, plus an image file if needed.
+
+2) **Reproduce both issues with tests:**
+   - For the `seealso`/figure case:
+     - Generate TeX and assert the figure environment uses `[H]` when nested in `seealso`.
+     - Ideally also compile with LaTeX (skip if LaTeX not installed), to ensure no “Not in outer par mode”.
+   - For the `tabulary` case:
+     - Build a doc with a table that would choose `tabulary` (e.g., widths/align triggers `tabulary`) and contains an admonition inside a cell.
+     - Assert that the produced TeX chooses `tabular` **or** that compilation succeeds (depending on intended behavior).
+
+3) **Implement the minimal fix in the right layer:**
+   - If the intent is “no floats inside *any* admonition-like environment”, then `seealso` should be included in that same logic. A clean way is to treat `addnodes.seealso` similarly to other `nodes.Admonition` types for float suppression.
+   - If the intent is “admonitions in tables must force non-tabulary”, then ensure the *table cell visitor logic* detects admonitions (and/or `sphinxadmonition`) and marks the table problematic in a centralized place—rather than sprinkling it in a few visitors.
+
+4) **Run tests**:
+   - `pytest tests/test_builders/test_build_latex.py::test_latex_figure_in_admonition`
+   - New regression tests you added.
+   - If available, run the LaTeX compilation tests (they are already present and skipped when LaTeX isn’t installed).
+
+5) **Cleanup**:
+   - Remove any accidental fixture edits (the agent did some partial cleanup, but this should be systematic).
+
+---
+
+## Summary of the key failure reasons
+- No real reproduction; no tests executed.
+- Mishandled/duplicated test roots; edited shared fixtures unsafely.
+- Fixes were speculative and not tied to verified failing TeX output or compilation.
+- Did not add robust regression assertions for the exact issues reported.

@@ -1,0 +1,37 @@
+diff --git a/keras/src/layers/attention/multi_head_attention.py b/keras/src/layers/attention/multi_head_attention.py
+index 5fae13023..5c98df3ab 100644
+--- a/keras/src/layers/attention/multi_head_attention.py
++++ b/keras/src/layers/attention/multi_head_attention.py
+@@ -453,6 +453,32 @@ class MultiHeadAttention(Layer):
+         if key is None:
+             key = value
+ 
++        # Validate shapes in eager mode to match compute_output_shape checks.
++        q_last = query.shape[-1]
++        v_last = value.shape[-1]
++        if q_last is not None and v_last is not None and q_last != v_last:
++            raise ValueError(
++                "The last dimension of `query_shape` and `value_shape` "
++                f"must be equal, but are {q_last}, {v_last}. "
++                f"Received: query_shape={query.shape}, value_shape={value.shape}"
++            )
++        if key is not None and key is not value:
++            v_prefix = value.shape[1:-1]
++            k_prefix = key.shape[1:-1]
++            # Only check if fully known to avoid breaking symbolic cases.
++            if (
++                v_prefix is not None
++                and k_prefix is not None
++                and all(d is not None for d in v_prefix)
++                and all(d is not None for d in k_prefix)
++                and v_prefix != k_prefix
++            ):
++                raise ValueError(
++                    "All dimensions of `value` and `key`, except the last one, "
++                    f"must be equal. Received: value_shape={value.shape} and "
++                    f"key_shape={key.shape}"
++                )
++
+         attention_mask = self._compute_attention_mask(
+             query,
+             value,

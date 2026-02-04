@@ -1,0 +1,100 @@
+You are an expert Python developer working on the **cfn-lint** repository in the current directory. You are also an expert at making *minimal, compatibility-preserving* changes in mature linters.
+
+## Goal (what to change)
+Fix this specific false positive:
+
+When linting a specific region (example: `-r cn-north-1`), **E3006 (resource type availability per region)** should not report an error for a resource that **cannot ever be created in that region because its CloudFormation `Condition` evaluates to `False` for that region**.
+
+Example false positive to eliminate:
+
+> E3006 Resource type 'AWS::GlobalAccelerator::Listener' does not exist in 'cn-north-1'
+
+when that resource has `Condition` excluding `cn-north-1`.
+
+## Critical constraints from previous failures (must follow)
+Previous attempts changed condition semantics and broke integration fixtures. You must avoid that.
+
+1. **Do not change the existing global semantics of E3006 condition handling in a way that affects other templates/regions.**
+   - In this repository, integration fixtures currently encode the historical behavior. A “logically correct” tightening can be incompatible and will fail integration tests.
+2. The fix must be **precise and narrow**, matching the reported CN-region exclusion scenario without creating new findings in existing fixtures.
+3. **You must run the full test suite (`pytest -q`) before finalizing.** Running only unit tests is not sufficient here.
+4. If any integration test changes, you must:
+   - identify the exact delta by diffing produced output against the golden fixture, and
+   - adjust the implementation to preserve prior behavior (do not update golden fixtures unless explicitly instructed; you are not instructed to do so).
+
+## What “precise and narrow” means in practice
+- The bug is about **resources that are provably never created in the linted region** due to a region-based condition.
+- Implement a narrow skip for E3006 only in the case that can be proven with high confidence and minimal surface area:
+  - Condition is present on the resource,
+  - Condition references `AWS::Region` (directly or via nested functions),
+  - and for the lint region it can be evaluated to a single deterministic outcome of `False`.
+- If anything is unknown/indeterminate, keep existing behavior.
+
+Important: the repository already has condition-scenario logic (function names similar to `build_scenerios_on_region`). Prior attempts that replaced “skip if False is possible” with “skip only if always False” caused integration failures. Therefore:
+- **Do not replace the existing semantics globally.**
+- If you need stronger logic, implement it as an *additional, narrowly-scoped fast-path* that only triggers for the exact CN-region exclusion pattern and leaves the old path unchanged otherwise.
+
+## Required workflow (do not skip steps)
+
+### Step 1: Locate E3006 implementation and current condition gating
+- Find where rule E3006 is defined and where it checks “type exists in region”.
+- Find the current logic that consults `resource.get("Condition")` and uses condition scenario building.
+- Document (in your own notes while coding) the current behavior and where you will insert the narrow fix.
+
+### Step 2: Create a realistic reproduction as tests (unit tests)
+Add tests that mirror the real report:
+
+1. Template contains:
+   - `Conditions` section defining a condition that excludes CN regions using `Ref: AWS::Region` with `Fn::Not`, `Fn::Or`, `Fn::Equals`.
+   - A resource with `"Condition": "SomeCondition"` and a type known to be unavailable in `cn-north-1` in this repo’s regional schema data (use the reported `AWS::GlobalAccelerator::Listener` if available).
+2. Lint with region `cn-north-1`.
+3. Assert: **no E3006 for that resource**.
+4. Add at least one contrast case:
+   - Lint with region `us-east-1` and assert that E3006 behavior is unchanged (either it reports or doesn’t report depending on actual availability there), OR
+   - Use a condition that is indeterminate (not resolvable with region) and assert E3006 is not skipped.
+
+Test quality requirements:
+- The test must fail on the current main branch behavior (before your change) and pass after.
+- The test must not rely on implementation details beyond what’s necessary (avoid asserting internal helper outputs).
+
+### Step 3: Implement the fix with compatibility in mind
+Implement the smallest change possible:
+
+- Keep the historical condition semantics intact for the general case (this is essential to avoid integration regressions).
+- Add a narrow, explicit check specifically for “provably always false for this region” based on region evaluation, without altering how other condition cases are handled.
+
+Concrete guidance for implementation strategy:
+- Prefer adding a small helper used only by E3006, such as:
+  - “can_prove_condition_false_for_region(condition_name, region)”
+- This helper should:
+  - Return `True` only when it can deterministically prove the condition evaluates to `False` for that region.
+  - Return `False` for indeterminate/unknown/missing conditions.
+- In E3006 region loop:
+  - If helper returns `True`, skip the availability check for that region.
+  - Otherwise, follow the existing behavior exactly as before.
+
+Do not:
+- Change shared condition evaluation utilities used by other rules unless absolutely necessary.
+- Replace “skip if False is possible” with “skip only if always False” globally; that was the previous breaking change.
+
+### Step 4: Run tests in the correct order and diagnose deltas
+1. Run: `pytest -q test/unit/rules`
+2. Run: `pytest -q`
+
+If `pytest -q` fails:
+- Do not guess. Identify the exact delta.
+- For integration fixture failures, run the exact failing command, capture output, and diff against expected golden files to find the added/removed message.
+- Adjust implementation to preserve prior outputs while still passing your new unit test.
+
+### Step 5: Clean up and final verification
+- No debug prints, no temporary files.
+- Keep changes limited to the E3006 rule logic and the new/updated tests.
+- Ensure `pytest -q` passes.
+
+## Deliverable
+Implement the code change and unit tests in this repository. Do not commit. Ensure the full test suite passes.
+
+## Reminder: success criteria
+- New unit test demonstrates CN-region exclusion condition suppresses E3006 in `cn-north-1`.
+- No integration regressions: `pytest -q` passes without modifying golden fixtures.
+- Change is minimal and does not broadly alter condition semantics for E3006 outside the targeted pattern.

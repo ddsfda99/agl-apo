@@ -1,0 +1,161 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+Inconsistent assertion in keras.layers.MultiHeadAttention
+I've noticed that depending on what is fed as the key, query and value to the keras.layers.MultiHeadAttention the assertion query_shape==value_shape is only _sometimes_ activated.
+
+Minimal working example (no assertion error):
+```
+`import os`
+`os.environ["KERAS_BACKEND"] = "torch"`
+`import torch  # ==2.3.0`
+`import keras  # ==3.3.0`
+
+`batch_size = 32`
+`seq_len = 256`
+`key_dim = 16`
+`value_dim = 8`
+`num_heads = 8`
+
+`query = torch.randn(batch_size, seq_len, key_dim)`
+`key = torch.randn(batch_size, seq_len, key_dim)`
+`value = torch.randn(batch_size, seq_len, value_dim)`
+
+`mha = keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=key_dim//num_heads)`
+`attn_out = mha(query=query, value=value, key=key)`
+
+In contrast, I've tried the same procedure with keras tensors instead (assertion error):
+`query = keras.Input(shape=(seq_len, key_dim))`
+`key = keras.Input(shape=(seq_len, key_dim))`
+`value = keras.Input(shape=(seq_len, value_dim))`
+
+`mha = keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=key_dim//num_heads)`
+`attn_out = mha(query=query, value=value, key=key)`
+```
+
+which yields:
+_The last dimension of `query_shape` and `value_shape` must be equal, but are 16, 8. Received: query_shape={query_shape}, value_shape={value_shape}_
+
+I realise that the former has a static batch shape of 32 while the latter a dynamic one, is that where the problem lies? 
+Or perhaps the former uses the torch version of [MultiHeadAttention ](https://keras.io/api/layers/attention_layers/multi_head_attention/)in which, according to to this [issue](https://github.com/pytorch/pytorch/pull/39402), the assertion has been removed?
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## Why the agent failed
+
+### 1) It “fixed” the wrong thing (changed semantics instead of fixing inconsistency)
+The report is about **inconsistent behavior**: eager tensors don’t trigger a shape assertion, but symbolic `KerasTensor` does. That inconsistency is real, but the agent resolved it by **removing the check entirely**:
+
+```py
+# removed:
+if query_shape[-1] != value_shape[-1]:
+    raise ValueError(...)
+```
+
+This is a semantic change: it makes *symbolic* mode accept inputs that *the layer may not be designed to accept*, rather than making eager and symbolic behave consistently.
+
+Whether MHA should allow `query.shape[-1] != value.shape[-1]` is not established by the prompt; the prompt just observes inconsistency and asks why. Keras’ historical API and the existing unit test (`query_value_dim_mismatch`) strongly suggest the opposite: **Keras expects query/value last dim to match** (or at least expected it in this repo version).
+
+So the agent didn’t implement “consistency”; it removed a validation constraint and updated tests to match. That will likely break expectations elsewhere.
+
+### 2) It didn’t reproduce the original scenario correctly (Torch backend, eager torch tensors)
+The prompt’s key observation is specifically with:
+
+- `KERAS_BACKEND=torch`
+- eager uses **torch tensors**
+- symbolic uses `keras.Input`
+
+The agent first created a test using torch backend, then removed torch usage and switched to NumPy arrays. That **no longer tests the reported inconsistency**, because:
+- NumPy backend/eager behavior is different from torch backend eager behavior.
+- The bug may be in torch backend dispatch, tracing, or shape inference.
+
+A correct repro should lock backend to torch and use torch tensors in eager mode, plus KerasTensors in symbolic mode.
+
+### 3) It ran only its own tests, and avoided the real suite
+They attempted `pytest -q` and hit:
+
+```
+ModuleNotFoundError: No module named 'tf_keras'
+```
+
+That’s an environment/test selection issue, but the required workflow is: **run tests relevant to the change** (e.g., `keras/src/layers/attention/multi_head_attention_test.py`) rather than only an ad-hoc repro. The agent never ran the existing MHA tests after modifying them.
+
+Even worse: it edited core tests to match its change, which hides failures.
+
+### 4) It removed/altered an existing contract test instead of adding coverage
+They removed `query_value_dim_mismatch` from `test_shape_mismatch_error`. That test was explicitly asserting the prior contract.
+
+If the real fix is “make eager also error” (most likely), that test should remain, and a new test should be added to ensure eager mode raises too.
+
+### 5) The implemented change is incomplete: inconsistency would still exist elsewhere
+Even if you wanted to allow differing dims, removing the check only in `compute_output_shape()` addresses symbolic inference, but leaves other shape validations (e.g., in `build()`, `call()`, sublayer builds) potentially inconsistent across backends. This is fragile.
+
+---
+
+## What the correct fix likely is (based on the prompt + existing tests)
+
+The inconsistency exists because:
+
+- **Symbolic mode** calls `compute_output_spec()` → `compute_output_shape()` and hits the validation.
+- **Eager mode** often bypasses `compute_output_shape()` and may not perform equivalent validation at runtime.
+
+So to make behavior consistent *without changing API semantics*, you should:
+
+### A) Keep the validation in `compute_output_shape`
+Don’t delete it; it encodes the intended constraint per existing tests.
+
+### B) Add the same validation to runtime execution
+Implement runtime checks early in `call()` (or `build()` / `call()` before projections), in a way that works for eager tensors too.
+
+Common approach:
+- If both last dims are statically known: check and raise immediately.
+- If dynamic: optionally insert a runtime assert (backend-dependent) or skip if not supported, but at least align torch eager with symbolic for known shapes.
+
+Example sketch (conceptual):
+- In `call()`:
+  - read `query.shape[-1]` and `value.shape[-1]`
+  - if both are not `None` and unequal → raise `ValueError` with same message
+
+This would make eager torch tensors raise as well (since they have concrete shapes).
+
+### C) Add/adjust tests properly
+- Restore `query_value_dim_mismatch` in `test_shape_mismatch_error`
+- Add a new test that calls the layer eagerly with mismatched last dims and asserts it raises (for trainable backends; skip numpy backend if needed)
+
+---
+
+## Secondary issues in the agent’s process (how it can improve)
+
+1. **Path handling mistakes at start**: tried `/workspace` and `/keras/...` before checking `pwd`. Wasted steps.
+2. **Didn’t confirm current behavior**: before changing code, it should have written a minimal repro that fails *on current code* using the same backend/tensors as the prompt.
+3. **Overfit to its own interpretation**: assumed “MHA supports different dims” without verifying from this repo’s intended API/tests.
+4. **Changed library behavior + tests simultaneously**: that’s a red flag; tests should usually validate the intended behavior, not be edited away unless the spec explicitly changed.
+5. **Clean-up removed the only evidence**: deleting the repro file is fine, but they also modified core tests; leaving no focused regression test in the suite for the reported inconsistency is bad.
+
+---
+
+## Summary of actionable changes to make it pass all tests
+
+- Revert the removal of the `query_shape[-1] != value_shape[-1]` check in `compute_output_shape`.
+- Add equivalent shape validation in `call()` (and/or `build()`) so eager torch triggers the same error.
+- Restore the original unit test case that expects mismatch to raise.
+- Add a new regression test that reproduces the inconsistency: eager torch tensors should now raise too (matching symbolic).
+
+This addresses the reported inconsistency while preserving the repo’s existing contract and tests.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

@@ -1,0 +1,252 @@
+You are given a code repository in the current directory.
+
+## Goal
+Fix cfn-lint so it validates AWS::StepFunctions::StateMachine `Definition` against newer Amazon States Language schema features **without emitting incorrect E3601 errors** for:
+
+1) Map state inline `ItemProcessor` (replacing deprecated `Iterator`)
+2) Fail state `CausePath` and `ErrorPath`
+3) Choice state operators: `IsBoolean`, `IsNumeric`, `IsPresent`, `IsString`, `IsTimestamp`, and the `*EqualsPath` / `*GreaterThanPath` / etc path variants
+4) Task state `TimeoutSecondsPath` and `HeartbeatSecondsPath`
+
+Repo version: cfn-lint 1.8.1  
+Environment: python:3.12-alpine
+
+## Critical constraints from previous failures (must follow)
+Previous attempts failed because they:
+- **Broke JSON syntax** in `statemachine.json` (missing commas), causing pytest collection to crash.
+- **Changed schema structure too much** (requiredXor/anyOf refactors), causing integration regressions (QuickStart openshift findings count changed).
+
+To avoid repeating that:
+
+### Absolute rules
+- Do NOT rewrite or replace `src/cfnlint/data/schemas/other/step_functions/statemachine.json` wholesale.
+- Make minimal, surgical edits only (add missing properties / operator alternatives).
+- Do NOT refactor `requiredXor`, `anyOf`, `allOf`, or other structural validation logic unless it is strictly required to accept the new features.
+- Do NOT add `"$ref": "#/"` or other recursive root references for `States` or `ItemProcessor` that could change validation shape.
+- Do NOT overwrite entire test files. Only append/extend targeted tests.
+- Do NOT modify the pinned expected JSON fixtures under `test/fixtures/results`. If integration output differs, fix the schema, not expectations.
+
+### Safety requirement after every schema edit
+After each edit to any JSON schema file, **immediately validate JSON parsing** before running tests:
+- Run: `python -c "import json; json.load(open('src/cfnlint/data/schemas/other/step_functions/statemachine.json'))"`
+- Also run: `python -m json.tool src/cfnlint/data/schemas/other/step_functions/statemachine.json > /dev/null`
+
+If either fails, fix JSON syntax before proceeding.
+
+## Reproduction templates (must lint cleanly after fix)
+
+### Map state inline ItemProcessor should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: Validate_All
+        States:
+          Validate_All:
+            Type: Map
+            InputPath: $.detail
+            ItemProcessor:
+              ProcessorConfig:
+                Mode: INLINE
+              StartAt: Validate
+              States:
+                Validate:
+                  Type: Pass
+                  End: true
+            End: true
+            ResultPath: $.detail.shipped
+            ItemsPath: $.shipped
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Fail state CausePath and ErrorPath should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: FailState
+        States:
+          FailState:
+            Type: Fail
+            CausePath: $.Cause
+            ErrorPath: $.Error
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Choice operators and Path comparators should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: ChoiceState
+        States:
+          ChoiceState:
+            Type: Choice
+            Choices:
+              - Variable: $.v
+                NumericEquals: 0
+                Next: SucceedState
+              - Variable: $.v
+                IsPresent: true
+                Next: SucceedState
+            Default: SucceedState
+          SucceedState:
+            Type: Succeed
+          FailState:
+            Type: Fail
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Task TimeoutSecondsPath and HeartbeatSecondsPath should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: TaskState
+        States:
+          TaskState:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            TimeoutSecondsPath: $.TimeoutSeconds
+            HeartbeatSecondsPath: $.HeartbeatSeconds
+            End: true
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+## What to implement (minimal schema extension, not redesign)
+
+### Primary file (likely)
+- `src/cfnlint/data/schemas/other/step_functions/statemachine.json`
+
+### Map state: ItemProcessor
+- Add support for `ItemProcessor` as an alternative to `Iterator`.
+- Preserve existing validation semantics as much as possible.
+- Do not remove or change existing `Iterator` support.
+- Avoid changing required fields logic unless strictly necessary.
+- If current schema enforces presence of `Iterator` via `required`, update it minimally so that either `Iterator` or `ItemProcessor` is allowed.
+  - Do NOT incorrectly combine `Next` and `End` into the same XOR group with `Iterator`/`ItemProcessor`.
+  - If there is an existing `requiredXor` for `Next` vs `End`, leave it unchanged.
+- Ensure `ItemProcessor` schema structure matches ASL: it contains `ProcessorConfig` (optional) and a nested state machine fragment with `StartAt` and `States`.
+  - Reuse existing schema fragments used by `Iterator` (if present) rather than introducing new root refs.
+
+### Fail state: CausePath/ErrorPath
+- Add optional properties `CausePath` and `ErrorPath` in addition to existing `Cause` and `Error`.
+- Use the same type pattern used by other JSONPath fields in this schema (often ["string","null"] in this repo). Match existing conventions in the file.
+
+### Task state: TimeoutSecondsPath/HeartbeatSecondsPath
+- Add optional `TimeoutSecondsPath` and `HeartbeatSecondsPath`.
+- Type should match other Path fields (string JSONPath, and allow null only if consistent with existing file conventions).
+
+### Choice state: new operators and *Path comparator variants
+- Extend the Choice rule/operator definitions to include:
+  - `IsBoolean`, `IsNumeric`, `IsPresent`, `IsString`, `IsTimestamp` (boolean values)
+  - Path comparator variants for existing comparators (for example `NumericEqualsPath`, `StringEqualsPath`, and other `*Path` variants already implied by existing operators in the schema).
+- Keep the “exactly one operator per Choice rule” behavior consistent with the existing schema pattern.
+  - Do not refactor the whole choice schema; only extend the existing lists/oneOf/requiredXor sets in-place.
+- Maintain compatibility: do not change existing error selection order if avoidable.
+
+## Required debugging step to prevent integration regressions
+You MUST ensure QuickStart template outputs are unchanged except for intended bugfixes.
+
+Do this explicitly:
+
+1) Run cfn-lint on `test/fixtures/templates/quickstart/openshift.yaml` in both strict and non-strict modes as the tests do, and capture output in JSON:
+   - `cfn-lint --format json test/fixtures/templates/quickstart/openshift.yaml > /tmp/openshift.non_strict.json`
+   - `cfn-lint --format json --strict test/fixtures/templates/quickstart/openshift.yaml > /tmp/openshift.strict.json`
+
+2) Compare your produced JSON arrays against:
+   - `test/fixtures/results/quickstart/non_strict/openshift.json`
+   - `test/fixtures/results/quickstart/strict/openshift.json` (if present)
+
+3) If there is any difference in number of findings (e.g., 36 vs 35) or any new/changed finding:
+   - Identify the exact extra/changed entry by comparing tuples of:
+     - Rule Id
+     - Message
+     - Location (path + line/col)
+   - Fix the schema to remove the regression.
+   - Do NOT change expectation files.
+
+Do not proceed by guessing. Always locate the exact extra finding first if regression happens.
+
+## Tests to add (small and targeted)
+Add minimal tests that fail before and pass after, covering:
+- Map state with ItemProcessor (INLINE)
+- Fail state with CausePath/ErrorPath
+- Task state with TimeoutSecondsPath/HeartbeatSecondsPath
+- Choice state with IsPresent (and optionally one more Is*), plus at least one `*EqualsPath` comparator
+
+Rules:
+- Do NOT overwrite any existing test module.
+- Prefer extending existing StepFunctions-related tests already in the repo.
+- Keep assertions stable: avoid asserting overly specific schema_path details unless the existing test style requires it.
+- If adding new tests risks coupling to schema internals, prefer higher-level behavior checks (for example: “no E3601 errors”).
+
+## Implementation approach (must follow to avoid JSON corruption)
+1) Locate exact schema sections for Map/Fail/Task/Choice in `statemachine.json`.
+2) Apply edits carefully with correct commas and braces.
+3) After every edit, run JSON validation commands listed above.
+4) Run the smallest relevant unit test subset first (StepFunctions tests).
+5) Run the openshift JSON comparison step exactly as described.
+6) Run full test suite if feasible.
+7) Remove any temporary reproduction files you created.
+
+## Output requirement
+Do not commit changes.
+
+Focus on correctness, minimal diffs, and preserving existing validation behavior while adding support for the listed ASL features.

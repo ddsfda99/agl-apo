@@ -1,0 +1,139 @@
+You are given a code repository in the current directory (this is **cfn-lint**). Implement a **correct, scoped** fix for the issue described below. Do **not** commit changes.
+
+# Issue to fix
+**W2001 “Parameter not used” false positive when using `Fn::Transform` (`AWS::Include`) in `AWS::ApiGateway::RestApi` `Properties.Body`**  
+*cfn-lint version: 0.55.0*
+
+## Scenario
+A CloudFormation template (`api.cfn`) includes an OpenAPI/Swagger file (`api-specification.yml`) using:
+
+```yaml
+Body:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: ./api-specification.yml
+```
+
+The included file contains intrinsic functions like `Fn::Sub` referencing template parameters (e.g., `${PetLambdaArn}`, `${UserPoolArn}`). cfn-lint currently warns W2001 that these parameters are unused because it only scans the main template, not the included file.
+
+## Required behavior
+Parameters referenced in the included file must be treated as **used** for purposes of **W2001**.
+
+## Non-negotiable constraints (based on previous failures)
+1. **No broad suppression**: Do not disable/short-circuit W2001 when any `Fn::Transform`/`AWS::Include` appears.
+2. **No nonstandard `${{...}}`**: Only support real CloudFormation `Fn::Sub` syntax (`${Param}`), consistent with existing cfn-lint behavior.
+3. **Avoid global side effects**: The last attempt changed integration snapshot counts/exit codes. Your fix must be **narrowly scoped** so other templates don’t suddenly change warnings.
+4. **Do not do rule-local “scan everything”**: Avoid filesystem I/O inside W2001 that walks all `Fn::Transform` occurrences across the whole template.
+5. **Relative path resolution must be correct**: Resolve `Location: ./file.yml` relative to the **directory of the template file**.
+
+# What to implement (scoped + consistent)
+Implement support so that when the template contains an `Fn::Transform` with `Name: AWS::Include` **specifically under**:
+`Resources/<logicalId>/Properties/Body` of a resource of type `AWS::ApiGateway::RestApi`,
+the linter:
+1. Resolves the `Location` file path (only local relative paths are required; remote/S3 may be skipped gracefully).
+2. Loads/parses the included YAML/JSON.
+3. Detects parameter usage inside the included structure, at minimum:
+   - `Ref: SomeParam`
+   - `Fn::Sub: "…${SomeParam}…"` (string form)
+   - `Fn::Sub: ["…${SomeParam}…", {...}]` (list form; parse only the template string for `${...}` placeholders, but respect existing semantics)
+4. Feeds discovered parameter names into the same “used parameter” computation that W2001 relies on.
+
+## Critical: reuse existing semantics for `${...}` extraction
+Do **not** invent new regexes that over-match. Reuse cfn-lint’s existing `Fn::Sub` parameter extraction logic if it exists (e.g., `Template.get_sub_parameters` / existing regex constants), so behavior matches the rest of the tool (including ignoring `${!Literal}` and handling pseudo parameters consistently).
+
+## Parsing approach (avoid accidental matches)
+The included OpenAPI file is not a full CFN template. Parse it as YAML/JSON data, then only treat **explicit dict shapes** as intrinsics:
+- A mapping with exactly the key `"Ref"` and a string value
+- A mapping with exactly the key `"Fn::Sub"` and value either string or list form
+Do not treat arbitrary strings containing `${...}` as intrinsic usage unless they are inside an explicit `Fn::Sub`.
+
+## Where to hook this (preferred)
+Prefer integrating this into shared template preprocessing / transform handling (something like `Template.transform_pre` or similar) so W2001 can consume a precomputed “used parameters from includes” set without doing ad-hoc file I/O in the rule.
+
+If that is too invasive, an acceptable fallback is to extend W2001 to consult a helper that:
+- Is **scoped** to RestApi Body includes only
+- Does not scan all transforms across the template
+- Does not add new warnings/errors by itself
+- Caches results per template instance to avoid repeated reads
+
+# Testing requirements (must follow exactly)
+
+## 1) Add a failing unit test first (true reproduction)
+Create a focused unit test that fails on current code and passes after your fix.
+
+### Fixture template (use **single braces** `${Param}` only)
+Template:
+```yaml
+AWSTemplateFormatVersion: 2010-09-09
+Description: Some API
+
+Parameters:
+  PetLambdaArn:
+    Type: String
+  UserPoolArn:
+    Type: String
+
+Resources:
+  SomeApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Body:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: ./api-specification.yml
+```
+
+Included `api-specification.yml`:
+```yaml
+openapi: 3.0.1
+paths:
+  /pet:
+    get:
+      x-amazon-apigateway-integration:
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PetLambdaArn}/invocations
+components:
+  securitySchemes:
+    AwsCognitoUserPoolAuthorizer:
+      x-amazon-apigateway-authorizer:
+        providerARNs:
+          - Fn::Sub: ${UserPoolArn}
+```
+
+### Assertion
+The test must **explicitly assert** that W2001 does **not** report unused-parameter warnings for `PetLambdaArn` and `UserPoolArn`.  
+Do not rely only on “success template” harnesses; assert the absence of these specific matches.
+
+## 2) Ensure include file discoverable
+Your loader must resolve `Location: ./api-specification.yml` relative to the template file’s directory.
+
+## 3) Run tests in this order
+1. Run only the new unit test (confirm it fails before fix).
+2. Run the relevant parameter/W2001 unit tests module(s).
+3. Then run the full test suite.
+
+If full suite changes any integration outputs (counts/exit codes), stop and adjust scope/logic—your change must not introduce unrelated behavior changes.
+
+# Implementation workflow (follow this)
+1. Locate W2001 implementation and how it builds the “used parameters” set.
+2. Locate any existing preprocessing for transforms/includes (`Fn::Transform`, `transform_pre`, etc.).
+3. Add the failing unit test + fixtures first.
+4. Implement scoped include resolution + parse + intrinsic-walk + parameter extraction using existing `Fn::Sub` extraction semantics.
+5. Wire the discovered parameter names into W2001’s used-parameter computation (prefer preprocessing/shared state).
+6. Re-run targeted tests, then full suite.
+7. Remove any debug code; keep the change minimal and deterministic.
+
+# Additional guardrails (to prevent previous regression)
+- Do **not** search `cfn.search_deep_keys("Fn::Transform")` globally and process all includes anywhere.
+- Do **not** treat every `${...}` in the OpenAPI file as a parameter reference—only those under explicit `Fn::Sub`.
+- If the include file can’t be read/parsed, fail gracefully: **do nothing** (don’t mark parameters used, don’t emit extra warnings/errors from W2001).
+- Consider caching include parse results per-template to avoid repeated I/O when multiple rules run.
+
+# Deliverables
+- Code changes implementing the fix.
+- New/updated unit tests + fixtures that fail before the fix and pass after.
+- Confirmation (in your final response) of the exact tests you ran: the new test, the relevant unit module(s), and the full suite.
+
+Do not commit your edits.

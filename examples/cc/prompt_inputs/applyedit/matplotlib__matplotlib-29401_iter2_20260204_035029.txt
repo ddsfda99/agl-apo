@@ -1,0 +1,158 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+[Bug]: .remove() on ErrorbarContainer object does not remove the corresponding item from the legend
+### Bug summary
+
+When I do `.remove()` on `ErrorbarContainer` objects returned from `Axes.errorbar()`, the objects are removed from the plot but the legend items are not removed. 
+
+### Code for reproduction
+
+```python
+# coding="utf-8"
+
+from matplotlib import pyplot
+
+if __name__ == "__main__":
+    
+    ax = pyplot.gca()
+
+    obj1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
+
+    pyplot.legend()
+    pyplot.savefig("test_errorbar_1.pdf") # it has "foo" in the legend as expected
+
+    obj1.remove() # this should remove obj1 from the axes
+
+    ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
+
+    pyplot.legend()
+    pyplot.savefig("test_errorbar_2.pdf") # it has both "foo" and "bar" in the legend
+```
+
+
+### Actual outcome
+
+[test_errorbar_1.pdf](https://github.com/matplotlib/matplotlib/files/10792418/test_errorbar_1.pdf)
+[test_errorbar_2.pdf](https://github.com/matplotlib/matplotlib/files/10792419/test_errorbar_2.pdf)
+
+
+### Expected outcome
+
+The legend in `test_errorbar_2.pdf` contains only one entry corresponding to the second call to `ax.errorbar()`, i.e., the label `"bar"`. 
+
+### Additional information
+
+I am not sure if this is the right way to remove the errorbar objects from the axes after their creation. Please correct me if I am doing it wrong or there is a better way. 
+
+As a side note, when I remove Line2D objects returned from `Axes.plot()`, the corresponding legend items also disappear, as one might expect. Maybe there is a problem specific to errorbar plots?
+
+### Operating system
+
+macOS Ventura 13.0
+
+### Matplotlib Version
+
+3.6.2
+
+### Matplotlib Backend
+
+MacOSX
+
+### Python version
+
+3.10.9
+
+### Jupyter version
+
+_No response_
+
+### Installation
+
+conda
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+The agent actually *fixed the bug correctly* and got the full test suite to pass locally (8344 passed). So it didn’t “fail” in the usual sense.
+
+That said, there are several issues in the trace that could cause failure in a real evaluation environment (or are simply poor practice / fragile). Here’s what went wrong / could be improved:
+
+## 1) Wrong initial repository path (`/workspace` doesn’t exist)
+- The very first grep is run against `/workspace` and errors: `Path does not exist: /workspace`.
+- This indicates the agent didn’t first determine the repo root (often `/testbed` here).
+- Improvement: always `ls` / `pwd` first, or use the provided repo root consistently.
+
+## 2) No explicit reproduction before editing (they jumped to code inspection)
+- The prompt asked to “Write a reproduction test case to confirm the bug”.
+- The agent reasoned about the bug via code reading and then made changes without first reproducing it (e.g., running a minimal script or targeted pytest).
+- Improvement: add a minimal failing test first (or run a small reproduction snippet) before touching library code. This avoids “fixing the wrong thing”.
+
+## 3) Added a new test file, but did not clean up / integrate as expected
+- They created `lib/matplotlib/tests/test_errorbar_legend_remove.py`.
+- This is fine as a regression test, but:
+  - Many projects prefer adding to an existing test module (e.g. `test_container.py` or `test_legend.py`) rather than creating a new file.
+  - The prompt says “Clean up any temporary test files”; a new test file is not “temporary”, but evaluators sometimes interpret this instruction strictly and expect no new files unless necessary.
+- Improvement: add the test to `test_container.py` (closest semantic fit) or `test_legend.py`, and ensure it follows existing conventions.
+
+## 4) Test uses `plt.legend()` instead of `ax.legend()` (fragile)
+- The test is:
+  ```py
+  leg = plt.legend()
+  ...
+  leg = plt.legend()
+  ```
+- This depends on “current axes” state and can be brittle if other tests or fixtures manipulate global pyplot state.
+- Improvement: use `ax.legend()` and `fig, ax = plt.subplots()` consistently; avoid pyplot state.
+
+## 5) Legend assertions rely on exact label list equality (could be brittle)
+- The test asserts:
+  ```py
+  assert [t.get_text() for t in leg.get_texts()] == ["foo"]
+  ```
+- If default artists with labels appear (or ordering changes), this can fail even if behavior is correct.
+- Improvement: assert membership and length or filter labels, e.g. `assert "foo" in labels` then after removal `assert "foo" not in labels` and `assert "bar" in labels`.
+
+## 6) Full `pytest -q` run is inefficient and may time out in evaluation
+- They ran the entire suite (~14 minutes). In CI/eval environments with shorter timeouts, this can fail even though the fix is correct.
+- Improvement: run a targeted subset first:
+  - `pytest -q lib/matplotlib/tests/test_container.py -k errorbar`
+  - then optionally full suite if time permits.
+
+## 7) The key fix is correct, but the agent didn’t fully justify why 3D needed change
+- They also changed `Axes3D.errorbar` to use `add_container`, which is correct symmetry-wise.
+- But there was no reproduction or test covering 3D, so this is “speculative” (still likely correct).
+- Improvement: either add a small 3D regression test or clearly justify why the same container removal semantics apply.
+
+## 8) Minor: ignored tool warning policy text
+- The system reminder about malware is irrelevant here, but the agent never acknowledged it. Not a functional issue, but in some harnesses these reminders exist for compliance.
+- Improvement: no action needed, but don’t let such text distract from task steps.
+
+---
+
+# Bottom line
+**The patch itself is right:** the bug exists because `Axes.errorbar` appended directly to `self.containers` rather than calling `add_container`, so `_remove_method` wasn’t set and `ErrorbarContainer.remove()` didn’t remove it from `ax.containers`, causing stale legend entries.
+
+**Where the agent “failed” relative to the prompt/process** is mostly methodology and robustness:
+- didn’t reproduce first,
+- introduced a new test file in a potentially non-preferred way,
+- wrote a pyplot-state-dependent test,
+- ran full suite unnecessarily.
+
+If you want to harden this solution for an evaluator, the main improvements are: move the regression test into an existing test module, make it use `ax.legend()`, make assertions less strict, and run targeted tests.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

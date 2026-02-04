@@ -1,0 +1,67 @@
+diff --git a/lib/matplotlib/sphinxext/plot_directive.py b/lib/matplotlib/sphinxext/plot_directive.py
+index a7117ba2cd..229d2a40fd 100644
+--- a/lib/matplotlib/sphinxext/plot_directive.py
++++ b/lib/matplotlib/sphinxext/plot_directive.py
+@@ -896,8 +896,29 @@ def run(arguments, content, options, state_machine, state, lineno):
+         if nofigs:
+             images = []
+ 
++        # Format options, properly indenting multi-line values so that
++        # reStructuredText continues the option argument on following lines.
++        # The continuation lines must be indented to align under the start of
++        # the option value. Because the template adds a 6-space base indent
++        # before each option line, we need to include that base indent for
++        # continuation lines here as well.
++        def _format_option(key, val):
++            val = str(val)
++            opt_prefix = f':{key}: '
++            lines = val.split('\n')
++            # First line follows immediately after the option prefix.
++            formatted = opt_prefix + (lines[0] if lines else '')
++            # Continuation lines: add base indent (6 spaces, as in template)
++            # plus spaces equal to the length of the option prefix, so that
++            # the text lines up under the start of the value.
++            if len(lines) > 1:
++                cont_indent = ' ' * 6 + ' ' * len(opt_prefix)
++                for ln in lines[1:]:
++                    formatted += '\n' + cont_indent + ln
++            return formatted
++
+         opts = [
+-            f':{key}: {val}' for key, val in options.items()
++            _format_option(key, val) for key, val in options.items()
+             if key in ('alt', 'height', 'width', 'scale', 'align', 'class')]
+ 
+         # Not-None src_name signals the need for a source download in the
+diff --git a/lib/matplotlib/tests/test_sphinxext.py b/lib/matplotlib/tests/test_sphinxext.py
+index 6e7b5ec5e5..1752efc574 100644
+--- a/lib/matplotlib/tests/test_sphinxext.py
++++ b/lib/matplotlib/tests/test_sphinxext.py
+@@ -222,3 +222,27 @@ def test_srcset_version(tmp_path):
+     st = ('srcset="../_images/nestedpage2-index-2.png, '
+           '../_images/nestedpage2-index-2.2x.png 2.00x"')
+     assert st in (html_dir / 'nestedpage2/index.html').read_text(encoding='utf-8')
++
++
++def test_plot_alt_multiline_option(tmp_path):
++    # Verify that multi-line :alt: option values are properly parsed and
++    # rendered into the HTML <img alt="..."> attribute.
++    parent = Path(__file__).parent
++    shutil.copyfile(parent / 'tinypages/conf.py', tmp_path / 'conf.py')
++    shutil.copytree(parent / 'tinypages/_static', tmp_path / '_static')
++    doctree_dir = tmp_path / 'doctrees'
++    (tmp_path / 'index.rst').write_text(
++        """
++.. plot::
++    :alt: Line one of alt text
++          continues on the next line
++    :include-source: false
++
++    import matplotlib.pyplot as plt
++    plt.plot(range(2))
++"""
++    )
++    html_dir = tmp_path / '_build' / 'html'
++    build_sphinx_html(tmp_path, doctree_dir, html_dir)
++    html = (html_dir / 'index.html').read_text(encoding='utf-8')
++    assert 'alt="Line one of alt text continues on the next line"' in html

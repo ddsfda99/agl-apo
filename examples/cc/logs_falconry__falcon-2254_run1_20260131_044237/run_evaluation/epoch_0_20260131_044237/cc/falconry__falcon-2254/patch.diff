@@ -1,0 +1,55 @@
+diff --git a/falcon/util/sync.py b/falcon/util/sync.py
+index c32c3a3..cd45d37 100644
+--- a/falcon/util/sync.py
++++ b/falcon/util/sync.py
+@@ -5,6 +5,8 @@ from functools import wraps
+ import inspect
+ import os
+ from typing import Any, Awaitable, Callable, Optional, TypeVar, Union
++import warnings
++from .deprecation import DeprecatedWarning
+ 
+ __all__ = [
+     'async_to_sync',
+@@ -54,8 +56,22 @@ class _ActiveRunner:
+ _active_runner = _ActiveRunner(getattr(asyncio, 'Runner', _DummyRunner))
+ _one_thread_to_rule_them_all = ThreadPoolExecutor(max_workers=1)
+ 
+-create_task = asyncio.create_task
+-get_running_loop = asyncio.get_running_loop
++def create_task(coro: Awaitable[Any]) -> asyncio.Task:
++    warnings.warn(
++        'falcon.util.create_task is deprecated; use asyncio.create_task instead.',
++        DeprecatedWarning,
++        stacklevel=2,
++    )
++    return asyncio.create_task(coro)
++
++
++def get_running_loop() -> asyncio.AbstractEventLoop:
++    warnings.warn(
++        'falcon.util.get_running_loop is deprecated; use asyncio.get_running_loop instead.',
++        DeprecatedWarning,
++        stacklevel=2,
++    )
++    return asyncio.get_running_loop()
+ 
+ 
+ def wrap_sync_to_async_unsafe(func: Callable[..., Any]) -> Callable[..., Any]:
+@@ -131,7 +147,7 @@ def wrap_sync_to_async(
+ 
+     @wraps(func)
+     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+-        return await get_running_loop().run_in_executor(
++        return await asyncio.get_running_loop().run_in_executor(
+             executor, partial(func, *args, **kwargs)
+         )
+ 
+@@ -178,7 +194,7 @@ async def sync_to_async(
+         synchronous callable.
+     """
+ 
+-    return await get_running_loop().run_in_executor(
++    return await asyncio.get_running_loop().run_in_executor(
+         None, partial(func, *args, **kwargs)
+     )

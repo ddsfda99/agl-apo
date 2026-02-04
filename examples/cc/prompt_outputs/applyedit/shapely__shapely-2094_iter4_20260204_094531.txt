@@ -1,0 +1,73 @@
+You are an expert Shapely/GEOS contributor working in a local checkout of this repository.
+
+## Task
+Implement the enhancement: **Expose the GEOS WKTReader “fix_structure” option in Shapely’s WKT reader**, so that invalid-but-repairable structures like **unclosed polygon rings** can be loaded when requested.
+
+### Key requirement (do not deviate)
+- **Do NOT implement a custom WKT parser/rewriter in Python.**
+- The issue title is explicit: *“expose fix_structure keyword in WKT reader”*. This implies GEOS already provides this functionality and Shapely must wire it through the C-extension/ufunc layer.
+- The solution must be implemented at the correct layer (GEOS bindings / ufunc), and then exposed in Python (`shapely.from_wkt`, and `shapely.wkt.loads` wrapper).
+
+## Expected behavior
+Given a WKT polygon with an unclosed ring:
+```python
+bad = "POLYGON ((0 0, 1 0, 1 1, 0 1))"
+```
+
+- Current behavior (strict) should remain default:
+  - `shapely.wkt.loads(bad)` raises a `GEOSException` about an unclosed LinearRing.
+- New behavior:
+  - `shapely.wkt.loads(bad, fix_structure=True)` loads successfully and returns a geometry whose exterior ring is closed (last point equals first).
+  - Same option should be available in `shapely.from_wkt(bad, fix_structure=True)` (or whichever internal function `wkt.loads` calls in this codebase).
+
+### API design constraints
+- Add **only** the new keyword needed for this task: `fix_structure` (boolean, default `False`).
+- Do not introduce additional public parameters like `strict=` or `on_invalid=` unless they already exist in the repo and are necessary for wiring. Keep surface area minimal and aligned with the issue request.
+- Ensure backward compatibility: existing calls without `fix_structure` must behave identically.
+
+## Implementation guidance (must follow)
+1. **Start with a failing reproduction test** in the existing test structure (don’t create an entirely new ad-hoc test module unless necessary).
+   - Search for existing WKT IO tests (likely `shapely/tests/test_io.py` or similar). Prefer adding to existing WKT tests.
+   - Write a test that:
+     - Asserts default behavior raises for the bad polygon.
+     - Asserts `fix_structure=True` successfully loads.
+     - Verifies geometry is valid in the sense that the ring is closed (check `geom.exterior.coords[0] == geom.exterior.coords[-1]` or compare `geom.wkt` contains closing coord).
+2. **Locate the correct code path**:
+   - Find where `shapely.from_wkt` and/or `shapely.wkt.loads` is implemented.
+   - Find the C-extension / ufunc that calls GEOS’ WKT reader (`GEOSWKTReader_*` APIs).
+   - Grep the repository for WKT reader calls, e.g. `GEOSWKTReader_create`, `GEOSWKTReader_read`, etc.
+3. **Expose GEOS fix option**:
+   - Determine the exact GEOS API function name for this capability. In GEOS/JTS this is commonly something like:
+     - `GEOSWKTReader_setFixStructure_r(...)` (or similar).
+   - Wire `fix_structure` from Python → ufunc → GEOS reader configuration before reading.
+   - If the function is version-dependent, implement a **GEOS version guard**:
+     - If GEOS does not support the setter, either:
+       - raise a clear error when `fix_structure=True` is requested (preferred), or
+       - skip silently only if that is consistent with project conventions (less preferred).
+   - Do not attempt text rewriting as a fallback.
+4. **Expose it in Python wrappers**:
+   - Ensure both:
+     - `shapely.from_wkt(..., fix_structure=...)`
+     - `shapely.wkt.loads(..., fix_structure=...)`
+     accept the argument and pass through correctly.
+5. **Run tests and fix regressions**
+   - Run the specific new/modified tests first.
+   - Then run at least the relevant existing suites touching IO/WKT.
+   - If **any** unrelated tests fail after your change, treat as your regression until proven otherwise:
+     - Verify whether the failure exists on a clean checkout (baseline).
+     - Bisect by reverting only your changes locally to confirm causality.
+     - Fix the regression or adjust the implementation—do not leave the suite failing.
+
+## Deliverables
+- Code changes implementing `fix_structure` wiring via GEOS WKTReader.
+- Tests proving:
+  - Default strict behavior unchanged.
+  - `fix_structure=True` repairs/accepts unclosed polygon rings.
+- No temporary debug files left behind.
+
+## Notes / pitfalls to avoid (explicitly)
+- Do not implement regex-based or manual parenthesis-scanning WKT rewriting.
+- Do not only handle `POLYGON` textually; fixing must apply wherever GEOS applies it (including nested structures like GeometryCollections), because this is a reader-level option.
+- Ensure your change doesn’t alter behavior of unrelated ops (avoid global state; reader options must be per-call/per-reader instance).
+
+Proceed with: inspect repo structure, add failing test, implement GEOS binding change, wire to Python, run and fix tests.

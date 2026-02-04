@@ -1,0 +1,68 @@
+You are an expert Sphinx core developer working in the current repository. Your goal is to fix a regression introduced in Sphinx 7.1.0 (commit ae206694e68bea074aca633ea0d32e9ed882a95f, part of #11415): **a CSS file added by an extension via `app.add_css_file()` can no longer be overridden by a user placing a same-named file into their configured `html_static_path`.** This must work again.
+
+Context from the report (real-world case: nbsphinx):
+- Extension calls `app.add_css_file('nbsphinx-gallery.css')`.
+- User sets `html_static_path = ['my-static-path']` and provides `my-static-path/nbsphinx-gallery.css` intending to override the extension’s CSS.
+- On Sphinx ≥ 7.1.0, the override stops working.
+
+Important constraints based on previous failed attempts:
+- Do NOT “fix” this by globally reversing the copy order of `html_static_path` or otherwise changing user semantics for multiple static paths in a broad way.
+- Do NOT rely on a synthetic reproduction where the extension mutates `html_static_path` to smuggle its assets in; the real report is about an extension adding CSS via `add_css_file()` and the user overriding by name through `html_static_path`.
+- Your regression test must be faithful: it must verify not only that a file exists in `_static`, but also that the built HTML links to the expected asset and that the user’s override is what is actually served/linked.
+- Prefer a targeted fix in the asset pipeline (copying/collection/dedup/priority handling), not a global change to static path ordering.
+- Reuse/extend existing test patterns and roots in this repo where possible (there are already tests around HTML assets and copy/overwrite behavior).
+
+Task steps (must follow):
+1) Understand the expected behavior precisely and how it regressed after ae206694e….
+2) Create a minimal reproduction test in the Sphinx test suite that fails on current code and would have passed before 7.1.0.
+3) Locate the exact cause in Sphinx core by inspecting the changes introduced in/around ae206694e… (asset copying, HTML builder asset collection, CSS inclusion ordering, checksum query strings, deduplication, or timing of copying relative to extension hooks).
+4) Implement a targeted fix that restores the ability for user `html_static_path` files to override an extension-provided CSS file with the same basename, without changing the user-defined ordering semantics of `html_static_path` for unrelated files.
+5) Run the reproduction test and the relevant test suite to ensure correctness; fix any failures.
+6) Remove any temporary local files you created outside the test suite. Do not commit.
+
+What “override works” must mean in your test:
+- The generated HTML page contains a `<link ... href="_static/nbsphinx-gallery.css...">` (possibly with a checksum query string depending on Sphinx behavior).
+- The CSS file that ends up being referenced/served at that URL is the user-provided one (e.g., contains a distinctive marker comment), not the extension’s packaged version.
+- If there are multiple `<link>` tags, the test must ensure the one intended for `nbsphinx-gallery.css` is the user one (and ideally there is only one; if two are present, that is usually wrong and should be investigated).
+
+How to design a faithful test (guidance):
+- Build a small test root project under `tests/roots/` with:
+  - `conf.py` that:
+    - sets `extensions = ['<your test extension module>']`
+    - sets `html_static_path = ['_static_user']` (or similar)
+  - a user static directory containing `nbsphinx-gallery.css` with a marker like `/* user override css */`.
+  - a minimal `index.rst`.
+- Create a minimal test extension under that root (or in `tests/test_extensions/`) that:
+  - calls `app.add_css_file('nbsphinx-gallery.css')`
+  - also provides its own `nbsphinx-gallery.css` in a way that reflects the real-world mechanism that regressed.
+    - Do NOT implement this by appending to `html_static_path`.
+    - Instead, emulate how extensions provide static assets in Sphinx: investigate the proper/typical approach in this repo (e.g., `app.add_html_theme()`, `app.config.html_static_path` is user config; extension assets often live in package directories and are copied/collected by the builder or by an extension hook). Mirror the mechanism that currently causes the collision/regression in Sphinx.
+- In the test, build HTML and assert:
+  - The output `_static/nbsphinx-gallery.css` content matches the user marker (or otherwise prove the user file is the one used).
+  - The generated HTML includes a `<link>` to `nbsphinx-gallery.css` whose URL corresponds to that output file.
+  - If Sphinx uses checksum query strings, parse and ignore the query part when locating the file, but still assert that the link is to the right path.
+
+Where to look in Sphinx core:
+- HTML builder static asset handling (copying of `html_static_path`, handling of extension/theme assets, asset manifesting).
+- CSS/JS registration and ordering: `add_css_file`, `css_files`, priority sorting, dedup logic.
+- Any changes in #11415 that might have altered:
+  - when/where extension assets are copied vs user assets
+  - whether a later phase overwrites files in `_static`
+  - whether `copy_asset` overwrite behavior changed for builder-managed assets
+  - whether “built-in/extension assets” are now copied after user static assets (causing override loss)
+  - whether filename collisions are now resolved differently.
+
+Implementation requirements:
+- The fix must be narrowly scoped to restore the override behavior without introducing a global semantic change to `html_static_path` ordering.
+- Preserve existing documented behavior as much as possible.
+- Avoid solutions that rely on extension authors modifying user config.
+- Ensure that if both an extension and the user provide the same static filename, the user’s version is preferred in the final output and referenced by the HTML, at least for assets registered via `add_css_file()` and resolved from `_static`.
+
+Verification:
+- Run the new regression test and enough of the suite to ensure no collateral breakage (at least the relevant HTML asset tests).
+- Ensure your fix does not cause warnings/errors regressions around `copy_asset` unless intended.
+- Make sure the test fails on the unpatched code and passes with your patch.
+
+Deliverable:
+- Provide the code changes (tests + implementation) in the working tree only (no commit), with clear, minimal diffs.
+- The final state must include the new regression test and a targeted fix in Sphinx core that makes it pass.

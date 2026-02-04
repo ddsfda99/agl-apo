@@ -1,0 +1,53 @@
+diff --git a/src/ufuncs.c b/src/ufuncs.c
+index 77fc2da..cdd1ee7 100644
+--- a/src/ufuncs.c
++++ b/src/ufuncs.c
+@@ -3124,20 +3124,21 @@ finish:
+ }
+ static PyUFuncGenericFunction from_wkb_funcs[1] = {&from_wkb_func};
+ 
+-static char from_wkt_dtypes[3] = {NPY_OBJECT, NPY_UINT8, NPY_OBJECT};
++static char from_wkt_dtypes[4] = {NPY_OBJECT, NPY_UINT8, NPY_BOOL, NPY_OBJECT};
+ static void from_wkt_func(char** args, const npy_intp* dimensions, const npy_intp* steps,
+                           void* data) {
+-  char *ip1 = args[0], *ip2 = args[1], *op1 = args[2];
+-  npy_intp is1 = steps[0], is2 = steps[1], os1 = steps[2];
++  char *ip1 = args[0], *ip2 = args[1], *ip3 = args[2], *op1 = args[3];
++  npy_intp is1 = steps[0], is2 = steps[1], is3 = steps[2], os1 = steps[3];
+   PyObject* in1;
+   npy_uint8 on_invalid = *(npy_uint8*)ip2;
++  npy_bool fix_structure = *(npy_bool*)ip3;
+   npy_intp n = dimensions[0];
+   npy_intp i;
+   GEOSGeometry* ret_ptr;
+   GEOSWKTReader* reader;
+   const char* wkt;
+ 
+-  if ((is2 != 0)) {
++  if ((is2 != 0) || (is3 != 0)) {
+     PyErr_Format(PyExc_ValueError, "from_wkt function called with non-scalar parameters");
+     return;
+   }
+@@ -3151,6 +3152,13 @@ static void from_wkt_func(char** args, const npy_intp* dimensions, const npy_int
+     goto finish;
+   }
+ 
++#if GEOS_SINCE_3_11_0
++  if (fix_structure) {
++    /* Enable GEOS fix structure on the reader */
++    GEOSWKTReader_setFixStructure_r(ctx, reader, (char)fix_structure);
++  }
++#endif
++
+   for (i = 0; i < n; i++, ip1 += is1, op1 += os1) {
+     CHECK_SIGNALS(i);
+     if (errstate == PGERR_PYSIGNAL) {
+@@ -3787,7 +3795,7 @@ int init_ufuncs(PyObject* m, PyObject* d) {
+   DEFINE_GENERALIZED(create_collection, 2, "(i),()->()");
+ 
+   DEFINE_CUSTOM(from_wkb, 2);
+-  DEFINE_CUSTOM(from_wkt, 2);
++  DEFINE_CUSTOM(from_wkt, 3);
+   DEFINE_CUSTOM(to_wkb, 6);
+   DEFINE_CUSTOM(to_wkt, 5);
+   DEFINE_CUSTOM(set_precision, 3);

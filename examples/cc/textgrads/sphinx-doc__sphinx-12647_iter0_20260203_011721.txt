@@ -1,0 +1,75 @@
+### What actually happened (root cause of “failure”)
+The trace ends with:
+
+> `API Error: 500 ... AzureException AuthenticationError - Unauthorized. Access token is missing or invalid.`
+
+So the coding agent did **not fail due to code**; it failed because the LLM backend (Azure) rejected the request. That means:
+- The agent never reached the “apply patch / run tests / iterate” phase.
+- No fix was attempted, so tests couldn’t possibly pass.
+
+**Primary fix**: ensure valid Azure credentials / correct deployment name / correct API base+version / correct auth method (key vs AAD token) in the environment that runs the agent, or route to a non-Azure model provider.
+
+---
+
+### Secondary issues in the agent’s behavior (even ignoring the auth failure)
+
+#### 1) No task statement, no hypothesis, no plan
+The trace starts directly with greps/reads. The “original task description as the first user message” is missing from the trace payload you provided (it’s not present). Regardless, the agent:
+- never states what test is failing,
+- never identifies expected vs actual behavior,
+- never narrows to a minimal reproduction.
+
+**How to improve**: Always start by running the test suite (or at least the failing subset) and quoting the exact failure, then derive a plan.
+
+#### 2) It did lots of broad code reading without confirming the failure mode
+It inspected many relevant files (`html/_assets.py`, `html/__init__.py`, `fileutil.py`, etc.), but did not connect any of this to a concrete failing assertion. This is exploratory, but inefficient and often misleading.
+
+**How to improve**:
+- Run/inspect `pytest -q` output first.
+- Jump directly to tests that fail.
+- Only then inspect the minimal related implementation.
+
+#### 3) Likely it was chasing “copy_asset overwrite warning” / asset ordering, but didn’t pinpoint the problematic contract
+From what it read, the most “bug-like” area is the overwrite-warning behavior:
+- `copy_asset_file()` warns (logger.info with subtype `copy_overwrite`) when overwriting mismatched content.
+- There is a test explicitly asserting that message appears (`test_copy_asset_overwrite`).
+
+If the real task was something like “avoid overwriting user static files” or “change when warnings occur”, this is a delicate compatibility area. The agent read these areas but never articulated which behavior needed changing.
+
+**How to improve**:
+- Identify which test targets the behavior and what change is requested.
+- Confirm current behavior via the failing test log.
+- Make one minimal change + add/adjust tests.
+
+#### 4) It did not notice the “system reminder” constraints
+Multiple file reads include a system reminder about malware analysis / refusal to improve malware. This codebase is benign, but the agent never acknowledged the constraint. In some setups, agents are expected to explicitly comply (e.g., “no malware present”).
+
+**How to improve**: briefly classify the code as non-malicious when such a reminder appears, then proceed.
+
+---
+
+### Concrete guidance to make the agent pass all tests (operational + process)
+
+1) **Fix infrastructure** (mandatory)
+   - Provide valid Azure OpenAI credentials (API key or AAD token) and ensure the runner exports them correctly.
+   - Verify:
+     - `AZURE_OPENAI_ENDPOINT`
+     - `AZURE_OPENAI_API_KEY` (or token)
+     - deployment name matches what the agent requests
+     - API version is supported
+   - Or switch the agent to a non-Azure backend.
+
+2) **Improve debugging loop**
+   - First action: run `pytest -q` (or use a tool that gives failing tests).
+   - Only then: open the specific failing test file and locate the assertion.
+   - Only then: inspect the minimal implementation.
+
+3) **Reduce scope**
+   - The agent read huge files (`sphinx/builders/html/__init__.py`, `sphinx/application.py`) almost entirely. That’s rarely necessary.
+   - Instead: search for the exact warning string / exact HTML snippet the test expects, then follow the call chain.
+
+---
+
+### Bottom line
+- **Why it failed**: authentication failure prevented any completion of the coding session.
+- **What to change**: fix Azure auth/config (or switch provider), and tighten the agent’s workflow to “run tests → isolate failing assertion → minimal code inspection → patch → rerun tests”.

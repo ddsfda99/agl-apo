@@ -1,0 +1,242 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+W2001 "Parameter not used" false positive when using Fn::Transform in AWS::ApiGateway::RestApi
+*cfn-lint version: 0.55.0*
+
+Scenario:
+there is a swagger file `api-specification.yml` and there is a cloudformation template file `api.cfn`. The content of `api-specification.yml` is included into `api.cfn` using `Fn::Transform`. Parameters that are referenced in `api-specification.yml` but not in `api.cfn` cause W2001 "Parameter not used" warning.
+
+A CloudFormation sample that generated the issue.
+```yaml
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Some API
+
+Parameters:
+ PetLambdaArn:
+    Description: ARN of the lambda function
+    Type: String 
+  UserPoolArn:
+    Description: ARN of the Cognito User Pool
+    Type: String
+
+Resources:
+  SomeApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Some API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Body:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: ./api-specification.yml
+```
+
+`api-specification.yml`
+
+```yaml
+---
+openapi: 3.0.1
+
+info:
+  title: Pet store
+  version: 0.1.2
+
+paths:
+
+  /pet:
+    get:
+      summary: Returns a list of pets
+      responses:
+        "200":
+          description: A json array of upload sessions
+        "400":
+          description: Bad request, invalid query string
+        "401":
+          description: Bad request, authentication problem
+        "500":
+          description: Unexpected error
+        "503":
+          description: Service unavailable
+      security:
+        - AwsCognitoUserPoolAuthorizer: []
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PetLambdaArn}/invocations
+        httpMethod: POST
+        responses:
+          default:
+            statusCode: 200
+
+components:
+  securitySchemes:
+    AwsCognitoUserPoolAuthorizer:
+      type: apiKey
+      name: Authorization
+      in: header
+      x-amazon-apigateway-authtype: cognito_user_pools
+      x-amazon-apigateway-authorizer:
+        type: cognito_user_pools
+        providerARNs:
+          - Fn::Sub: ${UserPoolArn}
+```
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## Why the agent failed
+
+### 1) “Fix” was a broad suppression, not a correct implementation
+The change in `src/cfnlint/rules/parameters/Used.py` disables **W2001 entirely** if the template contains:
+
+```yaml
+Fn::Transform:
+  Name: AWS::Include
+```
+
+This is not the requested behavior. The issue is: **parameters referenced inside the included file should count as “used”** (or at least not raise false positives), not “turn the whole rule off”.
+
+This suppression has multiple correctness problems:
+- Any template that uses `AWS::Include` anywhere (even unrelated parts) will now stop reporting genuinely unused parameters.
+- It doesn’t even attempt to interpret the included content, so it can’t distinguish used vs unused parameters.
+
+### 2) The suppression logic doesn’t match how `Fn::Transform` is represented in templates
+The code searches:
+
+```py
+for t in cfn.search_deep_keys("Fn::Transform"):
+    transform_value = t[-1]  # expects a dict containing Name: AWS::Include
+```
+
+But in the YAML short form, many templates use `!Transform` or different encodings; additionally, the engine may normalize transforms differently. The agent didn’t validate the structure against real parsed nodes in this repo. So even as a suppression, it’s brittle.
+
+### 3) The new unit test is invalid for this codebase
+The agent created:
+- `test/fixtures/templates/good/parameters/used_include_apigateway.yaml`
+- `test/fixtures/templates/good/parameters/api-specification.yml`
+
+But cfn-lint **does not actually load `AWS::Include` local files at lint time** (it’s a CloudFormation-time transform). The template references `Location: ./api-specification.yml`, which the linter won’t expand. So the test doesn’t represent actual current functionality unless the linter has custom support for includes (it doesn’t here).
+
+Worse: placing `api-specification.yml` next to the template fixture may still not work because resolution is relative to execution cwd / template path handling; the agent did not confirm path resolution behavior.
+
+### 4) The change unexpectedly broke integration tests (QuickStart)
+After the code change, integration tests started producing **one extra finding**:
+- `W7001` (“Mapping 'LinuxAMINameMap' is defined but not used”) now appears in `quickstart/openshift.yaml`, causing expected-count mismatch and CLI exit code mismatch.
+
+That indicates a **behavioral change affecting rule execution / transform handling** beyond W2001. While the agent only edited W2001, their change likely changed the overall warning/error mix in module vs CLI runs due to:
+- Different rule sets enabled/disabled in different integration paths
+- The agent’s new fixtures or modifications changing discovery order or rule registration
+- Or simply that previously the expected output intentionally did not include W7001, but now does because something about transforms/contexts changed (and the test output shows W7001 newly included).
+
+Regardless, the agent did not investigate *why* W7001 was now emitted. They stopped after noticing `openshift.yaml` has no `Fn::Transform`, which is irrelevant: the failure was “count differs”, not “contains Fn::Transform”.
+
+### 5) They ran the full test suite too late and didn’t back out a flawed approach
+They implemented a big semantic change (disable W2001 under `AWS::Include`) without first:
+- Writing a minimal reproduction unit test that fails on current behavior
+- Ensuring the approach doesn’t change unrelated lint outputs
+- Running targeted tests (unit for W2001) before full integration
+
+Once integration failed, they didn’t isolate:
+- Whether the extra `W7001` came from their changes or from test expectations drift
+- Whether their new W2001 behavior changed warning categories in a way that affects exit codes
+
+---
+
+## What the correct fix should look like (high-level)
+
+### Goal
+Make W2001 treat parameters referenced in `Fn::Transform` included bodies (specifically `AWS::Include` used under `AWS::ApiGateway::RestApi` `Body`) as “used”.
+
+### Likely correct implementation direction
+Instead of disabling W2001, the linter needs to **discover parameter references inside included content**.
+
+Options (from best to acceptable):
+
+1) **Implement partial include resolution for `AWS::Include`**
+   - When encountering `Fn::Transform: { Name: AWS::Include, Parameters: { Location: ... } }`,
+     load the referenced file (support local paths at least).
+   - Parse it as YAML/JSON (OpenAPI/Swagger examples are YAML).
+   - Search inside that parsed structure for `Ref` / `Fn::Sub` placeholders and add found parameter names into the “used parameters” set.
+   - This logic should be consistent with existing mechanisms that gather refs/subs (e.g., `Template.transform_pre`).
+
+2) **If full include parsing is too heavy, implement a targeted heuristic**
+   - For `AWS::Include` only: load file content as text and extract `${Param}` patterns and/or `Ref:` keys in YAML.
+   - Still better than disabling the rule globally, but less robust.
+
+3) **As a last resort, scope suppression narrowly**
+   - Only suppress W2001 for parameters if and only if:
+     - Parameter is not used in the main template **and**
+     - Template contains `AWS::Include` under `AWS::ApiGateway::RestApi` `Body` (or other known “templated property” paths),
+     - and ideally only suppress parameters *potentially used* (e.g., detected `${...}` tokens in included file).
+   - Still not ideal, but far less destructive than “disable check”.
+
+### Where in code it should go
+W2001 uses:
+- `cfn.transform_pre["Ref"]` and `cfn.transform_pre["Fn::Sub"]`
+- `cfn.search_deep_keys(...)` for language extensions
+
+The fix should integrate include-discovered refs into the same `refs`/`subs` collections, rather than returning early.
+
+A better location may be in the template preprocessing stage (`Template.__init__` or a dedicated transform-pre collector) so multiple rules can benefit, but minimally it can be added in W2001.
+
+---
+
+## How to improve the test strategy
+
+### Write a failing unit test first (before any code changes)
+- Add a fixture template similar to the prompt.
+- Ensure `AWS::Include` points to a fixture file.
+- Assert that **before fix** W2001 triggers for `PetLambdaArn` and `UserPoolArn`.
+- After fix, assert **no W2001** for those.
+
+### Ensure the fixture path resolution is correct
+- Put included file in a location that matches how the linter would resolve it.
+- If the linter resolves relative to the template file directory, use that.
+- If not supported, update code to resolve relative to template path.
+
+### Run targeted tests
+- `pytest -q test/unit/rules/parameters/test_used.py`
+before running the entire suite.
+
+---
+
+## Specific mistakes in the trace and how to improve
+
+1) **Prematurely implementing suppression**
+   - Improvement: confirm expected behavior and implement actual parsing/collection of parameter usage.
+
+2) **Not investigating why integration tests changed**
+   - Improvement: diff lint outputs before/after on `openshift.yaml` to see which rule or config path changed.
+   - Determine why W7001 appeared and whether it’s related.
+
+3) **Added fixture that depends on unsupported behavior**
+   - Improvement: confirm repo already has any support for `AWS::Include` (search for code handling it). If none, the unit test should drive implementing that support, not just changing W2001.
+
+4) **Rule behavior changed globally**
+   - Improvement: any workaround must be scoped; global disabling of correctness checks is rarely acceptable.
+
+---
+
+## Bottom line
+The agent failed because they “solved” a false positive by **turning off the warning** under `AWS::Include`, which is both semantically wrong and caused observable changes in lint outputs that broke integration test expectations. The proper fix requires **counting parameter references in included files as usage**, not disabling W2001.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

@@ -1,0 +1,74 @@
+You are given a code repository in the current directory.
+
+Task: Fix an inconsistency in keras.layers.MultiHeadAttention where a shape validation is enforced only in symbolic mode but not in eager mode. The intended API (per existing tests) requires the last dimension of query and value to be equal. Currently, symbolic execution raises a ValueError when they differ, while eager execution proceeds without error. Your goal is to make eager execution consistent with symbolic execution by adding an equivalent validation in the eager call path. Do not relax or remove existing validations in symbolic mode. Do not change the public API or existing tests’ expectations.
+
+Follow these steps:
+
+1) Understand requirements and intended behavior
+- The existing test suite enforces that a shape mismatch between the last dimensions of query and value must raise a ValueError containing “The last dimension of `query_shape` and `value_shape` must be equal”.
+- The current inconsistency is that this check is enforced in symbolic mode (via compute_output_shape/compute_output_spec) but not enforced in eager execution when feeding concrete tensors.
+- Your fix should ensure that both eager and symbolic executions raise the same ValueError for mismatched last dims, preserving existing behavior and tests.
+
+2) Write a minimal reproduction test for the current bug (temporary file)
+- Create a temporary test file (e.g., tests/tmp_test_mha_eager_shape_check.py) that:
+  - Forces eager execution by passing framework-native tensors (e.g., torch.Tensor if using the torch backend or tf.Tensor if using tensorflow).
+  - Constructs query with last dim Dq and value with different last dim Dv (e.g., 16 vs 8), runs MultiHeadAttention in eager mode, and asserts that a ValueError is raised and the error message contains “must be equal”.
+  - Example scenario:
+    - Set environment KERAS_BACKEND appropriately if needed (e.g., torch).
+    - batch_size = 2; seq_len = 4; key_dim = 16; value_dim = 8; num_heads = 2.
+    - query = <tensor>[batch_size, seq_len, key_dim]
+    - key = <tensor>[batch_size, seq_len, key_dim]
+    - value = <tensor>[batch_size, seq_len, value_dim]
+    - mha = keras.layers.MultiHeadAttention(num_heads=num_heads, key_dim=key_dim // num_heads)
+    - Expect ValueError when calling mha(query=query, value=value, key=key).
+- This test should fail on the current codebase (eager path does not raise).
+
+3) Locate the relevant code
+- Search for the error string “The last dimension of `query_shape` and `value_shape` must be equal” to find where symbolic validation is implemented (likely in keras/src/layers/attention/multi_head_attention.py in compute_output_shape or compute_output_spec).
+- Open the layer implementation (keras/src/layers/attention/multi_head_attention.py). Identify the call() method where the projections and attention are computed for eager execution.
+
+4) Implement the fix (minimal, localized)
+- Do not remove or modify the existing validation in compute_output_shape/compute_output_spec.
+- Add an early validation in the eager execution path within the call() method:
+  - Retrieve the static last dimensions of query and value using x.shape[-1] if available. In eager mode with concrete tensors, these should be integers.
+  - If both last dims are known (not None) and they differ, raise a ValueError with the same message pattern used in the symbolic check:
+    - “The last dimension of `query_shape` and `value_shape` must be equal, but are {q_dim}, {v_dim}. Received: query_shape={query.shape}, value_shape={value.shape}”
+  - Only perform this check when dims are statically known. For symbolic tensors, rely on the existing compute_output_shape/compute_output_spec validation. Do not attempt a runtime graph assertion.
+- Keep the change backend-agnostic:
+  - Avoid backend-specific ops for this check; use Python-level static shapes (x.shape[-1]) when available.
+  - Do not introduce dependency on torch-only or tf-only APIs in the layer.
+
+5) Run tests to validate the fix
+- First, run your temporary reproduction test; it should now pass (i.e., eager mismatch raises ValueError).
+- Then, run the full relevant test suite to ensure no regressions:
+  - Run pytest for the attention layers folder (e.g., pytest -q keras/src/layers/attention or the equivalent path in this repo).
+  - Ensure existing tests such as the one that expects a ValueError on shape mismatch continue to pass.
+- Do not limit test execution to only your new temporary test; run the full module tests to catch unintended regressions.
+
+6) Clean up
+- Remove the temporary test file you created in step 2 after verification.
+- Do not commit any changes.
+
+Important constraints and guidance
+- Do not change or remove the existing symbolic-mode validation that enforces equal last dims.
+- Do not modify existing tests that assert a ValueError on query/value last-dimension mismatch.
+- The goal is consistency: make eager mode raise the same ValueError as symbolic mode under the same invalid input, not to relax constraints.
+- Keep the fix minimal and localized to the eager path in MultiHeadAttention.call(), avoiding broad refactors.
+- Match the error message format so that current and future tests looking for that message continue to work.
+
+Hints for implementation
+- In MultiHeadAttention.call(self, query, value, key=None, ...):
+  - q_last = getattr(query, "shape", None)
+  - v_last = getattr(value, "shape", None)
+  - If q_last is not None and v_last is not None:
+    - q_dim = q_last[-1]
+    - v_dim = v_last[-1]
+    - If isinstance(q_dim, int) and isinstance(v_dim, int) and q_dim != v_dim:
+      - raise ValueError with the standardized message, including the shapes.
+- Do not add runtime graph assertions for symbolic tensors; rely on existing compute_output_shape/compute_output_spec checks.
+
+Deliverables
+- Code changes implementing the eager-mode validation in MultiHeadAttention.call().
+- Temporary reproduction test (removed at the end).
+- Test execution logs showing your temporary test and the existing attention tests pass after your fix.
+- No commits; leave the working tree with changes and without the temporary test file.

@@ -1,0 +1,112 @@
+You are an expert Sphinx core developer working in the current repository. Your goal is to fix a regression introduced in Sphinx 7.1.0 (commit ae206694e68bea074aca633ea0d32e9ed882a95f, part of #11415): **a CSS file added by an extension via `app.add_css_file()` can no longer be overridden by a user placing a same-named file into their configured `html_static_path`.** This must work again.
+
+Real-world report (nbsphinx):
+- Extension does: `app.add_css_file('nbsphinx-gallery.css')`
+- User sets `html_static_path = ['my-static-path']` and provides `my-static-path/nbsphinx-gallery.css` intending to override
+- On Sphinx ≥ 7.1.0, override stops working (extension’s CSS “wins”)
+
+You must learn from prior failures and follow the constraints and process below exactly.
+
+---
+
+## Hard constraints (do not violate)
+1) **Do NOT “fix” this by globally reversing or re-copying `html_static_path`** (no “copy user static files again at end”, no broad ordering changes). That would change semantics for unrelated collisions and is explicitly disallowed.
+2) **Do NOT create a fake repro where the extension mutates `html_static_path`** to inject its assets. The real scenario is “extension calls `add_css_file()`; user overrides by name via `html_static_path`”.
+3) **Do NOT use an extension that overwrites `_static` late via `html-collect-pages` + `copy_asset(..., force=True)` as the primary reproduction.** That’s not the reported mechanism and is an invalid model here.
+4) Your regression test must be faithful and must assert:
+   - HTML contains a `<link ... href="_static/nbsphinx-gallery.css...">` (may include checksum query, e.g. `?v=...`)
+   - The actual file served at that URL in the output dir is the **user’s** file (marker comment), not the extension’s
+   - Ideally ensure only one such link exists; if multiple exist, investigate and assert correct behavior explicitly
+
+---
+
+## The core hypothesis you must validate
+The regression is tied to the asset pipeline change in #11415 (checksum query strings). Something changed about **how/when builder-managed CSS assets are resolved and copied into `_static`** such that an extension-provided file can now overwrite the user’s same-named file, or the checksum step selects the wrong source.
+
+Your job is to:
+- reproduce precisely,
+- identify the exact overwrite/selection point introduced in/around ae206694e,
+- implement a targeted fix in the HTML asset pipeline so **user `html_static_path` overrides an extension-provided same-named CSS referenced via `add_css_file()`**.
+
+---
+
+## Required workflow (do these steps in order)
+
+### Step 1 — Locate the real asset flow for extension CSS
+Before writing code, inspect current Sphinx core to answer these questions with evidence (file/line references):
+- Where does `app.add_css_file()` store entries and how are they turned into `<link>` tags?
+- Where does Sphinx copy “builder-managed” assets into `_static` (HTML builder pipeline)?
+- How are “extension-provided” CSS files expected to be found? (E.g. via `app.add_html_theme()`, `package_dir/.../static`, HTML builder “static files” collection, etc.)
+- After #11415, where is checksum computed and from which file path (source vs output)? What does the checksum code assume exists at build time?
+
+You must identify the exact phase that causes the user override to stop working (e.g. extension asset copy now happens after user static copy; or dedup/manifest now prefers extension path; or checksum computation triggers a late copy that overwrites).
+
+### Step 2 — Write a faithful regression test FIRST (complete it)
+Create a new test root under `tests/roots/` and a pytest test that fails on current main.
+
+**Test root requirements**
+- `conf.py`:
+  - includes a minimal test extension (see below)
+  - sets `html_static_path = ['_static_user']`
+- `index.rst`: minimal content
+- `_static_user/nbsphinx-gallery.css` containing a unique marker, e.g. `/* user override css */`
+- Provide extension’s own CSS with a different marker, e.g. `/* extension css */`
+
+**Test extension requirements (must reflect real extension static mechanism)**
+- Must call `app.add_css_file('nbsphinx-gallery.css')`
+- Must provide its own `nbsphinx-gallery.css` in a way that matches typical Sphinx extension asset shipping **without touching `html_static_path`** and without late `copy_asset(force=True)` overwrite hacks.
+- You must find and use an existing pattern already used in Sphinx tests/extensions. Examples of acceptable mechanisms (pick one that actually matches Sphinx’s pipeline in this repo):
+  - Provide a tiny HTML theme via `app.add_html_theme()` with a `theme/static/nbsphinx-gallery.css` so it’s copied as theme static
+  - Or another existing “extension static directory” mechanism used in Sphinx’s own extensions/tests (only if it truly matches how Sphinx collects/copies extension assets)
+
+**Pytest assertions (must include all)**
+- Build HTML and open the generated `index.html`
+- Parse HTML and extract the `href` for the CSS link to `nbsphinx-gallery.css`
+  - Allow `?v=...` query string (strip it for filesystem path)
+- Assert exactly one `<link>` references `nbsphinx-gallery.css` (or if there are two, treat as failure unless you can justify and assert correct one is used)
+- Read the output file in `outdir/_static/nbsphinx-gallery.css` (or derived from the link path) and assert it contains `/* user override css */` and does **not** contain the extension marker
+
+This test must fail on unpatched code and pass after the fix.
+
+### Step 3 — Identify the precise regression cause
+Using `git blame`, `git show ae206694e...`, and code inspection:
+- identify where a new copy step/order/dedup rule was introduced
+- confirm via debug or careful reading which copy happens last in the collision case (user vs extension/theme)
+- connect this directly to why the user’s `_static_user/nbsphinx-gallery.css` is not the final output or not the file used for checksum/linking
+
+### Step 4 — Implement a targeted fix (asset pipeline / collision resolution)
+Implement a narrowly scoped fix that restores the override behavior **only for this class of collision**:
+- If a file in output `_static/<name>` originates from user `html_static_path`, it must not be overwritten by an extension/theme-provided file with the same basename that is only there because `add_css_file('<name>')` references it.
+- Do NOT change the global semantics of multiple entries in `html_static_path`.
+- Do NOT “recopy all user static files at end”.
+- Prefer a fix that:
+  - prevents overwriting user files when copying extension/theme static assets **if the target already came from user static**, or
+  - adjusts resolution so that when generating the `<link>` and/or checksum, the system prefers the user-provided file as the canonical source for `_static/<name>.css`.
+
+Be explicit: change the minimal relevant function(s) in the HTML builder/static asset handling code, not broad global behavior.
+
+### Step 5 — Run and iterate
+- Run your new regression test until it passes
+- Run adjacent HTML asset tests (at minimum those covering HTML assets/static copying/checksum query strings) to ensure no collateral breakage
+- Fix any failures with minimal changes
+
+### Step 6 — Cleanup and deliver diffs (no commit)
+- Do not leave temp files outside the test suite
+- Provide minimal diffs: implementation + test root + pytest test + any tiny extension/theme files needed for the test
+
+---
+
+## Extra guidance (useful repo patterns to reuse)
+- Look for existing tests about HTML assets and static copying/overwrites (e.g. tests around `_static`, theme static, checksum query strings).
+- Use existing pytest helpers in Sphinx’s test suite (`pytest` fixtures for app/build, etc.).
+- When parsing the HTML link, don’t hardcode the checksum; strip query string.
+
+---
+
+## Output expectations
+When done, the working tree contains:
+- A complete, faithful regression test (root + extension/theme assets + pytest test) that fails on current code and passes with your fix.
+- A targeted core code change restoring user override behavior for same-named CSS registered via `add_css_file`.
+- No broad ordering changes or “recopy all user static at end” hacks.
+
+Proceed now: start by locating where `add_css_file` assets are resolved/copied and how checksum query strings changed that pipeline, then implement the test, then the fix.

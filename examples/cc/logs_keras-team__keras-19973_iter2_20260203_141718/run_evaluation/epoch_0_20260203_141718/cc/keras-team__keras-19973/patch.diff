@@ -1,0 +1,51 @@
+diff --git a/keras/src/layers/attention/multi_head_attention.py b/keras/src/layers/attention/multi_head_attention.py
+index 5fae13023..0466705f4 100644
+--- a/keras/src/layers/attention/multi_head_attention.py
++++ b/keras/src/layers/attention/multi_head_attention.py
+@@ -367,6 +367,17 @@ class MultiHeadAttention(Layer):
+         )
+         self._inverse_sqrt_key_dim = 1.0 / math.sqrt(float(self._key_dim))
+ 
++    def _raise_query_value_last_dim_mismatch(self, query_shape, value_shape):
++        """Raises a consistent ValueError for query/value last-dim mismatch.
++
++        This helper ensures both symbolic and eager paths use the same message.
++        """
++        raise ValueError(
++            "The last dimension of `query_shape` and `value_shape` "
++            f"must be equal, but are {query_shape[-1]}, {value_shape[-1]}. "
++            f"Received: query_shape={query_shape}, value_shape={value_shape}"
++        )
++
+     def _masked_softmax(self, attention_scores, attention_mask=None):
+         # Normalize the attention scores to probabilities.
+         # attention_scores = [B, N, T, S]
+@@ -453,6 +464,15 @@ class MultiHeadAttention(Layer):
+         if key is None:
+             key = value
+ 
++        # Runtime eager validation for torch backend: ensure last dims match
++        if backend.backend() == "torch":
++            import torch
++            if isinstance(query, torch.Tensor) and isinstance(value, torch.Tensor):
++                q_last = query.shape[-1]
++                v_last = value.shape[-1]
++                if q_last != v_last:
++                    self._raise_query_value_last_dim_mismatch(query.shape, value.shape)
++
+         attention_mask = self._compute_attention_mask(
+             query,
+             value,
+@@ -590,11 +610,7 @@ class MultiHeadAttention(Layer):
+             key_shape = value_shape
+ 
+         if query_shape[-1] != value_shape[-1]:
+-            raise ValueError(
+-                "The last dimension of `query_shape` and `value_shape` "
+-                f"must be equal, but are {query_shape[-1]}, {value_shape[-1]}. "
+-                "Received: query_shape={query_shape}, value_shape={value_shape}"
+-            )
++            self._raise_query_value_last_dim_mismatch(query_shape, value_shape)
+ 
+         if value_shape[1:-1] != key_shape[1:-1]:
+             raise ValueError(

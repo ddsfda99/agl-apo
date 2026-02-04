@@ -1,0 +1,94 @@
+You are given a code repository in the current directory (Matplotlib).
+Your task is to fix a bug and add correct regression tests.
+
+## Bug report (must reproduce and fix)
+**Title:** `colors.LinearSegmentedColormap.from_list` fails when using a `("<color>", alpha)` tuple
+
+### Summary
+`matplotlib.colors.LinearSegmentedColormap.from_list()` accepts either:
+1) a list of colors, or  
+2) a list of `(value, color)` pairs mapping scalar positions to colors.
+
+But when the **first element** is a 2-tuple like `("green", 0.0)` (which is a valid Matplotlib *color-with-alpha* spec), the current implementation misclassifies it as a `(value, color)` pair and raises:
+`ValueError: Invalid RGBA argument: 0.0`.
+
+### Reproducer
+```py
+import matplotlib
+
+matplotlib.colors.LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])
+```
+
+### Expected
+This should **not** raise.
+
+---
+
+## Critical guidance based on prior failed attempts (read carefully)
+1) **Do not write tests that assert `cmap(1)` equals the last stop exactly.**  
+   `LinearSegmentedColormap` uses a LUT; endpoint behavior at exactly `1.0` can be subtle and quantized. Tests must avoid strict equality at `x=1`.
+
+2) **Do not add invalid tests for grayscale floats.**  
+   In Matplotlib, grayscale values must be strings (e.g. `"0.42"`), not floats (`0.42`). So `(0.42, 0.5)` is *not* a valid `(color, alpha)` spec. If you want such coverage, use `("0.42", 0.5)`.
+
+3) The fix should focus on **classification logic**: deciding whether the input is “list of colors” vs “list of `(value, color)` pairs”.  
+   The bug occurs because the current code effectively uses a “check only the first element” heuristic. The issue reporter suggests: **only treat it as `(value, color)` mapping if *all* entries look like `(value, color)` pairs**.
+
+---
+
+## Requirements
+Follow these steps:
+1) Create a focused reproduction test that fails on current code and will pass after your fix.
+2) Locate the relevant code in `lib/matplotlib/colors.py`, specifically the logic in/around `LinearSegmentedColormap.from_list`.
+3) Implement the fix.
+4) Run only the relevant tests (do not run the full suite unless needed).
+5) Ensure no temporary files remain.
+
+Do **not** commit changes.
+
+---
+
+## What to implement (high-level)
+### A) Fix: robustly detect mapping mode
+Update `LinearSegmentedColormap.from_list` so that it only interprets entries as `(value, color)` pairs when the input sequence is uniformly of that form.
+
+Concretely:
+- Accept mapping form when every element in `colors` is a 2-tuple (or 2-sequence) where:
+  - element[0] is a real number (the position/value), and
+  - element[1] is color-like (a valid Matplotlib color spec)
+- Otherwise treat the input as a plain list of colors (and let `to_rgba_array` handle `("green", 0.0)` correctly).
+
+Notes:
+- Keep behavior reasonable for mixed lists; if Matplotlib already errors on mixed forms, that’s OK, but your change must at least prevent the misclassification of the first element being `(color, alpha)`.
+- Be mindful of performance: don’t do unnecessary expensive checks for huge lists if you can short-circuit quickly.
+
+### B) Regression tests (must be correct)
+Add tests that:
+1) **Verify no exception** for the reproducer:
+   `LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])`
+2) Optionally check behavior without relying on `cmap(1)` exactness:
+   - `cmap(0)` should be green with alpha 0 (this is usually stable), AND/OR
+   - alpha is increasing when sampling e.g. `0.0`, `0.5`, `0.999` (not `1.0`), AND/OR
+   - compare colors with `np.testing.assert_allclose` and a tolerance.
+3) If you add a grayscale+alpha test, use a **string grayscale** example like:
+   `("0.42", 0.5)` (not `0.42`).
+
+Where to put tests:
+- Prefer adding to an existing relevant test file under `lib/matplotlib/tests/` if there is a suitable one for colormaps/colors.
+- Otherwise create a new small regression test module with a descriptive name.
+
+---
+
+## Execution constraints / tips
+- Use `pytest -q path/to/test_file.py -k <testname>` for iteration.
+- Ensure your tests fail before the fix and pass after.
+- Keep assertions robust to LUT quantization (avoid exact endpoint checks at `x=1.0`).
+
+---
+
+## Deliverable
+Make code changes and tests such that:
+- The reproducer no longer raises.
+- All targeted tests pass.
+
+Now proceed with the implementation in this repo.

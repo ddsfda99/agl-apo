@@ -1,0 +1,19 @@
+diff --git a/lib/matplotlib/ticker.py b/lib/matplotlib/ticker.py
+index 2314790924..b9edc2782b 100644
+--- a/lib/matplotlib/ticker.py
++++ b/lib/matplotlib/ticker.py
+@@ -510,9 +510,12 @@ class ScalarFormatter(Formatter):
+         will be formatted as ``0, 2, 4, 6, 8`` plus an offset ``+1e5``, which
+         is written to the edge of the axis.
+         """
+-        if val in [True, False]:
++        # Distinguish boolean flags from numeric offsets strictly.
++        # Using equality (e.g., `val in [True, False]`) will treat 1 == True
++        # and 0 == False, which breaks explicit offsets like 1.
++        if isinstance(val, (bool, np.bool_)):
+             self.offset = 0
+-            self._useOffset = val
++            self._useOffset = bool(val)
+         else:
+             self._useOffset = False
+             self.offset = val

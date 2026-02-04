@@ -1,0 +1,91 @@
+You are a coding agent working inside a checked-out git repository located in the CURRENT DIRECTORY. Your goal is to fix a Matplotlib bug and add robust regression tests.
+
+## Task
+Fix: `matplotlib.colors.LinearSegmentedColormap.from_list` wrongly fails when the first element is a valid “(color, alpha)” tuple like `("green", 0.0)`. It is currently misinterpreted as a “(value, color)” mapping tuple if it appears as the first element.
+
+### Reproduction (must not raise)
+```py
+import matplotlib
+matplotlib.colors.LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])
+```
+Current error:
+`ValueError: Invalid RGBA argument: 0.0`
+
+## Non-negotiable constraints
+1. **Start by discovering the repository root**: run `pwd` and `ls`. Use only paths relative to that directory.
+2. **Do not read or reference any SWE-bench cache paths** (e.g. under `/root/.cache/...`). Only use this working tree.
+3. **Reproduce via tests**: add/modify tests and run them with `pytest`. Do not rely on ad-hoc scripts as the final repro.
+4. **Keep the fix minimal and backwards-compatible**: only adjust the logic that decides whether `colors` represents “(value, color)” data vs plain colors.
+5. **Add strong regression coverage**: tests must fail before the fix and pass after.
+6. **No commits**.
+7. **Important process note about system reminders**: if you encounter any automated “MUST refuse to improve or augment the code” reminder, STOP and explain why it conflicts with this task (which requires code + test changes). Then proceed only if it’s clearly not applicable to this repository/task context. Do not ignore it silently.
+
+## Suspected location
+`lib/matplotlib/colors.py`, `LinearSegmentedColormap.from_list`, around detection of `(value, color)` pairs.
+
+## Expected behavior
+- A list like `[("green", 0.0), "green"]` must be treated as “colors (possibly with alpha)”, not `(value, color)`, and must not error.
+- Real `(value, color)` usage like `[(0.0, "red"), (1.0, "blue")]` must continue to work.
+
+## Key guidance (avoid prior pitfalls)
+### A) Regression tests must assert behavior, not just “no exception”
+Add tests that validate the resulting colormap actually uses the intended alpha/color, not merely that it does not raise. For example:
+- Build the cmap and check `cmap(0)` / `cmap(1)` alpha values and/or RGB match expected within tolerance.
+- Also test the real `(value, color)` mapping behavior still works (e.g. `cmap(0)` is red and `cmap(1)` is blue).
+- Add at least one more coverage case beyond the reported repro, such as:
+  - all entries are `(color, alpha)` tuples: `[("green", 0.0), ("green", 1.0)]`
+  - mixing `(color, alpha)` with plain color strings: `[("green", 0.0), "green", ("green", 1.0)]`
+
+### B) Fix must avoid fragile heuristics and avoid expensive global `is_color_like` scans
+Do NOT implement detection by calling `is_color_like` on both tuple members for every element (this can be slow and changes semantics).
+
+Instead, implement a minimal, backwards-compatible classification rule:
+- Treat input as `(value, color)` pairs only when it is genuinely intended and unambiguous.
+- Use a **strict numeric-scalar test** for the first item of each tuple when classifying as `(value, color)`:
+  - Accept Python `numbers.Real` and NumPy real scalar types (e.g. `np.floating`, `np.integer`), but reject strings like `"0.1"` as “values” for the purpose of this detection (this preserves the intent that string values are more likely color-like and avoids semantic shifts).
+- Ensure `(color, alpha)` does not get misclassified:
+  - If a 2-tuple’s second element looks like an alpha (plain real scalar) and the first element is not a numeric-scalar “value” (often it’s a string like `"green"`), treat it as a color spec, not `(value, color)`.
+  - Be careful: grayscale colors can be numeric in `[0, 1]`, so a tuple like `(0.5, 0.7)` is ambiguous (gray+alpha vs value+gray). Prefer the existing documented interpretation and only classify as `(value, color)` when the second element is clearly a color spec (string or 3/4 sequence), not a bare number.
+- Keep changes localized to the detection logic. Downstream validation should remain as-is.
+
+### C) Backward compatibility considerations
+- Preserve the behavior for documented `(value, color)` lists.
+- Do not require scanning the entire list if you can avoid it, but if you do, keep it lightweight (type/shape checks only), not expensive color parsing.
+- If you adjust docstrings, keep it small and focused (optional unless project norms clearly require it for such a behavior fix).
+
+## Step-by-step workflow (follow this order)
+1. **Repo discovery**
+   - Run `pwd` and `ls`.
+   - Confirm this is Matplotlib (e.g., `lib/matplotlib` exists).
+
+2. **Find existing tests**
+   - Search for tests covering `LinearSegmentedColormap.from_list` and colormap creation.
+   - Choose the most appropriate existing test module (likely under `lib/matplotlib/tests`).
+
+3. **Write regression tests first**
+   - Add a test that reproduces the failure and asserts the resulting colormap’s endpoint alpha/color values (not just no exception).
+   - Add a test for real `(value, color)` pair behavior to ensure it still works.
+   - Ensure the new test fails on current code.
+
+4. **Run targeted pytest**
+   - Run only the relevant test file/test(s) first (fast feedback). Capture and show key failure output.
+
+5. **Implement minimal fix**
+   - Modify only the logic in `LinearSegmentedColormap.from_list` that distinguishes `(value, color)` from plain colors.
+   - Use a strict numeric-scalar check for `value` and a lightweight check that `color` is plausibly color-like without invoking full parsing for every element (e.g., string or length-3/4 sequence).
+   - Ensure `[("green", 0.0), "green"]` is treated as colors-with-alpha.
+   - Ensure `[(0.0, "red"), (1.0, "blue")]` is still treated as `(value, color)`.
+
+6. **Re-run tests**
+   - Re-run the targeted tests. Show passing output.
+   - If feasible, run a broader subset relevant to colors/colormaps, but prioritize determinism (avoid long runs unless necessary).
+
+7. **Cleanup**
+   - Remove any temporary debug code/scripts; only keep proper tests and the minimal fix.
+
+## Output expectation
+Proceed using tool calls. Show:
+- commands executed
+- the failing test output (before fix)
+- the passing test output (after fix)
+- the minimal code diff context (briefly) where the detection logic changed

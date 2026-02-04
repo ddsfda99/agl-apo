@@ -1,0 +1,119 @@
+The agent ultimately produced a passing fix + test, but it **failed multiple times along the way** due to avoidable workflow and implementation mistakes. Here’s what went wrong and how to improve.
+
+## 1) Tooling / workflow mistakes
+
+### 1.1 Used a non-existent `applypatch` command
+- Trace: `applypatch << 'PATCH' ...` → `/bin/bash: line 25: applypatch: command not found`.
+- Why it matters: wastes iteration time and violates the “tight loop” spirit.
+- Improvement: use the repo’s actual patch mechanism (`git apply`, `python -m sphinx...` not needed here) or just use the provided “Write/Edit” tools consistently. Ideally check available commands once.
+
+### 1.2 Didn’t run the new test in isolation *before* writing product code (first attempt)
+They did create the test and tried to run it, but the initial run failed due to a syntax error in the test root extension (`myext.py`), not because of the regression.
+- This violates the prompt guidance: confirm failure “for the right reason (not test setup failures)”.
+- Improvement: after generating files, **always run `python -m py_compile`** on the local extension or at least open/validate the generated file content before invoking pytest.
+
+## 2) Test root / extension creation mistakes
+
+### 2.1 Generated invalid Python in `myext.py` (unterminated string literal)
+- Root cause: shell `printf` quoting/newline escaping error created:
+  ```py
+  write_text('body { color: rgb(9, 9, 9); }
+  ', encoding='utf8')
+  ```
+- Impact: test didn’t even reach Sphinx build; it failed at import time.
+- Improvement:
+  - Avoid huge `printf` one-liners for Python files.
+  - Use heredoc (`cat > myext.py <<'PY' ... PY`) to prevent quoting bugs.
+  - Or create the file via the test harness (write in `conf.py` during `setup(app)`), but that can be brittle.
+
+### 2.2 Extension writes files at import/setup time
+The extension writes `_ext_static/example.css` inside `setup(app)` (top-level of setup).
+- Risk: writing during `setup()` is usually okay in tests, but in real Sphinx usage you typically ship static assets as package data; you don’t generate them dynamically.
+- For the test it’s acceptable, but still: it makes the reproduction less “realistic”.
+- Improvement: keep it but comment why; or store the static file directly under the test root so no runtime writes are needed.
+
+## 3) Product code fix mistakes (first attempt was incorrect/broken)
+
+### 3.1 Tried to detect “user vs extension” paths via a config attribute that doesn’t exist
+Initial patch attempted:
+```py
+user_static_paths = getattr(self.config, 'html_static_path_user', list(self.config.html_static_path))
+entry_is_extension = entry not in user_static_paths
+```
+But **`html_static_path_user` didn’t exist yet**, so it defaulted to the current list, causing `entry_is_extension` to always be `False` and effectively doing nothing (until they added the snapshot).
+
+The agent later added a snapshot mechanism, which is correct, but the initial implementation was guessing.
+
+### 3.2 Added `_record_initial_html_static_path` as an instance method and wired it wrong
+They inserted into the builder class:
+```py
+def _record_initial_html_static_path(self, app: Sphinx, config: Config) -> None:
+```
+and connected it as:
+```py
+app.connect('config-inited', StandaloneHTMLBuilder._record_initial_html_static_path, priority=100)
+```
+This fails because event handlers are invoked as plain callables `(app, config)`; the method expected `self` too.
+- Failure: `TypeError: ... missing 1 required positional argument: 'config'`.
+
+They fixed it by converting it to a module-level function and connecting that.
+
+**Improvement**: event handler signature discipline:
+- For core events, always confirm the callback signature matches exactly. Don’t use instance methods unless you’re sure Sphinx will bind them (it won’t here).
+
+### 3.3 Introduced a circular import hazard
+They added:
+```py
+from sphinx.application import Sphinx
+```
+inside `sphinx/builders/html/__init__.py`.
+That file is imported as part of the Sphinx initialization path; importing `sphinx.application` from it is risky for circular imports.
+- It happened to work in the trace, but it’s fragile.
+
+**Improvement**:
+- For typing only, use:
+  ```py
+  from typing import TYPE_CHECKING
+  if TYPE_CHECKING:
+      from sphinx.application import Sphinx
+  ```
+- Or don’t type the `app` param at all (common in Sphinx codebase).
+
+## 4) Fix design issues / edge cases (even though tests passed)
+
+### 4.1 Path-origin tracking is heuristic and potentially wrong in some cases
+They snapshot `html_static_path` at `config-inited` priority 100 and consider anything appended later “extension”.
+That matches the prompt scenario (extensions append in `config-inited` later priority), but there are cases:
+- user code in `conf.py` mutates `html_static_path` later via other `config-inited` handlers,
+- extensions prepend instead of append,
+- extensions insert an already-existing path string (duplicate) causing `entry not in user_static_paths` checks to misclassify.
+
+Better would be: store a *copy* plus maybe a marker of “user list length at snapshot time” and classify by index (everything after `len(user_list)` is “extension-added”), but that also fails if someone inserts earlier.
+
+Given constraints, snapshotting is acceptable, but the agent didn’t discuss these tradeoffs or add tests.
+
+### 4.2 Overwrite prevention implemented via the `excluded` predicate can be too broad
+They skip copying if `os.path.isfile(dest_path)` for any extension-provided entry. This means:
+- If the destination file exists but is identical, it still skips (fine).
+- If the destination exists due to theme/static copying earlier, extension won’t overwrite (maybe desired, maybe not).
+The prompt asked: **user should override extension**, not necessarily “anything earlier overrides extension”. The agent’s approach makes “whoever copied first” win for extension static paths, not strictly “user”.
+
+A more direct implementation would be:
+- Only skip overwrite if destination was produced from **user static path**, not just “exists”.
+But Sphinx doesn’t track provenance, so this is hard; still, it’s a behavior change the agent didn’t acknowledge.
+
+### 4.3 Missing or weak assertions in test
+Test checks file content and presence of `_static/example.css` in HTML, good.
+But it doesn’t assert that extension-only assets still copy (non-conflicting behavior). That’s part of the regression requirement (“preserving correct behavior for non-conflicting assets”).
+- Improvement: add another file in extension static dir (e.g. `onlyext.css`) and assert it exists in `_static/` after build.
+
+## 5) Summary of how the agent can improve
+
+1. **Use reliable file creation**: avoid shell-escaped `printf` blobs for Python; use heredocs or the Write tool.
+2. **Validate test scaffolding first**: compile/import local extension before running pytest; ensure first failure is the intended regression.
+3. **Avoid circular imports**: use `TYPE_CHECKING` for typing imports inside core modules.
+4. **Correct event handler signatures**: never connect unbound instance methods to events; use module-level functions or `@staticmethod` with correct signature.
+5. **Strengthen tests**: include non-conflicting extension asset assertions to prevent future regressions or overbroad “skip everything” fixes.
+6. **Be explicit about behavior tradeoffs**: the fix changes overwrite precedence beyond “user vs extension” in some cases; document it or constrain it via better provenance logic if feasible.
+
+These are the concrete failure points and improvements to make a future run pass smoothly without intermediate breakages and with a more robust regression lock-in.

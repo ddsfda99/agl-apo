@@ -1,0 +1,236 @@
+diff --git a/src/cfnlint/data/schemas/other/step_functions/statemachine.json b/src/cfnlint/data/schemas/other/step_functions/statemachine.json
+index 827d968b0..00600bb25 100644
+--- a/src/cfnlint/data/schemas/other/step_functions/statemachine.json
++++ b/src/cfnlint/data/schemas/other/step_functions/statemachine.json
+@@ -15,6 +15,12 @@
+       "BooleanEquals": {
+        "type": "boolean"
+       },
++      "BooleanEqualsPath": {
++       "type": "string"
++      },
++      "IsBoolean": {
++       "type": "boolean"
++      }
+       "Next": {
+        "pattern": "^.{1,128}$",
+        "type": "string"
+@@ -25,18 +31,39 @@
+       "NumericEquals": {
+        "type": "number"
+       },
++      "NumericEqualsPath": {
++       "type": "string"
++      },
++      "IsNumeric": {
++       "type": "boolean"
++      }
+       "NumericGreaterThan": {
+        "type": "number"
+       },
++      "NumericGreaterThanPath": {
++       "type": "string"
++      },
+       "NumericGreaterThanEquals": {
+        "type": "number"
+       },
++      "NumericGreaterThanEqualsPath": {
++       "type": "string"
++      },
+       "NumericLessThan": {
+        "type": "number"
+       },
++      "NumericLessThanPath": {
++       "type": "string"
++      },
+       "NumericLessThanEquals": {
+        "type": "number"
+       },
++      "NumericLessThanEqualsPath": {
++       "type": "string"
++      },
++      "IsPresent": {
++       "type": "boolean"
++      }
+       "Or": {
+        "items": {
+         "$ref": "#/definitions/choice/definitions/Operator"
+@@ -46,33 +73,69 @@
+       "StringEquals": {
+        "type": "string"
+       },
++      "StringEqualsPath": {
++       "type": "string"
++      },
+       "StringGreaterThan": {
+        "type": "string"
+       },
++      "StringGreaterThanPath": {
++       "type": "string"
++      },
+       "StringGreaterThanEquals": {
+        "type": "string"
+       },
++      "StringGreaterThanEqualsPath": {
++       "type": "string"
++      },
+       "StringLessThan": {
+        "type": "string"
+       },
++      "StringLessThanPath": {
++       "type": "string"
++      },
+       "StringLessThanEquals": {
+        "type": "string"
+       },
++      "StringLessThanEqualsPath": {
++       "type": "string"
++      },
++      "IsString": {
++       "type": "boolean"
++      }
+       "TimestampEquals": {
+        "type": "string"
+       },
++      "TimestampEqualsPath": {
++       "type": "string"
++      },
+       "TimestampGreaterThan": {
+        "type": "string"
+       },
++      "TimestampGreaterThanPath": {
++       "type": "string"
++      },
+       "TimestampGreaterThanEquals": {
+        "type": "string"
+       },
++      "TimestampGreaterThanEqualsPath": {
++       "type": "string"
++      },
+       "TimestampLessThan": {
+        "type": "string"
+       },
++      "TimestampLessThanPath": {
++       "type": "string"
++      },
+       "TimestampLessThanEquals": {
+        "type": "string"
+       },
++      "TimestampLessThanEqualsPath": {
++       "type": "string"
++      },
++      "IsTimestamp": {
++       "type": "boolean"
++      }
+       "Variable": {
+        "type": "string"
+       }
+@@ -154,12 +217,24 @@
+     "Cause": {
+      "type": "string"
+     },
++    "CausePath": {
++     "type": [
++      "string",
++      "null"
++     ]
++    }
+     "Comment": {
+      "type": "string"
+     },
+     "Error": {
+      "type": "string"
+     },
++    "ErrorPath": {
++     "type": [
++      "string",
++      "null"
++     ]
++    }
+     "InputPath": {
+      "type": [
+       "string",
+@@ -232,6 +307,43 @@
+     "Iterator": {
+      "$ref": "#/"
+     },
++    "ItemProcessor": {
++     "properties": {
++      "ProcessorConfig": {
++       "properties": {
++        "Mode": {
++         "enum": [
++          "INLINE",
++          "DISTRIBUTED"
++         ],
++         "type": "string"
++        }
++       },
++       "required": [
++        "Mode"
++       ],
++       "type": "object"
++      },
++      "StartAt": {
++       "type": "string"
++      },
++      "States": {
++       "additionalProperties": false,
++       "patternProperties": {
++        "^.{1,128}$": {
++         "$ref": "#/definitions/state"
++        }
++       },
++       "type": "object"
++      }
++     },
++     "required": [
++      "ProcessorConfig",
++      "StartAt",
++      "States"
++     ],
++     "type": "object"
++    }
+     "MaxConcurrency": {
+      "minimum": 0,
+      "type": "number"
+@@ -295,8 +407,11 @@
+     }
+    },
+    "required": [
+-    "Type",
+-    "Iterator"
++    "Type"
++   ],
++   "anyOf": [
++    {"required": ["Iterator"]},
++    {"required": ["ItemProcessor"]}
+    ],
+    "requiredXor": [
+     "Next",
+@@ -671,6 +786,12 @@
+      "minimum": 1,
+      "type": "number"
+     },
++    "HeartbeatSecondsPath": {
++     "type": [
++      "string",
++      "null"
++     ]
++    }
+     "InputPath": {
+      "type": [
+       "string",
+@@ -738,6 +859,12 @@
+      "minimum": 1,
+      "type": "number"
+     },
++    "TimeoutSecondsPath": {
++     "type": [
++      "string",
++      "null"
++     ]
++    }
+     "Type": {
+      "enum": [
+       "Task"

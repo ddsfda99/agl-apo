@@ -1,0 +1,230 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are an expert Python developer working on the Matplotlib codebase in the current directory.
+
+Task: **[ENH] Show parameter names in error message for mismatched array sizes in `bar()` / `barh()`**.
+
+A common user mistake (e.g., missing a comma in a labels list) triggers a long NumPy broadcasting traceback with an unhelpful message like “Mismatch is between arg 2 … arg 3 …”. We want Matplotlib to catch this case and raise a clearer `ValueError` that **mentions the Matplotlib parameter names** involved (e.g., `y` vs `width` for `barh`, `x` vs `height` for `bar`) and their lengths, instead of leaking the raw NumPy broadcast error.
+
+## Key requirements (read carefully)
+
+1. **Add a permanent regression test** for this behavior. Do **not** delete the test after debugging; it must remain in the repo.
+2. The test must be **robust**: don’t assert an exact full error string with fragile punctuation/quoting. Use regex or multiple `in` checks that verify the essentials:
+   - the raised exception is a `ValueError`
+   - the message references the relevant Matplotlib argument names (e.g., `y` and `width` for `barh` repro)
+   - the message includes the mismatched lengths (e.g., 2 vs 3 for the given repro)
+   - allow optional quotes around parameter names.
+3. Implementation must be **narrowly targeted**:
+   - Only replace the message for the specific NumPy broadcasting/shape-mismatch failure.
+   - Do not catch and rewrite unrelated `ValueError`s.
+4. Error reporting should be **parameter-name based**, not “arg 2 / arg 3”.
+   - Prefer messages like: `barh(): 'y' has length 2 but 'width' has length 3 (cannot broadcast)` (exact phrasing flexible, but must clearly map to Matplotlib parameter names).
+   - For vertical bars, analogous mapping: `x` and `height` (and/or `width`, `bottom` as applicable).
+5. Keep runtime impact minimal and code style consistent with Matplotlib.
+
+## Workflow you must follow
+
+1. **Reproduce via a test first**
+   - Add a regression test that uses the minimal example causing mismatch in `barh`:
+     ```python
+     arg_k = ["foo", "bar" "baz"]  # missing comma => len 2
+     arg_n = [1, 2, 3]             # len 3
+     ax.barh(arg_k, arg_n)
+     ```
+   - The test should assert the improved error message (see robustness rules above).
+   - Put the test in an appropriate existing test module for axes plotting (search existing tests for `barh`/`bar` and follow local conventions). Prefer adding to an existing file over creating an entirely new one unless clearly appropriate.
+
+2. **Run only targeted tests while iterating**
+   - Do **not** run the full suite initially.
+   - Run only the new/edited test module, or even `-k barh`/`-k bar` within it.
+   - After it passes, optionally run a small related subset (e.g., same module with `-k bar`).
+
+3. **Locate the right implementation point**
+   - The enhancement is for `bar()` / `barh()`; in Matplotlib this is likely in `Axes.bar` (and `Axes.barh` calling into it).
+   - Find where NumPy broadcasting happens (e.g., `np.broadcast_arrays(...)` or similar).
+   - The current failure originates from NumPy; we want to intercept that specific broadcast shape mismatch and re-raise a better error.
+
+4. **Implement the fix with careful exception handling**
+   - Catch only the broadcast-related `ValueError` (typically contains text like `shape mismatch` / `broadcast` / `cannot be broadcast`).
+   - Re-raise a `ValueError` whose message includes:
+     - function context (`bar()` or `barh()`; `barh` may call `bar` with swapped semantics—be explicit about which user-facing API is being called if possible)
+     - the **Matplotlib parameter names** that are incompatible (at minimum for this repro: `y` and `width` for `barh`)
+     - their lengths (2 and 3 in the repro)
+   - Avoid misleading length reporting for scalars; treat length-1 as broadcastable and focus on the mismatch between non-1 lengths when possible.
+   - Do not mask other `ValueError`s: if it’s not clearly the broadcast mismatch case, re-raise the original.
+
+   Guidance for good behavior:
+   - Determine candidate argument arrays and their “effective lengths” (e.g., `len(...)` when array-like; treat scalars as length 1).
+   - Identify which arguments have non-1 lengths and whether they disagree.
+   - Construct message naming the specific disagreeing args.
+   - For `barh`, be sure you use the *user-facing names*: `y` and `width` (even if internally it maps to `x`/`height`).
+
+5. **Validate**
+   - Re-run the targeted test(s) and ensure they pass.
+   - Ensure the error message is helpful and stable enough for the robust test.
+   - Don’t leave temporary debug files.
+
+## Deliverable expectations
+
+- A code change that improves the error message for mismatched input lengths in `bar()`/`barh()` by reporting **parameter names and lengths**.
+- A permanent regression test verifying this behavior in a non-brittle way.
+- Evidence of targeted test execution (you can describe the commands you ran in your reasoning; do not run full suite unless absolutely necessary).
+
+Now implement the enhancement in this repository following the workflow above.
+
+the evaluations of previous failures:
+The agent “looked successful” in its own targeted run, but the change is very likely to fail in the full Matplotlib suite (or be rejected in review) because the implementation is not as narrowly targeted as it appears and the test is too weak/placed poorly. Here are the concrete failure points and how to improve.
+
+---
+
+## 1) Over-broad exception rewriting (will mask unrelated errors)
+
+### What the agent did
+In `Axes.bar`, it wrapped:
+
+```py
+x, height, width, y, linewidth, hatch = np.broadcast_arrays(...)
+```
+
+and then rewrote *any* `ValueError` whose message contains `'broadcast'` or `'shape mismatch'`.
+
+### Why this is a problem
+- NumPy `ValueError`s that happen inside broadcasting for reasons other than “mismatched array lengths” can still include the word “broadcast” (e.g., higher-dimensional shape mismatch, errors from array interface conversions, certain object-dtype cases). This change will rewrite them too, violating requirement #3 (“Do not catch and rewrite unrelated ValueError’s.”).
+- Matplotlib itself can also raise `ValueError`s earlier that bubble up with messages containing “shape mismatch”/“broadcast” in some cases (especially with units/categorical conversions producing object arrays). This code will now “steal” those errors and produce a potentially misleading length-based message.
+
+### How to improve
+- Don’t key off substring checks only. Match the **specific NumPy broadcast error patterns** that occur here, e.g.:
+  - `"shape mismatch: objects cannot be broadcast to a single shape"`
+  - `"operands could not be broadcast together"`
+- Even better: detect mismatch by *computing* candidate lengths first, and only rewrite if you can identify two parameters with conflicting non-1 lengths **and** the caught error is consistent with a broadcast failure.
+
+---
+
+## 2) Incorrect “effective length” computation (can produce wrong or crashy messages)
+
+### What the agent did
+```py
+def _eff_len(val):
+    try:
+        return len(val)
+    except Exception:
+        return 1
+```
+
+### Why this is a problem
+- After conversions, `x`, `y`, `height`, `width` can be numpy arrays with shapes `(N, 1)` / `(N, M)`; `len(val)` gives the first dimension, not the broadcasted size. You can easily report “length N” even though the true mismatch is in another dimension.
+- Some inputs are 0-d numpy arrays (`np.array(3.0)`): `len()` raises `TypeError`, you treat as 1 (fine), but other array-likes can define `__len__` in surprising ways (e.g., pandas objects, masked arrays).
+- In practice, bar/barh expects 1D-ish inputs; if something is 2D and NumPy throws, your rewritten error will be misleading and may break tests that assert the old message for 2D misuse.
+
+### How to improve
+- Use `np.size` / `np.shape` carefully, and only do the rewrite when all involved inputs are 1D or scalar-like.
+- Prefer `np.ndim(val)` checks: only rewrite if all candidate arrays are scalar or 1D.
+- Compute “broadcast-relevant length” as:
+  - `1` for scalars / 0d
+  - `len(arr)` for 1D
+  - otherwise: don’t rewrite; re-raise original.
+
+---
+
+## 3) Parameter mapping is fragile / can be wrong depending on call path
+
+### What the agent did
+For `orientation == 'horizontal'` it maps:
+- `'y': y` (actually `bottom` internal)
+- `'width': width`
+- `'left': x` (actually `left` internal)
+- `'height': height`
+
+### Why this is a problem
+This code is executed inside `bar()` after unit conversion; the semantics of `x`, `y`, `width`, `height` depend on orientation, but the mapping is still somewhat confusing and can be wrong for edge cases:
+- `barh()` passes `x=left, bottom=y`. Internally `y = bottom` is set. That’s fine, but any future refactor could break this assumption.
+- More importantly: the error might be between `left` and `width` (or `height` and `y`) and your code might still prefer `y` vs `width` even when that’s not the actual mismatch, because it “prefers primary pair”.
+
+### How to improve
+- Determine the mismatch pair from computed lengths, not from a “primary” preference. Only prefer `y/width` if those are actually the conflicting non-1 lengths.
+- Consider including *all* relevant non-1 lengths in message, or at least correctly identify the two that differ.
+
+---
+
+## 4) The regression test is too weak and may pass with bad messages
+
+### What the agent did
+Test asserts:
+- regex contains `barh()` and `y`
+- regex contains `width`
+- message contains `"2"` and `"3"` anywhere
+- contains `"broadcast"` or `"cannot broadcast"`
+
+### Why this is a problem
+- `"2"` and `"3"` are extremely weak checks. The message could contain unrelated numbers (e.g., “arg 2” / “arg 3”) and still pass. The original NumPy traceback often includes “arg 2” / “arg 3” — exactly the thing we’re trying to avoid.
+- It doesn’t assert that `2` corresponds to `y` and `3` corresponds to `width` (or vice versa). So an incorrect mapping could slip through.
+- It doesn’t ensure the new message is raised *instead of* the NumPy “Mismatch is between arg … arg …” message.
+
+### How to improve
+Make the test robust but meaningful:
+- Assert the message does **not** contain `"arg 2"` / `"arg 3"` / `"Mismatch is between arg"`.
+- Use a regex that ties parameter names to lengths, e.g. something like:
+  - `r"barh\(\): .*'?y'?.*length\s*2.*'?width'?.*length\s*3"`
+  - allow either order if you want.
+- Keep it non-brittle by allowing optional quotes and flexible wording, but require the association.
+
+---
+
+## 5) Test placement in `test_axes.py` is risky (file size / ordering / style)
+
+### What the agent did
+It inserted the test by replacing a snippet near `test_bar_timedelta`.
+
+### Why this can fail
+- `test_axes.py` is huge and heavily curated; inserting tests mid-block can violate local organization conventions, and in Matplotlib CI this sometimes triggers lint/style checks or reviewer pushback.
+- The insertion method (“replace this exact block with a new one”) is brittle; if upstream changes alter that block, the patch becomes conflict-prone (not a CI failure, but a maintenance issue).
+
+### How to improve
+- Put the test near other `bar`/`barh` tests (there is already a cluster around `test_bar_*` and `test_barh_*`).
+- Follow naming patterns and add a short comment referencing the regression scenario.
+
+---
+
+## 6) Missing coverage for `bar()` (vertical) requirement
+
+### What the agent did
+Only added a `barh` test. Implementation attempts to handle `bar` too, but it’s untested.
+
+### Why this matters
+- The prompt asks for `bar()` / `barh()`. Without a `bar()` test, it’s easy for future changes to break `bar()` messaging, and CI might already have tests that now fail due to message rewrite behavior differences.
+
+### How to improve
+- Add a second regression test for `ax.bar([..], [..])` mismatch (e.g., `x` length 2, `height` length 3) asserting `bar(): 'x' ... 'height' ...`.
+
+---
+
+## 7) Behavioral compatibility risk: changing exception type/wording unexpectedly
+
+Even if tests pass, Matplotlib may have downstream expectations for the exact NumPy error message in some scenarios. The current rewrite triggers whenever a broadcast error occurs, potentially changing long-standing messages in cases not meant by the enhancement (e.g., mismatches involving `linewidth`/`hatch` or cases with `bottom`/`left`).
+
+### How to improve
+- Restrict rewrite to mismatches among the **core positional data parameters** only:
+  - `bar`: `x`, `height`, optionally `width`, `bottom`
+  - `barh`: `y`, `width`, optionally `height`, `left`
+- Exclude style parameters like `linewidth` and `hatch` from mismatch detection to avoid producing confusing messages when the real mismatch is from those.
+
+---
+
+## Summary of what to change to “pass all tests” reliably
+1. Tighten the exception filter to specific NumPy broadcast messages and only rewrite when all involved arrays are scalar/1D.
+2. Compute lengths safely (scalar vs 1D); skip rewrite for 2D+ shapes.
+3. Identify the conflicting pair from actual length disagreement (don’t hard-prefer `y/width`).
+4. Strengthen the test:
+   - ensure no “arg 2/arg 3” remnants
+   - bind parameter name to its length via regex
+5. Add a `bar()` (vertical) test too.
+6. Limit mismatch detection to user-facing core parameters, not `linewidth`/`hatch`.
+
+These adjustments will make the change truly “narrowly targeted,” reduce the chance of breaking unrelated tests, and make the regression tests meaningful and stable.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

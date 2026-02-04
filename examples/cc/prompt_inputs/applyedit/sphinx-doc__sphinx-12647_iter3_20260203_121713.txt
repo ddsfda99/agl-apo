@@ -1,0 +1,254 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+Regression: CSS file added by extension cannot be overridden by users anymore
+### Describe the bug
+
+In my concrete case, the CSS file is added with `add_css_file()`
+in my `nbsphinx` extension: https://github.com/spatialaudio/nbsphinx/blob/53be5e632f0c9483ba65ba6690da9b137f9c1120/src/nbsphinx/__init__.py#L1655
+
+### How to Reproduce
+
+Check out https://github.com/spatialaudio/nbsphinx/ and add this to `doc/conf.py`:
+
+```python
+html_static_path = ['my-static-path']
+```
+
+Create a file `my-static-path/nbsphinx-gallery.css` with some CSS overrides, like e.g. in https://github.com/Substra/substra-documentation/blob/d2785aa82d46686d82ab66d2c24f95af86d28ce6/docs/source/static/nbsphinx-gallery.css.
+
+Run Sphinx.
+
+Look at one of the thumbnail galleries.
+
+### Environment Information
+
+```text
+Any Sphinx version after ae206694e68bea074aca633ea0d32e9ed882a95f, appearing first in release 7.1.0.
+```
+
+
+### Sphinx extensions
+
+```python
+`nbsphinx`, but this should happen with any extension that adds some CSS.
+```
+
+
+### Additional context
+
+This was originally reported here: https://github.com/spatialaudio/nbsphinx/issues/778
+
+I have bisected it, and the culprit is ae206694e68bea074aca633ea0d32e9ed882a95f, which is part of #11415.
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## Summary: why the agent “failed” (root cause + process issues)
+
+Strictly speaking, the agent’s patch *does* make this repository’s test suite pass (2160 passed). However, it likely “failed” relative to the **real bug report** because the fix is **too broad and based on an incorrect model of how extensions provide static assets**. It also relies on a reproduction that doesn’t match the nbsphinx/Sphinx interaction described in the issue.
+
+What the agent implemented (“reverse `html_static_path` copy order”) can have unintended consequences and may not actually address the *actual regression mechanism* introduced by ae206694e… in Sphinx 7.1.0.
+
+Below are the concrete problems in the trace and how to improve.
+
+---
+
+## 1) Reproduction test is not faithful to the reported scenario
+
+### What the issue describes
+The report says:
+
+- An extension calls `app.add_css_file('nbsphinx-gallery.css')`.
+- A user adds `html_static_path = ['my-static-path']`.
+- User puts `my-static-path/nbsphinx-gallery.css` as an override.
+- “Any Sphinx version after ae206694e… cannot be overridden anymore.”
+
+In that setup, the extension is **not necessarily modifying `html_static_path`**. Many extensions ship their CSS either:
+- packaged inside the extension and copied to `_static` by the extension itself, or
+- via `app.add_css_file()` expecting the CSS to be resolvable, but *not* by appending random paths to `html_static_path`.
+
+### What the agent’s reproduction did
+The agent created a synthetic extension that:
+- registers CSS with `add_css_file('nbsphinx-gallery.css')`, **and**
+- appends an extension dir to `config.html_static_path` at `config-inited`.
+
+This is not the same as “extension adds CSS via `add_css_file()` and user puts same-named file in their `html_static_path`”. It is a specific design where:
+- the extension itself is abusing `html_static_path` as a transport, and
+- the override problem becomes purely “copy order of `html_static_path` entries”.
+
+That may happen for some extensions, but it’s not what the report proves, and is likely not what changed in ae206694e….
+
+### How to improve
+A better reproduction should mirror *nbsphinx’s behavior*:
+- If nbsphinx copies its CSS into `_static` at build time, reproduce that.
+- If nbsphinx uses `html_static_path` (by appending package dirs), reproduce exactly that mechanism.
+- Validate not only file content in `_static`, but also the **HTML includes** (e.g., ordering, duplication, cache-busting query strings).
+
+---
+
+## 2) The chosen fix is overly global and likely breaks precedence rules
+
+### The patch
+In `copy_html_static_files`, the agent changed:
+
+```py
+for entry in self.config.html_static_path:
+    copy_asset(...)
+```
+
+to:
+
+```py
+for entry in reversed(self.config.html_static_path):
+    copy_asset(...)
+```
+
+### Why that’s risky
+`html_static_path` is user-controlled config, and the *expected precedence* between multiple entries is typically:
+
+- **Later entries override earlier entries** (common in config list semantics), or at minimum “copy in listed order”.
+
+Reversing copy order changes semantics for *every project* using multiple static paths, and for themes/extensions that rely on current order.
+
+Also: extensions are not guaranteed to “append” their paths. Some may insert at position 0, or users may intentionally order multiple dirs. The fix assumes:
+- extension dirs always appear last,
+- users always appear first,
+- and “user should override extension” is equivalent to “last copied wins”.
+
+This is not a safe invariant for Sphinx core.
+
+### How to improve
+Instead of reversing the entire list, the fix should be **targeted**:
+
+- Distinguish *extension-provided* static directories from *user-provided* static directories.
+- Copy extension directories first, then user directories, **without changing user-defined ordering among user directories**.
+- Or: avoid relying on `html_static_path` ordering entirely and implement explicit override policy for specific assets added via `add_css_file()`.
+
+---
+
+## 3) It likely doesn’t address the actual regression in ae206694e…
+
+The report points to ae206694e… (part of #11415). That PR was about HTML asset handling (priority sorting, per-page assets, checksums, etc.). The regression could be:
+
+- the CSS file inclusion now uses checksum query strings, altering resolution?
+- asset copying now happens earlier/later relative to extension hooks?
+- extension-added assets are now treated as “core” assets and moved later?
+- the event ordering changed so a user’s override file is copied, then overwritten, or the link tag now points to a different location.
+
+The agent did not:
+- inspect the referenced commit or its changes,
+- identify what in #11415 caused override to stop working,
+- or confirm that the issue is actually `html_static_path` copy order.
+
+Their test passed because it was crafted around their proposed mechanism.
+
+### How to improve
+Do a minimal archaeology:
+- Identify what ae206694e changed in asset pipeline.
+- Look specifically for changes to:
+  - static file copying
+  - builder init ordering
+  - `add_css_file` registration timing
+  - deduplication of css_files
+  - checksum querystring behavior
+
+Then craft a test that fails on current main and passes with fix, matching the upstream regression.
+
+---
+
+## 4) Verification checks the wrong thing (file content only, not override behavior)
+
+The test asserts:
+
+```py
+css_output = (app.outdir / '_static' / 'nbsphinx-gallery.css').read_text()
+assert '/* user override css */' in css_output
+```
+
+But the original symptom is “CSS cannot be overridden anymore” which could mean:
+
+- The user file exists but is not the one linked in HTML (e.g., extension CSS is linked from a different path or injected inline)
+- CSS inclusion order changed (user CSS is loaded earlier)
+- Caching/checksums cause browser to load stale CSS
+- The extension loads CSS via full URL or via `_static` subdir while user used different path
+
+The test doesn’t assert:
+- there is a single `<link>` to the intended CSS,
+- that its `href` resolves to the overridden file,
+- that inclusion order enables overriding.
+
+### How to improve
+Assert both:
+1) Output file content in `_static`.
+2) HTML link tag points to that file and appears at the correct position relative to other css (priorities).
+
+---
+
+## 5) Missed existing relevant tests and root causes already in repo
+
+The trace shows an existing test root: `tests/roots/test-util-copyasset_overwrite/` which demonstrates overwrite behavior and warnings. The agent read it but didn’t connect it to policy changes.
+
+There is also `tests/test_builders/test_build_html_assets.py` which validates CSS ordering via priorities. The regression is likely connected to these areas.
+
+### How to improve
+- Reuse/extend existing test roots and patterns instead of inventing a new model.
+- Add a test that specifically asserts “user file overrides extension file” in a way aligned with how Sphinx expects extensions to ship assets.
+
+---
+
+## 6) Implementation detail: `path.join(self.confdir, entry)` with absolute entries
+
+In `copy_html_static_files`, the code does:
+
+```py
+copy_asset(path.join(self.confdir, entry), ...)
+```
+
+If `entry` is absolute, `os.path.join(confdir, entry)` becomes `entry`, so it “works by accident”.
+
+The agent’s reproduction depends on that property to append an absolute path in `html_static_path`. That’s a fragile assumption and further evidence the reproduction is synthetic.
+
+---
+
+## What would a more correct fix direction look like?
+
+Depending on true root cause, typical robust fixes are:
+
+- **Do not use `html_static_path` for extension assets precedence.** Extensions should copy their assets to `_static` under a unique subdirectory (`_static/nbsphinx/…`) to avoid collisions.
+- Provide a supported override mechanism:
+  - If extension registers `add_css_file('nbsphinx-gallery.css')`, Sphinx could allow user to supply a same-named file in their static path and prefer that when copying/collecting assets.
+  - Or document that extensions must namespace their assets; then “override” is done via later-loaded `html_css_files`, not by filename collision.
+- If the regression is actually that extension CSS is now loaded *after* `html_css_files`, fix the priority sorting / insertion point rather than static copying order.
+
+---
+
+## Concrete action items for the agent to improve
+
+1) Reproduce using a realistic extension behavior (ideally mirror nbsphinx).
+2) Identify the change in ae206694e… and connect it to failing behavior.
+3) Avoid global reversal of `html_static_path`; implement targeted precedence.
+4) Expand assertions to confirm correct `<link>` tag ordering and resolution.
+5) Add regression test that fails on Sphinx>=7.1 and passes after fix, without relying on a contrived extension that mutates `html_static_path`.
+
+This is why, even though tests passed locally, the agent likely “failed” the actual intended task: the fix is not well-justified, may be semantically incorrect for Sphinx core, and the reproduction does not match the reported regression mechanism.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.
+
+# Todo
+Do NOT introduce any {...} placeholders.
+If you need literal braces in the text, escape them as { and }.

@@ -1,0 +1,152 @@
+You are an expert Sphinx contributor fixing LaTeX builder regressions. You must add precise regression tests first, confirm they fail on current code, then implement a minimal, localized fix. Do not delete or rewrite existing tests except if strictly required by changed behavior (it is not required here).
+
+Repository root is the current working directory. Do not use /workspace/default paths.
+
+## Problem summary (two regressions)
+
+1) **Figure inside seealso** now breaks LaTeX builds (likely due to #12508):
+
+```rst
+.. seealso::
+
+   .. figure:: path/to/image.png
+```
+
+LaTeX error:
+
+```
+! LaTeX Error: Not in outer par mode.
+l.2119 \begin{figure}[htbp]
+```
+
+2) **Admonition-like content inside a table that uses tabulary** now breaks:
+
+```
+! Missing \endgroup inserted.
+l.6208 \end{tabulary}
+```
+
+Reported in MyST docs (so it’s likely about table cells containing block-level constructs like admonitions).
+
+## Critical constraints (must follow)
+
+- Keep the fix minimal and scoped to the actual invalid LaTeX context(s).
+- Do not “paper over” by broadly disabling floats everywhere or rewriting major formatting.
+- Do not delete existing tests. In particular, there is already coverage asserting figures in admonitions become `\begin{figure}[H]`. Keep it.
+- Tests must be robust and structural:
+  - Verify containment/order by slicing between begin/end markers (or equivalent), not “string exists somewhere”.
+  - Do not assert policies that are not established (e.g., “never emit sphinxadmonition in tables”). Instead, assert the correct higher-level contract (e.g., table kind switches from tabulary to tabular when problematic content exists).
+- If you add a LaTeX compilation test, it must be optional and skipped when TeX is unavailable. You still must add a non-compilation test that fails without the fix and passes with it.
+
+## Very important: Sphinx testroot naming convention
+
+When using `@pytest.mark.sphinx(..., testroot='NAME')`, pytest looks under:
+
+`tests/roots/test-NAME/`
+
+So:
+- Use `testroot='figure-in-seealso'` with directory `tests/roots/test-figure-in-seealso/`
+- Use `testroot='admonition-in-tabulary'` (or similar) with directory `tests/roots/test-admonition-in-tabulary/`
+
+Do not include the `test-` prefix in the `testroot=` marker.
+
+## Workflow you must follow
+
+### Step 1: Add failing regression tests (before any fix)
+
+Add tests to the existing LaTeX test module (prefer `tests/test_builders/test_build_latex.py` unless there is a more appropriate existing latex builder test file). Add new roots under `tests/roots/`.
+
+#### A. Test: figure inside seealso should be non-floating like in other admonitions
+
+Goal: ensure that when a `figure` is inside `seealso`, the LaTeX output forces `[H]` (non-floating) *within the seealso block*, preventing “Not in outer par mode”.
+
+1) Create `tests/roots/test-figure-in-seealso/` containing a minimal `conf.py` and `index.rst`.
+2) In `index.rst`, include only a `.. seealso::` containing a `.. figure::` that points to an **existing** test image already present in Sphinx tests (reuse a PNG from an existing LaTeX test root; do not add new binary files). Add a minimal caption if necessary.
+3) Write a test:
+
+- Build LaTeX (tex output, not PDF).
+- Read the generated `.tex` file content from the build output.
+- Extract the substring between `\begin{sphinxseealso}` and `\end{sphinxseealso}`.
+- Assert that inside that substring the figure environment is emitted with forced placement `[H]`:
+  - Must assert order/containment: `\begin{sphinxseealso}` occurs before the figure begin, and the figure begin is inside the extracted block.
+  - Assert specifically `\begin{figure}[H]` occurs in that block (not merely somewhere in the document).
+
+Important: do not remove/modify the existing test that checks figures in admonitions are `[H]`. You are adding a new test for `seealso`.
+
+#### B. Test: admonition/seealso inside a table cell must not use tabulary (should become problematic and switch to tabular)
+
+Goal: demonstrate the regression and validate the intended Sphinx contract: if a table cell contains “problematic” block content (like an admonition environment), Sphinx should mark the table as problematic and render it using `tabular` rather than `tabulary`.
+
+1) Create `tests/roots/test-admonition-in-tabulary/` with minimal `conf.py` and `index.rst`.
+2) In `index.rst`, create a table that typically renders as `tabulary` in LaTeX (a `.. list-table::` with widths is usually enough; verify by inspecting produced `.tex`).
+3) Put an admonition-like directive in a table cell. Prefer `.. seealso::` since it matches the report, but `.. admonition::` is fine if it triggers the issue more reliably.
+4) Write a test:
+
+- Build LaTeX and read the `.tex`.
+- Assert the document contains the admonition content (so we know it wasn’t dropped).
+- Assert the table is **not** rendered using `tabulary` when the admonition is inside a cell:
+  - Robust structural check: locate the relevant table block (e.g., around where the table content appears) and assert `\begin{tabular}` appears and `\begin{tabulary}` does not for that table.
+  - At minimum, assert `\begin{tabulary}` is absent from the output and `\begin{tabular}` is present, but prefer to narrow to the table region (e.g., split around the unique cell text).
+
+This test should fail before the fix if current output uses tabulary and includes admonition content that breaks it (or if the regression manifests as still choosing tabulary).
+
+Optional (additive): If you can add a compilation test, do so behind a TeX availability check. But do not rely on compilation-only coverage.
+
+### Step 2: Diagnose precisely (use ripgrep)
+
+Use ripgrep to locate:
+- `visit_seealso`, `depart_seealso`, `sphinxseealso`
+- `no_latex_floats`
+- `visit_figure` and placement handling
+- `tabulary`, `has_problematic`, and table node handling in LaTeX writer
+- existing handling for admonitions inside tables (`visit_admonition`, `visit_note`, etc.)
+
+You must identify the smallest change that:
+- causes figures inside seealso to use `[H]` (like other admonitions), and
+- ensures tables containing admonitions switch away from `tabulary` via the established “problematic table” mechanism.
+
+### Step 3: Implement minimal fix (two regressions)
+
+#### Fix 1: figure inside seealso
+Do not invent a new rendering mode (no ad-hoc `center` + `captionof`, no `in_minipage` hacks). Sphinx already has an established mechanism: when `self.no_latex_floats` is true, figures use `[H]`.
+
+Implement the most local change:
+- Ensure entering `seealso` increments the same “no floats” state used for other admonitions (likely `self.no_latex_floats += 1`), and leaving decrements it.
+- Only apply this within the seealso environment; do not change global float policy.
+
+Your new test must pass by observing `\begin{figure}[H]` inside `sphinxseealso`.
+
+#### Fix 2: admonition inside tabulary
+Do not suppress admonition environments in tables (that changes semantics). Prefer the existing Sphinx strategy: if a table contains block-level/problematic nodes, set `table.has_problematic = True` so the writer uses `tabular` rather than `tabulary`.
+
+Implement a narrow change so that when an admonition-like node is encountered while the LaTeX writer is inside a table cell (inspect writer state; usually `self.table` or similar), it marks the current table as problematic:
+- This should cover `seealso` and other admonition nodes consistently (generic admonition and specific admonition types).
+- Keep it minimal: one helper or a small check in the common admonition visitor(s), not scattered hacks.
+- Ensure nesting does not break (avoid new counters that can desynchronize). Prefer directly setting a flag on the current table node/writer state if available.
+
+The test must pass by showing `tabular` is used (and `tabulary` is not) when the cell contains the admonition.
+
+### Step 4: Validate
+
+Run:
+- The two new tests you added.
+- The existing LaTeX test(s) that cover figures in admonitions (ensure you did not regress them).
+- A focused run of `tests/test_builders/test_build_latex.py` to catch nearby regressions.
+
+### Step 5: Keep changes clean
+
+- Only add necessary roots/files.
+- Reuse existing images; do not add binary files.
+- Do not remove existing tests.
+- No unrelated refactors.
+
+## Deliverable expectations
+
+After completion:
+- New regression tests exist and are robust (containment/order checks).
+- Tests fail on the original code and pass with your fix.
+- Fix is minimal, localized to LaTeX writer state handling:
+  - `seealso` enforces `no_latex_floats` so figures become `[H]` inside it.
+  - Tables with admonitions are marked problematic so they use `tabular`, not `tabulary`.
+
+Proceed step-by-step: write tests first, run to see failure, then implement fix, then rerun tests.

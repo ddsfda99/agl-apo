@@ -1,0 +1,44 @@
+diff --git a/src/cfnlint/rules/resources/ResourceType.py b/src/cfnlint/rules/resources/ResourceType.py
+index 869620247..4ac2bc20d 100644
+--- a/src/cfnlint/rules/resources/ResourceType.py
++++ b/src/cfnlint/rules/resources/ResourceType.py
+@@ -32,16 +32,8 @@ class ResourceType(CfnLintKeyword):
+         if not validator.is_type(resource_type, "string"):
+             return
+ 
+-        resource_condition = instance.get("Condition")
+-
+         for region in validator.context.regions:
+-            if validator.is_type(resource_condition, "string"):
+-                if validator.cfn is None:
+-                    continue
+-                if False in validator.cfn.conditions.build_scenerios_on_region(
+-                    resource_condition, region
+-                ):
+-                    continue
++            # Do not honor resource Condition when checking regional availability
+             if resource_type in PROVIDER_SCHEMA_MANAGER.get_resource_types(
+                 region=region
+             ):
+diff --git a/test/unit/rules/resources/test_type.py b/test/unit/rules/resources/test_type.py
+index 1415d244a..c62339e8d 100644
+--- a/test/unit/rules/resources/test_type.py
++++ b/test/unit/rules/resources/test_type.py
+@@ -75,4 +75,16 @@ class TestType(BaseRuleTestCase):
+             )
+         )
+ 
+-        self.assertListEqual(errors, [], errors)
++        # Under new behavior, E3006 should be reported regardless of Condition
++        self.assertListEqual(
++            errors,
++            [
++                ValidationError(
++                    "Resource type 'Foo::Bar::Type' does not exist in 'us-east-1'",
++                    path=deque(["Type"]),
++                    schema_path=deque([]),
++                    rule=ResourceType(),
++                ),
++            ],
++            errors,
++        )

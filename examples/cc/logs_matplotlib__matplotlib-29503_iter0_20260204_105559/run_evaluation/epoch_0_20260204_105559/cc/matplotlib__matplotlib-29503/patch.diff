@@ -1,0 +1,34 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index bb50664bab..c0fb5f5669 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -2575,9 +2575,26 @@ class Axes(_AxesBase):
+             if yerr is not None:
+                 yerr = self._convert_dx(yerr, y0, y, self.convert_yunits)
+ 
+-        x, height, width, y, linewidth, hatch = np.broadcast_arrays(
+-            # Make args iterable too.
+-            np.atleast_1d(x), height, width, y, linewidth, hatch)
++        try:
++            x, height, width, y, linewidth, hatch = np.broadcast_arrays(
++                # Make args iterable too.
++                np.atleast_1d(x), height, width, y, linewidth, hatch)
++        except ValueError as err:
++            # Provide a clearer error with parameter names and lengths.
++            def _len_or_scalar(a):
++                a = np.asarray(a)
++                return 'scalar' if a.ndim == 0 else a.shape[0]
++            if orientation == 'vertical':
++                names = ('x', 'height', 'width', 'bottom')
++            else:  # horizontal
++                names = ('left', 'height', 'width', 'y')
++            vals = (x, height, width, y)
++            lens = {n: _len_or_scalar(v) for n, v in zip(names, vals)}
++            non_scalar = {n: l for n, l in lens.items() if l != 'scalar'}
++            detail = ', '.join(f"{n}={l}" for n, l in (non_scalar or lens).items())
++            raise ValueError(
++                f"shape mismatch: parameter lengths must match for bar(); got {detail}."
++            ) from err
+ 
+         # Now that units have been converted, set the tick locations.
+         if orientation == 'vertical':

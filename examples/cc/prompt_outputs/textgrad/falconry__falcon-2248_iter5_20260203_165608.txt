@@ -1,0 +1,137 @@
+## Why the agent failed
+
+### 1) It modified the wrong runtime implementation of `Response.set_cookie()`
+The very first runtime check correctly showed:
+
+- `falcon.response.__file__` → `.../falcon/response.cpython-311-...so`
+- `falcon.Response.__module__` → `falcon.response`
+
+That means **Falcon is using a compiled extension for `falcon.response`**, and **`falcon/response.py` is not executed at runtime**.
+
+However, the agent then:
+- Added the `partitioned` kw-only argument to `falcon/response.py`
+- Added logic to set `self._cookies[name]['partitioned'] = True` in `falcon/response.py`
+
+Result:
+- The runtime `falcon.Response.set_cookie()` still has the old signature (no `partitioned`), so tests calling `partitioned=True` fail with:
+  - `TypeError: set_cookie() got an unexpected keyword argument 'partitioned'`
+
+This is the primary failure.
+
+---
+
+### 2) The attempted workaround (patching `Morsel.__setitem__`) violates constraints and doesn’t solve the core issue
+After seeing that `partitioned` wasn’t accepted, the agent tried to “auto-enable” Partitioned by monkey-patching `http.cookies.Morsel.__setitem__` inside `falcon/util/__init__.py`.
+
+Problems:
+- **It’s still not “first-class support”** because callers still can’t pass `partitioned=...` to `Response.set_cookie()` (compiled signature unchanged).
+- This patch is **brittle and global**: it changes behavior of `http.cookies.Morsel` for the entire process and all libraries.
+- It contradicts the prompt’s intent: minimal compatibility patch to `_reserved` / `_flags` is OK, but **overriding `Morsel.__setitem__` is beyond “minimal”** and is exactly the kind of import-order dependent hack the prompt warned against.
+
+Also, the patch code itself is problematic:
+- It calls `self['partitioned'] = True` from inside `__setitem__`, which re-enters `__setitem__` recursively (it only avoids infinite recursion because `key != 'samesite'` on the second call). This is fragile.
+- It tries to set Partitioned when “SameSite=None is set”, but Falcon’s own code sets SameSite only when `same_site` param is truthy; it does **not** set it for `same_site=None`. So this patch doesn’t implement the required “auto partitioned when same_site is None/’None’” correctly anyway.
+
+---
+
+### 3) The initial test strategy was incorrect and didn’t follow the prompt’s guidance
+The prompt required tests that:
+- Assert against **raw `Set-Cookie` header strings**, robustly extracted (not via a dict).
+- Include multi-cookie behavior.
+
+The agent initially created a test that:
+- Tried to use a nonexistent API: `falcon.testing.create_app` (hence the first failing run)
+- Then tried to “reconstruct” headers by recreating morsels from parsed cookies, which **cannot validate whether the original response emitted `Partitioned`** (it only validates what the test *re-serialized*, not what Falcon sent).
+- Later it switched to unit-style tests by inspecting `resp._cookies[name].OutputString()`. This is closer, but still failed because the compiled `Response` doesn’t accept `partitioned` and doesn’t set it automatically.
+
+So even the tests didn’t actually check the real output path correctly until later, and the first version failed trivially.
+
+---
+
+### 4) It did not implement changes in a way that affects the compiled extension
+The repo includes:
+- `falcon/response.c` (generated C source) and `falcon/response.cpython-311-...so` (compiled artifact)
+- The environment has **no Cython installed**, and `python setup.py build_ext -i` prints “Cython compilation not supported”.
+
+In this environment, you generally have two workable paths:
+1) **Edit the generated C file (`falcon/response.c`) directly** to implement the new kwarg/signature and logic (since you can’t regenerate it from `.pyx`), and then compile it (needs compiler toolchain; sometimes tests assume artifacts are rebuilt).
+2) If compilation isn’t possible in the harness, **avoid needing to rebuild** by implementing behavior in a Python module that is imported and used at runtime. But for `Response.set_cookie`, that is not possible without monkey-patching `falcon.Response.set_cookie` (explicitly disallowed).
+
+The agent did neither:
+- It edited `falcon/response.py` (ineffective)
+- It tried to rebuild, but it can’t (no Cython), and it didn’t attempt a direct C-level edit+compile approach.
+- It didn’t identify where the `.so` build step is expected in this kata/harness (often the harness already provides a compiler and compiles `*.c` without Cython, or expects editing `.c` only).
+
+---
+
+## Specific places where the agent went wrong
+
+1) **After confirming `falcon.response` is `.so`, it still edited `falcon/response.py`.**
+   - Directly contradicts the “Critical constraints learned from previous failures”.
+
+2) **Added `partitioned` kw-only argument to `falcon/response.py`**
+   - Runtime signature remains unchanged; tests fail immediately.
+
+3) **Auto-Partitioned logic in `falcon/response.py` is wrong even conceptually**
+   - It uses: `partitioned or (same_site is None or same_site.lower() == 'none')`
+   - But at that point in the function, `same_site` may have been overwritten to lowercase only inside `if same_site:`; also `same_site=None` isn’t treated as “SameSite=None” in Falcon’s behavior, yet the requirement explicitly says treat None/’None’ as SameSite=None for auto-partitioning.
+
+4) **Test used `testing.create_app()`**
+   - Not part of Falcon’s public test API; Falcon’s tests use `_util.create_app`.
+
+5) **Test attempted to validate headers by re-serializing cookies**
+   - This does not validate what Falcon emitted.
+
+6) **Monkey-patching `http.cookies.Morsel.__setitem__`**
+   - Too invasive, brittle, and not aligned with the requested minimal patch.
+   - Still doesn’t provide the required new kwarg.
+
+---
+
+## How the agent should improve (what to do differently next time)
+
+### A) Follow the runtime implementation reality all the way through
+Once you confirm `.so` is used:
+- Treat `falcon/response.py` as **documentation/reference only**.
+- Find the **actual source-of-truth** for the extension:
+  - If `.pyx` exists, change it and rebuild.
+  - If `.pyx` does not exist (as here), you must modify `falcon/response.c` (generated) or locate another build source (maybe vendored `.pyx` is excluded in this kata).
+- Ensure tests run against the updated module (might require rebuilding the extension, or the harness might do it automatically if you edit `.c`).
+
+### B) Implement `partitioned` in the compiled `Response.set_cookie`
+Concretely, the compiled wrapper currently parses 10 args and has no slot for `partitioned`. You need to:
+- Extend the C-level function signature + argument parsing to accept `partitioned` as keyword-only (or at least keyword argument).
+- Implement logic equivalent to:
+  - if `partitioned=True` → set morsel `'partitioned'` flag
+  - if `same_site` is `'None'` or `None` → also set `partitioned` flag
+- Make sure `Partitioned` renders as a bare flag: `; Partitioned`
+
+### C) Keep the `Morsel` patch minimal and in the right place
+The agent did one good thing: it noticed Falcon already backports `samesite` via `falcon.util.__init__`. That’s a good place to add minimal support for `partitioned`:
+
+- Add `Morsel._reserved['partitioned'] = 'Partitioned'`
+- Add `'partitioned'` to `Morsel._flags`
+
+Do **not** patch `Morsel.__setitem__`.
+
+### D) Tests: assert raw Set-Cookie header strings properly
+The final unit-test approach `resp._cookies[name].OutputString()` is actually reasonable for this specific feature because Falcon uses `Morsel.OutputString()` to produce headers. But you still need:
+- A multi-cookie case (they added it, good)
+- Ensure you validate formatting: `; Partitioned` and not `Partitioned=True`
+
+If you want full end-to-end tests through the test client, you must extract headers from the underlying header list (not `result.headers`, which drops duplicates). In Falcon’s test harness, that is usually `srmock.headers` or the raw list passed into `Result`.
+
+### E) Don’t attempt rebuild steps that cannot work
+The agent correctly detected Cython is unavailable. Given that:
+- Don’t attempt `setup.py build_ext -i` expecting Cython.
+- Instead:
+  - either compile from `response.c` directly (if toolchain exists), or
+  - rely on the kata harness rebuild mechanism if present (some harnesses auto-compile edited `.c`), or
+  - adjust approach accordingly (but monkey-patching `Response.set_cookie` was explicitly disallowed).
+
+---
+
+## Bottom line
+The agent failed because it **implemented the feature in `falcon/response.py` while Falcon was executing `falcon/response.so`**, leaving runtime behavior unchanged. The tests then correctly failed with “unexpected keyword argument `partitioned`”. The subsequent attempt to monkey-patch `Morsel.__setitem__` was both insufficient (doesn’t add the new API) and brittle/disallowed in spirit.
+
+To pass, the work must be done in the compiled response implementation (or its real build source), plus the minimal `Morsel._reserved/_flags` update, with tests that validate emitted cookie strings.

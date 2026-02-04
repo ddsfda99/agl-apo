@@ -1,0 +1,67 @@
+diff --git a/keras/src/layers/attention/multi_head_attention.py b/keras/src/layers/attention/multi_head_attention.py
+index 5fae13023..9bcf2abb4 100644
+--- a/keras/src/layers/attention/multi_head_attention.py
++++ b/keras/src/layers/attention/multi_head_attention.py
+@@ -453,6 +453,34 @@ class MultiHeadAttention(Layer):
+         if key is None:
+             key = value
+ 
++        # Perform basic shape validation in eager mode to match symbolic checks.
++        # Only validate when static dimensions are available.
++        q_last_dim = query.shape[-1]
++        v_last_dim = value.shape[-1]
++        if q_last_dim is not None and v_last_dim is not None:
++            if q_last_dim != v_last_dim:
++                raise ValueError(
++                    "The last dimension of `query_shape` and `value_shape` "
++                    f"must be equal, but are {q_last_dim}, {v_last_dim}. "
++                    f"Received: query_shape={query.shape}, value_shape={value.shape}"
++                )
++        # Ensure `key` and `value` have matching non-last dims when available.
++        if key is not None:
++            kv_non_last_key = key.shape[1:-1]
++            kv_non_last_val = value.shape[1:-1]
++            if (
++                kv_non_last_key is not None
++                and kv_non_last_val is not None
++                and None not in kv_non_last_key
++                and None not in kv_non_last_val
++            ):
++                if kv_non_last_key != kv_non_last_val:
++                    raise ValueError(
++                        "All dimensions of `value` and `key`, except the last one, "
++                        f"must be equal. Received: value_shape={value.shape} and "
++                        f"key_shape={key.shape}"
++                    )
++
+         attention_mask = self._compute_attention_mask(
+             query,
+             value,
+diff --git a/keras/src/layers/attention/multi_head_attention_test.py b/keras/src/layers/attention/multi_head_attention_test.py
+index 979f9cd78..792e25271 100644
+--- a/keras/src/layers/attention/multi_head_attention_test.py
++++ b/keras/src/layers/attention/multi_head_attention_test.py
+@@ -149,6 +149,23 @@ class MultiHeadAttentionTest(testing.TestCase, parameterized.TestCase):
+         with self.assertRaisesRegex(ValueError, r"must be equal"):
+             layer.compute_output_shape(query_shape, value_shape, key_shape)
+ 
++    def test_eager_query_value_last_dim_mismatch_raises(self):
++        """Eager call should raise when last dims differ to match symbolic checks."""
++        layer = layers.MultiHeadAttention(num_heads=2, key_dim=2)
++        query = np.ones((2, 8, 16))
++        value = np.ones((2, 8, 8))
++        with self.assertRaisesRegex(ValueError, r"must be equal"):
++            _ = layer(query=query, value=value)
++
++    def test_eager_key_value_non_last_dim_mismatch_raises(self):
++        """Eager call should raise when key/value non-last dims differ."""
++        layer = layers.MultiHeadAttention(num_heads=2, key_dim=2)
++        query = np.ones((2, 8, 16))
++        value = np.ones((2, 4, 16))
++        key = np.ones((2, 5, 16))
++        with self.assertRaisesRegex(ValueError, r"must be equal"):
++            _ = layer(query=query, value=value, key=key)
++
+     def test_initializer(self):
+         # Test with a specified initializer.
+         layer = layers.MultiHeadAttention(

@@ -1,0 +1,71 @@
+You are an expert Python developer working on the Matplotlib codebase in the current directory.
+
+Task: **[ENH] Show parameter names in error message for mismatched array sizes in `bar()` / `barh()`**.
+
+A common user mistake (e.g., missing a comma in a labels list) triggers a long NumPy broadcasting traceback with an unhelpful message like “Mismatch is between arg 2 … arg 3 …”. We want Matplotlib to catch this case and raise a clearer `ValueError` that **mentions the Matplotlib parameter names** involved (e.g., `y` vs `width` for `barh`, `x` vs `height` for `bar`) and their lengths, instead of leaking the raw NumPy broadcast error.
+
+## Key requirements (read carefully)
+
+1. **Add a permanent regression test** for this behavior. Do **not** delete the test after debugging; it must remain in the repo.
+2. The test must be **robust**: don’t assert an exact full error string with fragile punctuation/quoting. Use regex or multiple `in` checks that verify the essentials:
+   - the raised exception is a `ValueError`
+   - the message references the relevant Matplotlib argument names (e.g., `y` and `width` for `barh` repro)
+   - the message includes the mismatched lengths (e.g., 2 vs 3 for the given repro)
+   - allow optional quotes around parameter names.
+3. Implementation must be **narrowly targeted**:
+   - Only replace the message for the specific NumPy broadcasting/shape-mismatch failure.
+   - Do not catch and rewrite unrelated `ValueError`s.
+4. Error reporting should be **parameter-name based**, not “arg 2 / arg 3”.
+   - Prefer messages like: `barh(): 'y' has length 2 but 'width' has length 3 (cannot broadcast)` (exact phrasing flexible, but must clearly map to Matplotlib parameter names).
+   - For vertical bars, analogous mapping: `x` and `height` (and/or `width`, `bottom` as applicable).
+5. Keep runtime impact minimal and code style consistent with Matplotlib.
+
+## Workflow you must follow
+
+1. **Reproduce via a test first**
+   - Add a regression test that uses the minimal example causing mismatch in `barh`:
+     ```python
+     arg_k = ["foo", "bar" "baz"]  # missing comma => len 2
+     arg_n = [1, 2, 3]             # len 3
+     ax.barh(arg_k, arg_n)
+     ```
+   - The test should assert the improved error message (see robustness rules above).
+   - Put the test in an appropriate existing test module for axes plotting (search existing tests for `barh`/`bar` and follow local conventions). Prefer adding to an existing file over creating an entirely new one unless clearly appropriate.
+
+2. **Run only targeted tests while iterating**
+   - Do **not** run the full suite initially.
+   - Run only the new/edited test module, or even `-k barh`/`-k bar` within it.
+   - After it passes, optionally run a small related subset (e.g., same module with `-k bar`).
+
+3. **Locate the right implementation point**
+   - The enhancement is for `bar()` / `barh()`; in Matplotlib this is likely in `Axes.bar` (and `Axes.barh` calling into it).
+   - Find where NumPy broadcasting happens (e.g., `np.broadcast_arrays(...)` or similar).
+   - The current failure originates from NumPy; we want to intercept that specific broadcast shape mismatch and re-raise a better error.
+
+4. **Implement the fix with careful exception handling**
+   - Catch only the broadcast-related `ValueError` (typically contains text like `shape mismatch` / `broadcast` / `cannot be broadcast`).
+   - Re-raise a `ValueError` whose message includes:
+     - function context (`bar()` or `barh()`; `barh` may call `bar` with swapped semantics—be explicit about which user-facing API is being called if possible)
+     - the **Matplotlib parameter names** that are incompatible (at minimum for this repro: `y` and `width` for `barh`)
+     - their lengths (2 and 3 in the repro)
+   - Avoid misleading length reporting for scalars; treat length-1 as broadcastable and focus on the mismatch between non-1 lengths when possible.
+   - Do not mask other `ValueError`s: if it’s not clearly the broadcast mismatch case, re-raise the original.
+
+   Guidance for good behavior:
+   - Determine candidate argument arrays and their “effective lengths” (e.g., `len(...)` when array-like; treat scalars as length 1).
+   - Identify which arguments have non-1 lengths and whether they disagree.
+   - Construct message naming the specific disagreeing args.
+   - For `barh`, be sure you use the *user-facing names*: `y` and `width` (even if internally it maps to `x`/`height`).
+
+5. **Validate**
+   - Re-run the targeted test(s) and ensure they pass.
+   - Ensure the error message is helpful and stable enough for the robust test.
+   - Don’t leave temporary debug files.
+
+## Deliverable expectations
+
+- A code change that improves the error message for mismatched input lengths in `bar()`/`barh()` by reporting **parameter names and lengths**.
+- A permanent regression test verifying this behavior in a non-brittle way.
+- Evidence of targeted test execution (you can describe the commands you ran in your reasoning; do not run full suite unless absolutely necessary).
+
+Now implement the enhancement in this repository following the workflow above.

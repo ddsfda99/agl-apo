@@ -1,0 +1,88 @@
+### What went wrong (root cause)
+
+The agent changed the semantics of **E3006 ResourceType** condition-handling:
+
+```py
+# old behavior
+if False in validator.cfn.conditions.build_scenerios_on_region(resource_condition, region):
+    continue
+```
+
+This means: *if the condition can be false in this region in any scenario*, skip the “resource type exists in region” check.
+
+The agent replaced it with:
+
+```py
+scenarios = set(build_scenerios_on_region(...))
+if scenarios == {False}:
+    continue
+```
+
+This means: *only skip if the condition is provably always false for the region*.
+
+Even though unit tests under `test/unit/rules` passed, the **integration tests depend on the previous (more permissive) behavior**. After the change, templates that previously did **not** emit some errors now emit at least one additional issue, changing:
+
+- JSON output content/count (expected 35 failures, got 36), and
+- CLI exit codes (expected 12, got 14)
+
+So the agent “fixed” a perceived logic bug, but the project’s expected behavior (and golden integration fixtures) encode the original semantics.
+
+### Why the integration failures look unrelated (I-rules, exit code 14, etc.)
+
+The failing tests run:
+
+- `cfn-lint --include-checks I --include-experimental ... --format json ...`
+
+However, cfn-lint still reports W/E issues in some integration runs (and/or uses them for exit code calculation), and the golden fixtures count total findings. By tightening E3006 gating, the agent likely caused **one extra finding somewhere** in `openshift.yaml` runs (or removed one suppression), which changes both:
+- the number of findings, and
+- the computed exit code.
+
+The trace confirms the agent didn’t identify the *actual* new extra message in the integration output. They searched for `E3006` in parseable output and found none, but:
+- The extra finding could be a different rule whose behavior changes indirectly because E3006 used to short-circuit earlier (e.g., downstream schema/property validation might be skipped or triggered depending on type validity), **or**
+- Their grep command for `E3006` might not match because parseable format differs, or because the rule manifests only in JSON output path, or in another region scenario.
+
+In short: changing E3006 affects the validation pipeline and can alter other emitted diagnostics and exit codes.
+
+### Specific mistakes in the agent’s approach
+
+1. **Changed externally-observable behavior without confirming expected contract**
+   - The original behavior (“skip if condition could be false”) is counterintuitive, but it’s what the repo’s integration fixtures expect.
+   - Any semantic change needs updating golden files and/or explicit agreement in tests. The agent didn’t check integration tests until late.
+
+2. **Only ran a subset of tests before concluding correctness**
+   - They ran `pytest test/unit/rules` (passed) and only afterward ran full `pytest` (failed).
+   - In this repo, integration tests validate CLI behavior and fixture outputs; those are crucial for rule changes.
+
+3. **Added new unit tests that assert the new behavior**
+   - They created `test_type_conditions_region.py`, which encodes the tightened semantics.
+   - That test suite passed locally, but it further entrenches a behavior that conflicts with existing integration expectations. (Even if it wasn’t run by the failing subset, it’s still risky and may fail in CI test selection.)
+
+4. **Didn’t identify the actual delta in integration output**
+   - After full test failures, they didn’t diff produced JSON vs expected fixture to locate the extra finding and determine which rule changed behavior.
+   - They also didn’t capture the full `cfn-lint` output for `openshift.yaml` to see what new item was added.
+
+5. **Likely misunderstanding of `build_scenerios_on_region` output**
+   - `build_scenerios_on_region` can yield `{True, False}` for “indeterminate”, or singletons for “provably true/false”.
+   - The original logic treated “can be false” as “resource might not exist” ⇒ skip type existence checks. That’s a deliberate choice to avoid false positives when conditions gate resources out in some deployments.
+   - Tightening it increased strictness and thus false positives under existing expectations.
+
+### How to fix so all tests pass
+
+- **Revert the semantic change** to match existing fixture expectations:
+  - Restore “skip if `False in scenarios`”, not “skip only if scenarios == {False}”.
+
+- If the intent is to improve correctness long-term, it must be done as a coordinated change:
+  - update integration golden JSON fixture files and expected exit codes,
+  - ensure CLI behavior and docs agree,
+  - and add targeted integration coverage (not just unit coverage).
+
+### Process improvements for the coding agent
+
+- Always run the full test suite (or at least unit + integration) before finalizing behavioral changes, especially for lint rules.
+- When integration fixtures fail:
+  1) run the exact failing command,
+  2) save output to a file,
+  3) diff against expected fixture,
+  4) identify the single new/removed finding and trace it back.
+- Avoid adding new tests that contradict existing integration expectations unless you also update the fixtures and can justify the contract change.
+- Be cautious with “logical fixes” in linters: many “bugs” are actually compatibility/false-positive tradeoffs encoded in tests.

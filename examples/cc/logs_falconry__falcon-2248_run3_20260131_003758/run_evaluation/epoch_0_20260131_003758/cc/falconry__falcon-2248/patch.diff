@@ -1,0 +1,88 @@
+diff --git a/falcon/response.py b/falcon/response.py
+index de3c3b1..9f3646a 100644
+--- a/falcon/response.py
++++ b/falcon/response.py
+@@ -347,6 +347,7 @@ class Response:
+         secure=None,
+         http_only=True,
+         same_site=None,
++        partitioned=None,
+     ):
+         """Set a response cookie.
+ 
+@@ -447,6 +448,14 @@ class Response:
+ 
+                 (See also: `Same-Site RFC Draft`_)
+ 
++            partitioned (bool): Enables partitioned cookies (CHIPS) for third-
++                party contexts. When set, the cookie will be scoped per-top-
++                level site and sent in third-party requests under that context.
++                This attribute is only valid when ``same_site`` is ``'None'``
++                and the cookie is ``secure``. If ``same_site='None'`` and
++                ``secure`` is True, this attribute will default to True unless
++                explicitly set to False.
++
+         Raises:
+             KeyError: `name` is not a valid cookie name.
+             ValueError: `value` is not a valid cookie value.
+@@ -528,6 +537,16 @@ class Response:
+ 
+             self._cookies[name]['samesite'] = same_site.capitalize()
+ 
++        # Automatically add Partitioned for third-party cookies when appropriate
++        # CHIPS requires SameSite=None and Secure
++        if same_site and same_site.lower() == 'none' and is_secure:
++            # Default partitioned to True unless explicitly disabled
++            if partitioned is None:
++                partitioned = True
++            if partitioned:
++                # Morsel treats flag attributes with True to render attribute name only
++                self._cookies[name]['partitioned'] = True
++
+     def unset_cookie(self, name, samesite='Lax', domain=None, path=None):
+         """Unset a cookie in the response.
+ 
+diff --git a/falcon/testing/client.py b/falcon/testing/client.py
+index 12f4259..00b8a24 100644
+--- a/falcon/testing/client.py
++++ b/falcon/testing/client.py
+@@ -110,6 +110,7 @@ class Cookie:
+             'secure',
+             'httponly',
+             'samesite',
++            'partitioned',
+         ):
+             value = morsel[name.replace('_', '-')] or None
+             setattr(self, '_' + name, value)
+@@ -153,6 +154,11 @@ class Cookie:
+     def same_site(self) -> Optional[int]:
+         return self._samesite if self._samesite else None  # type: ignore[attr-defined]
+ 
++    @property
++    def partitioned(self) -> bool:
++        # Flag attribute present => True
++        return bool(self._partitioned)  # type: ignore[attr-defined]
++
+ 
+ class _ResultBase:
+     """Base class for the result of a simulated request.
+diff --git a/falcon/util/__init__.py b/falcon/util/__init__.py
+index 2d946f8..aa917d2 100644
+--- a/falcon/util/__init__.py
++++ b/falcon/util/__init__.py
+@@ -61,6 +61,16 @@ _reserved_cookie_attrs = http_cookies.Morsel._reserved  # type: ignore
+ if 'samesite' not in _reserved_cookie_attrs:  # pragma: no cover
+     _reserved_cookie_attrs['samesite'] = 'SameSite'  # type: ignore
+ 
++# NOTE(vytas): Backport support for the 'Partitioned' cookie attribute (CHIPS)
++#   for Python versions prior to 3.13. Similar to the SameSite backport above,
++#   extend Morsel to recognize and correctly render this flag attribute.
++if 'partitioned' not in _reserved_cookie_attrs:  # pragma: no cover
++    _reserved_cookie_attrs['partitioned'] = 'Partitioned'  # type: ignore
++
++_flags_cookie_attrs = getattr(http_cookies.Morsel, '_flags', set())  # type: ignore
++if 'partitioned' not in _flags_cookie_attrs:  # pragma: no cover
++    _flags_cookie_attrs.add('partitioned')
++
+ 
+ IS_64_BITS = sys.maxsize > 2**32

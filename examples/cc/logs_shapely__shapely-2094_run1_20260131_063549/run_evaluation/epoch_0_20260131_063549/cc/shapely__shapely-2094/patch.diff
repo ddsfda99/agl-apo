@@ -1,0 +1,75 @@
+diff --git a/shapely/wkt.py b/shapely/wkt.py
+index 7bc19c9..929b8bb 100644
+--- a/shapely/wkt.py
++++ b/shapely/wkt.py
+@@ -4,31 +4,56 @@ Also provides pickle-like convenience functions.
+ """
+ 
+ import shapely
++import re
++from ._wkt_fix import fix_polygon_rings
+ 
+ 
+-def loads(data):
++def loads(data, strict=True):
+     """Load a geometry from a WKT string.
+ 
+     Parameters
+     ----------
+     data : str
+         A WKT string
++    strict : bool, default True
++        If False, attempt to automatically fix structural issues such as
++        unclosed polygon rings and linearrings during parsing.
+ 
+     Returns
+     -------
+     Shapely geometry object
+ 
++    Notes
++    -----
++    When ``strict=False``, this function will try to repair common structural
++    issues in WKT strings (e.g., unclosed rings in POLYGON/MULTIPOLYGON/LINEARRING
++    and inside nested GEOMETRYCOLLECTIONs). If repairing fails, the original
++    parsing error is raised.
+     """
+-    return shapely.from_wkt(data)
+-
+-
+-def load(fp):
++    try:
++        # Try normal parsing first
++        return shapely.from_wkt(data)
++    except Exception as e:
++        if strict:
++            # In strict mode, surface the original exception
++            raise
++        # In non-strict mode, attempt to repair known structural issues and retry
++        fixed = fix_polygon_rings(data)
++        if fixed is None:
++            # Could not repair; raise original exception
++            raise
++        return shapely.from_wkt(fixed)
++
++
++def load(fp, strict=True):
+     """Load a geometry from an open file.
+ 
+     Parameters
+     ----------
+     fp :
+         A file-like object which implements a `read` method.
++    strict : bool, default True
++        Passed through to :func:`loads`.
+ 
+     Returns
+     -------
+@@ -36,7 +61,7 @@ def load(fp):
+ 
+     """
+     data = fp.read()
+-    return loads(data)
++    return loads(data, strict=strict)
+ 
+ 
+ def dumps(ob, trim=False, rounding_precision=-1, **kw):

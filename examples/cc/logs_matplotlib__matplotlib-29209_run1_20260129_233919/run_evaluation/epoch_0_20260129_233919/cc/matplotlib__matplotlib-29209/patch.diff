@@ -1,0 +1,27 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index c55f778118..a84fceb240 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -5918,9 +5918,21 @@ class Axes(_AxesBase):
+         if len(args) == 1:
+             C = np.asanyarray(args[0])
+             nrows, ncols = C.shape[:2]
+-            if shading in ['gouraud', 'nearest']:
++            if shading == 'gouraud':
++                # For Gouraud, X and Y are grid centers with same shape as C.
+                 X, Y = np.meshgrid(np.arange(ncols), np.arange(nrows))
++            elif shading == 'nearest':
++                # When only C is provided with nearest shading, interpret C as
++                # values centered on a regular grid of unit spacing, and
++                # construct the cell edges halfway between grid centers.
++                # This matches the behavior when explicit X, Y centers are
++                # provided and ensures consistent coloring.
++                x_edges = np.arange(ncols + 1) - 0.5
++                y_edges = np.arange(nrows + 1) - 0.5
++                X, Y = np.meshgrid(x_edges, y_edges)
++                shading = 'flat'
+             else:
++                # Default to flat shading: X and Y are the cell edges.
+                 X, Y = np.meshgrid(np.arange(ncols + 1), np.arange(nrows + 1))
+                 shading = 'flat'
+             C = cbook.safe_masked_invalid(C, copy=True)

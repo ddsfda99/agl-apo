@@ -1,0 +1,125 @@
+You are given a code repository in the current directory.
+
+## Goal
+Fix a crash in Checkov when scanning Terraform WAFv2 Web ACL resources that contain **two dynamic "rule" blocks**. The crash is:
+
+`AttributeError: 'int' object has no attribute 'get'`
+
+It occurs in these AWS checks:
+- `CKV_AWS_192` (WAFACLCVE202144228)
+- `CKV_AWS_342` (WAFRuleHasAnyActions)
+
+The crash happens because the Terraform parser can represent dynamic blocks in a way that inserts **non-dict sentinel values (often ints)** into places the checks currently assume are dicts (e.g., elements of `conf["rule"]`, or `statement[0]`).
+
+Your fix must be **minimal, defensive, and semantics-preserving**. The previous attempt failed because it introduced broad `UNKNOWN` returns and early exits that likely changed PASS/FAIL outcomes. This time you must avoid that.
+
+---
+
+## Non-negotiable constraints (important)
+1. **Do not change the security semantics** of the checks beyond what is required to prevent the crash.
+2. **Preserve existing PASS/FAIL/UNKNOWN behavior** as much as possible.
+   - In particular: do not add new `UNKNOWN` outcomes in situations where the old code would deterministically PASS/FAIL.
+3. **Do not “skip malformed entries and then PASS”.**
+   - If a malformed/sentinel entry prevents confident evaluation, do not convert a would-be FAIL into PASS.
+4. **Do not add speculative tests** you cannot validate. If you add tests, they must follow existing repo patterns and be minimal/deterministic.
+5. Don’t commit edits.
+
+---
+
+## Critical guidance from previous failures (read carefully)
+The last agent “fixed” the crash by returning `UNKNOWN` whenever it saw a non-dict element. That is a semantic change and likely breaks tests and expected results. Instead:
+
+- **Do not early-return UNKNOWN** just because one `rule` element (or `statement[0]`) is an int.
+- Prefer **semantics-preserving behavior**:
+  - Continue scanning other valid rules when possible.
+  - Treat malformed/sentinel rule entries in a **fail-closed** way when the check’s intent is “must have X”; i.e., if an entry cannot be evaluated as having the required fields, it should behave like “missing required config” (typically FAIL), not UNKNOWN—unless the original code already returned UNKNOWN for that scenario.
+- Avoid changing `evaluated_keys` except where absolutely necessary, and be meticulous with indices (tests may assert these paths).
+
+Also, local imports may fail due to missing optional dependencies (e.g., importing `checkov.terraform.checks.resource` may pull in many modules). If you need lightweight validation, use `importlib.util.spec_from_file_location()` to load only the two target files.
+
+---
+
+## What to build
+A minimal fix that:
+- Prevents the AttributeError for both checks when Terraform parsing produces ints/non-dicts from dynamic blocks.
+- Maintains prior evaluation logic and expected PASS/FAIL/UNKNOWN outcomes as closely as possible (especially avoiding newly introduced UNKNOWNs).
+
+---
+
+## Expected behavior (semantics-preserving)
+### CKV_AWS_342 (WAFRuleHasAnyActions)
+Intent: “every rule must have actions (action/override_action) unless it’s a managed rule group statement”.
+
+Semantics-preserving approach:
+- If `conf["rule"]` is missing or not a list: keep existing behavior (likely UNKNOWN). Do not invent new behavior.
+- While iterating rules:
+  - If a rule entry is not a dict (e.g., int sentinel), **do not crash**.
+  - Do **not** return UNKNOWN immediately. Either:
+    - treat that entry as an “invalid rule without actions” and let it cause a FAIL (fail-closed, most semantics-preserving for security checks), or
+    - continue evaluation only if the original behavior would not have failed on that entry.
+  - The safest semantics-preserving move for tests is usually: **non-dict rule acts like empty dict** (no action/override_action/statement), which should produce the same result as “rule missing action” (i.e., FAIL), not UNKNOWN and not PASS.
+
+Important: do not “skip” malformed entries in a way that would allow PASS when there is an unevaluable rule present.
+
+### CKV_AWS_192 (WAFACLCVE202144228)
+Intent: enforce protection related to CVE-2021-44228 / Log4j2 patterns in WAF configuration.
+
+Semantics-preserving approach:
+- Add guards so `.get()` is only called on dicts, and list indexing is protected.
+- Avoid introducing new UNKNOWNs. Specifically:
+  - If the original code returned UNKNOWN only when `statement` existed but wasn’t a list, keep that behavior, but don’t add extra UNKNOWN cases (like “statement list empty” or “statement[0] not dict”) unless you confirm original semantics.
+  - For malformed/sentinel structures encountered while evaluating a rule: prefer **fail-closed** or “treat as not meeting requirement” in a way that aligns with the check’s existing FAIL behavior, rather than returning UNKNOWN.
+- Ensure any access like `override_action_none[0]` is protected (type + length) to prevent crashes. If shape is wrong, do not crash; default to the same outcome the old logic would have produced when “override_action none” is not present (typically that means it does not satisfy the “none” condition).
+
+---
+
+## Work plan you must follow
+
+### 1) Reproduce (or at least precisely target the crash paths)
+- Search the repo for existing Terraform WAF fixtures/tests around CKV_AWS_192 / CKV_AWS_342.
+- If tests exist, use them. If not, create the smallest possible unit-style reproduction consistent with repo patterns.
+- If you cannot run pytest locally due to missing dependencies, still create minimal validation by:
+  - loading only the two modules by file path via `importlib.util.spec_from_file_location()`, and
+  - calling `scan_resource_conf()` with crafted `conf` dicts that include `conf["rule"] = [1, { ... }]` or `statement = [1]` to ensure no crash and to observe returned CheckResult.
+
+Do not introduce tests you cannot justify or that rely on provider resolution or AWS credentials.
+
+### 2) Locate the failing code
+Find and inspect:
+- `checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py`
+- `checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py`
+
+Identify exactly where `.get()` is called on values that can be int/sentinel and where list indexing is unsafe.
+
+### 3) Implement the minimal fix (do not refactor broadly)
+- Add strict type checks before `.get()` and before indexing `[0]`.
+- Replace unsafe expressions like `x.get(...)` with:
+  - `x.get(...) if isinstance(x, dict) else <safe default>`
+- Replace unsafe list indexing like `override_action_none[0]` with guarded checks:
+  - `isinstance(override_action_none, list) and override_action_none and isinstance(override_action_none[0], dict)`
+
+**Key requirement:** When encountering a malformed rule/statement element (int sentinel):
+- Do not crash.
+- Do not early-return UNKNOWN.
+- Default to behavior that does not weaken the check (generally fail-closed for “must have X” checks) and does not alter existing UNKNOWN behavior that is triggered only by top-level absent/wrong-type structures.
+
+### 4) Validate
+- Run the smallest available test command(s) that cover these checks (follow repo norms).
+- If you cannot run tests locally due to environment deps, perform a minimal sanity check by importing the two modules by file path (not package import) and executing `scan_resource_conf()` on crafted confs to ensure:
+  - no AttributeError
+  - returned values are reasonable and not newly UNKNOWN in typical FAIL scenarios
+
+### 5) Cleanup
+Remove any temporary debugging files not needed.
+
+---
+
+## Implementation hints (use these principles)
+- Treat non-dict sentinel rule elements as `{}` (empty rule) for evaluation purposes, so the check outcome is stable and fail-closed rather than UNKNOWN.
+- Continue scanning remaining rules rather than returning early on malformed elements.
+- Be extremely careful with `evaluated_keys` indices. If you touch them, ensure the index corresponds to the correct loop variable and paths are accurate. Prefer leaving `evaluated_keys` unchanged unless a crash fix requires it.
+
+---
+
+## Deliverable
+Provide the code changes that fix the crash in both checks with minimal semantic impact. Demonstrate (via existing tests or minimal deterministic validation) that the crash is gone and that PASS/FAIL behavior is preserved as much as possible.

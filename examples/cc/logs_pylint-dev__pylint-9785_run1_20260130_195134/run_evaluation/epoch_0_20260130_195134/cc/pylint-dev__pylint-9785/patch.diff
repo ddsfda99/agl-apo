@@ -1,0 +1,39 @@
+diff --git a/pylint/checkers/typecheck.py b/pylint/checkers/typecheck.py
+index 67852d38f..6ac18f599 100644
+--- a/pylint/checkers/typecheck.py
++++ b/pylint/checkers/typecheck.py
+@@ -1482,6 +1482,22 @@ accessed. Python regular expressions are accepted.",
+         keyword_args = list(call_site.keyword_arguments.keys())
+         overload_function = is_overload_stub(called)
+ 
++        # Special-case typing_extensions.TypeVar which supports extra keywords
++        is_te_typevar_call = False
++        try:
++            func_node = node.func
++            if isinstance(func_node, nodes.Attribute) and func_node.attrname == "TypeVar":
++                base = safe_infer(func_node.expr)
++                if isinstance(base, nodes.Module) and base.name == "typing_extensions":
++                    is_te_typevar_call = True
++            elif isinstance(func_node, nodes.Name):
++                inferred_func = safe_infer(func_node)
++                if isinstance(inferred_func, nodes.ClassDef) and inferred_func.qname() == "typing_extensions.TypeVar":
++                    is_te_typevar_call = True
++        except Exception:
++            # Be conservative; only skip when we can positively identify the call
++            is_te_typevar_call = False
++
+         # Determine if we don't have a context for our call and we use variadics.
+         node_scope = node.scope()
+         if isinstance(node_scope, (nodes.Lambda, nodes.FunctionDef)):
+@@ -1607,6 +1623,11 @@ accessed. Python regular expressions are accepted.",
+                 called, nodes.FunctionDef
+             ) and self._keyword_argument_is_in_all_decorator_returns(called, keyword):
+                 pass
++            elif is_te_typevar_call and keyword in {"default", "infer_variance"}:
++                # typing_extensions.TypeVar in 4.12.0 adds 'default' and 'infer_variance'
++                # parameters even when PEP 696/695 aren't implemented in typing.
++                # Astroid may not expose these in the signature, so skip the warning.
++                pass
+             elif not overload_function:
+                 # Unexpected keyword argument.
+                 self.add_message(

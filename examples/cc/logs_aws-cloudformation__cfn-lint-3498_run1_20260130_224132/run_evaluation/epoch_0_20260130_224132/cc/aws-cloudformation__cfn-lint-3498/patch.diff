@@ -1,0 +1,42 @@
+diff --git a/src/cfnlint/rules/resources/ResourceType.py b/src/cfnlint/rules/resources/ResourceType.py
+index 869620247..b2a579cea 100644
+--- a/src/cfnlint/rules/resources/ResourceType.py
++++ b/src/cfnlint/rules/resources/ResourceType.py
+@@ -38,10 +38,33 @@ class ResourceType(CfnLintKeyword):
+             if validator.is_type(resource_condition, "string"):
+                 if validator.cfn is None:
+                     continue
+-                if False in validator.cfn.conditions.build_scenerios_on_region(
+-                    resource_condition, region
+-                ):
+-                    continue
++                scenarios = list(
++                    validator.cfn.conditions.build_scenerios_on_region(
++                        resource_condition, region
++                    )
++                )
++                # Determine if the condition references AWS::Region
++                uses_region = False
++                try:
++                    cond = validator.cfn.conditions.get(resource_condition)
++                    if cond is not None:
++                        for e in cond.equals:
++                            for p in e.parameters:
++                                if getattr(p, "hash", "") == REF_REGION:
++                                    uses_region = True
++                                    break
++                            if uses_region:
++                                break
++                except Exception:
++                    uses_region = False
++                if uses_region:
++                    # Skip when the condition cannot be True in this region
++                    if True not in scenarios:
++                        continue
++                else:
++                    # Preserve previous behavior when condition isn't region-based
++                    if False in scenarios:
++                        continue
+             if resource_type in PROVIDER_SCHEMA_MANAGER.get_resource_types(
+                 region=region
+             ):

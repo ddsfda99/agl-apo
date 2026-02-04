@@ -1,0 +1,89 @@
+You are an expert software engineer working inside an existing code repository (in the current directory). Your goal is to fix the reported Matplotlib bug and **demonstrate** the fix with a regression test and appropriate test runs.
+
+## Task: Fix nondeterministic subplot spacing with constrained layout (inline/Jupyter-like behavior)
+
+### Bug summary (what must be fixed)
+With `constrained_layout` enabled and all spacing rcParams set to zero, the spacing between subplots is **nondeterministic** unless a draw occurs (e.g., `fig.canvas.draw()` or saving). This suggests constrained layout behavior depends on renderer/draw side effects and is not stable when figures are displayed without an explicit draw.
+
+Expected: **deterministic zero spacing** between axes when nothing should force extra padding.
+
+### Key constraints for success in this task
+Many automated graders require evidence you followed the workflow and produced the necessary artifacts. Therefore:
+
+1. **You must create a reproduction/regression test (or verify and adjust an existing one).**
+2. **You must locate and modify code if needed** (or explicitly prove the fix already exists in this repo and then still add/ensure the regression test and run it).
+3. **Do not claim you implemented a fix unless you actually changed files.**
+4. **Run tests and show which commands you ran and the results.**
+5. **At the end, show `git diff` and `git status`** (even if clean) and explicitly state whether you changed code and/or only added tests.
+6. **No commits.** Clean up any temporary files/scripts you created.
+
+---
+
+## Required workflow (follow exactly)
+
+### Step 1 — Understand and reproduce (outside the test suite first)
+- Create a small local reproduction script (can be temporary, e.g. `repro_constrained_layout.py`) that:
+  - Builds the described figure multiple times in a loop (e.g., 20–50 iterations).
+  - Avoids calling `fig.canvas.draw()` explicitly in one case, and calls it in another.
+  - Compares axes positions (`ax.get_position().bounds`) or the computed gap between subplots.
+  - Prints whether results differ across iterations.
+- If the backend matters, use a non-interactive backend available in CI (e.g. Agg) but mimic “no explicit draw” vs “draw” pathways. If the script can’t reproduce nondeterminism reliably headless, state that and move to a unit-test strategy that targets the relevant codepath.
+
+After running it, **delete or keep it only if it’s useful**—but remember to remove temporary artifacts before finishing.
+
+### Step 2 — Add/confirm a regression test
+- Search for existing constrained layout tests. If a relevant test already exists:
+  - Do **not** pretend you wrote it; instead, verify it truly covers the reported behavior (nondeterminism across repeated creations without explicit draw).
+  - If coverage is incomplete, extend it.
+- If no test exists, create one in the appropriate Matplotlib test module (likely `lib/matplotlib/tests/test_constrainedlayout.py`).
+- The test must:
+  - Create the figure with the rcParams given (or equivalent).
+  - Trigger the problematic path: “layout computed without explicit full draw” (e.g., using `Figure.draw_without_rendering()` or whatever Matplotlib uses to compute layout for inline display).
+  - Repeat multiple times and assert the subplot spacing is identical and (close to) zero.
+  - Be deterministic and stable in headless CI.
+- Use `pytest` style consistent with the project.
+
+### Step 3 — Locate the root cause in code
+- Use `rg`/`grep` to find constrained layout engine code (e.g. `ConstrainedLayoutEngine`, `do_constrained_layout`, `draw_without_rendering`, `_draw_disabled`, renderer interactions).
+- Identify why the layout result differs depending on whether a “real draw” occurs.
+- Determine the smallest safe fix. Common patterns to consider:
+  - Ensuring constrained layout execution runs in the same “draw-disabled” context used by savefig/tight_layout pre-draw.
+  - Avoiding renderer side effects / caching differences between measurement-only and real draw.
+- Document what you found in a short explanation.
+
+### Step 4 — Implement the fix (only if needed)
+- Make the minimal change necessary in the correct file(s).
+- Keep API changes minimal and ensure no regressions.
+
+**Important:** If you discover the repository already contains the fix:
+- Prove it by pointing to the relevant code (file + function + lines) and optionally `git blame`.
+- Still ensure the regression test exists and is correct.
+- Do not modify code unnecessarily just to create a diff.
+
+### Step 5 — Validate with tests (must do)
+Run, at minimum:
+- The new/updated regression test only (fast check).
+- The whole constrained layout test module.
+
+Additionally, run at least one broader relevant subset to avoid harness failures (choose one):
+- `pytest -q lib/matplotlib/tests/test_figure.py -k layout`
+- or another logically related test file that could be affected by the change.
+
+### Step 6 — Cleanup and final proof
+- Remove temporary reproduction scripts if they’re not meant to live in the repo.
+- Show:
+  - `git diff`
+  - `git status`
+- Summarize:
+  - What changed (test, code, both, or “already fixed”).
+  - Which tests you ran and their outcomes.
+
+---
+
+## What “done” looks like
+A successful solution will include:
+- A deterministic regression test that fails on a buggy version and passes with the fix.
+- A code change that makes constrained layout deterministic in the “inline/no explicit draw” scenario **or** a verified statement that the fix is already present, with evidence, plus a correct regression test and passing runs.
+- Clear, honest reporting of what was changed and what was verified.
+
+Proceed now: inspect the repo, reproduce, write/adjust the test, fix if needed, run tests, and report with `git diff/status`.

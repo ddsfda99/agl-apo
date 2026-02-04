@@ -1,0 +1,212 @@
+diff --git a/shapely/io.py b/shapely/io.py
+index d7f1693..d845e7a 100644
+--- a/shapely/io.py
++++ b/shapely/io.py
+@@ -257,7 +257,115 @@ def to_geojson(geometry, indent=None, **kwargs):
+     return lib.to_geojson(geometry, np.intc(indent), **kwargs)
+ 
+ 
+-def from_wkt(geometry, on_invalid="raise", **kwargs):
++def _normalize_coord_string(s: str) -> str:
++    # collapse internal whitespace for coordinate comparison
++    return " ".join(s.strip().split())
++
++
++def _find_matching(s: str, start: int) -> int:
++    depth = 0
++    for i in range(start, len(s)):
++        if s[i] == "(":
++            depth += 1
++        elif s[i] == ")":
++            depth -= 1
++            if depth == 0:
++                return i
++    return len(s) - 1
++
++
++def _fix_polygon_rings(poly_coords: str) -> str:
++    # poly_coords includes outer parentheses, eg: "((...),(...))"
++    if not poly_coords or poly_coords[0] != "(":
++        return poly_coords
++    outer_end = _find_matching(poly_coords, 0)
++    inside = poly_coords[1:outer_end]
++    out_rings = []
++    i = 0
++    n = len(inside)
++    while i < n:
++        # skip whitespace and commas
++        while i < n and (inside[i].isspace() or inside[i] == ","):
++            i += 1
++        if i >= n:
++            break
++        if inside[i] == "(":
++            ring_end = _find_matching(inside, i)
++            ring_content = inside[i + 1 : ring_end]
++            parts = [p.strip() for p in ring_content.split(",") if p.strip()]
++            if len(parts) >= 2:
++                first = parts[0]
++                last = parts[-1]
++                if _normalize_coord_string(first) != _normalize_coord_string(last):
++                    ring_content = ", ".join(parts + [first])
++                else:
++                    ring_content = ", ".join(parts)
++            else:
++                ring_content = ", ".join(parts)
++            out_rings.append(f"({ring_content})")
++            i = ring_end + 1
++        else:
++            # unexpected token, copy and continue
++            i += 1
++    fixed = "(" + ", ".join(out_rings) + ")"
++    # append any trailing content after outer_end
++    return fixed + poly_coords[outer_end + 1 :]
++
++
++def _fix_wkt_structure_scalar(wkt: str) -> str:
++    # Only attempt simple structural fixes: close polygon rings
++    s = wkt
++    i = 0
++    n = len(s)
++    out = []
++    while i < n:
++        if s.startswith("POLYGON", i):
++            out.append("POLYGON")
++            i += len("POLYGON")
++            # consume whitespace
++            while i < n and s[i].isspace():
++                out.append(s[i]); i += 1
++            # dimension tokens
++            if s.startswith(" ZM", i) or s.startswith("ZM", i):
++                if s[i].isspace():
++                    out.append(s[i]); i += 1
++                out.append("ZM"); i += 2
++                while i < n and s[i].isspace():
++                    out.append(s[i]); i += 1
++            elif s.startswith(" Z", i) or s.startswith("Z", i):
++                if s[i].isspace():
++                    out.append(s[i]); i += 1
++                out.append("Z"); i += 1
++                while i < n and s[i].isspace():
++                    out.append(s[i]); i += 1
++            elif s.startswith(" M", i) or s.startswith("M", i):
++                if s[i].isspace():
++                    out.append(s[i]); i += 1
++                out.append("M"); i += 1
++                while i < n and s[i].isspace():
++                    out.append(s[i]); i += 1
++            # EMPTY
++            if s.startswith("EMPTY", i):
++                out.append("EMPTY"); i += len("EMPTY")
++                continue
++            # coords
++            if i < n and s[i] == "(":
++                end = _find_matching(s, i)
++                coords_block = s[i : end + 1]
++                fixed = _fix_polygon_rings(coords_block)
++                out.append(fixed)
++                i = end + 1
++                continue
++            else:
++                # malformed; just append current char
++                out.append(s[i]); i += 1
++                continue
++        else:
++            out.append(s[i]); i += 1
++    return "".join(out)
++
++
++def from_wkt(geometry, on_invalid="raise", strict=True, fix_structure=None, **kwargs):
+     """Create geometries from the Well-Known Text (WKT) representation.
+ 
+     The Well-known Text format is defined in the `OGC Simple Features
+@@ -272,6 +380,13 @@ def from_wkt(geometry, on_invalid="raise", **kwargs):
+         - warn: a warning will be raised and invalid WKT geometries will be
+           returned as ``None``.
+         - ignore: invalid WKT geometries will be returned as ``None`` without a warning.
++    strict : bool, default True
++        If False, attempt to automatically repair certain structural issues
++        (e.g., close unclosed rings) when reading WKT. This maps to
++        ``fix_structure=True``.
++    fix_structure : bool, optional
++        Explicitly control structural repairs when reading WKT. If provided,
++        overrides the ``strict`` mapping.
+     **kwargs
+         See :ref:`NumPy ufunc docs <ufuncs.kwargs>` for other keyword arguments.
+ 
+@@ -286,6 +401,31 @@ def from_wkt(geometry, on_invalid="raise", **kwargs):
+ 
+     invalid_handler = np.uint8(DecodingErrorOptions.get_value(on_invalid))
+ 
++    # Map strict to fix_structure unless fix_structure is explicitly provided
++    if fix_structure is None:
++        fix_structure = not strict
++
++    # Pre-process geometry strings if fix_structure requested
++    if fix_structure:
++        # ensure object dtype for element-wise processing
++        arr = np.asarray(geometry, dtype=object)
++        def _fix_elem(elem):
++            if elem is None:
++                return None
++            if isinstance(elem, (bytes, bytearray)):
++                try:
++                    s = elem.decode("utf-8")
++                except Exception:
++                    s = elem.decode("ascii", errors="ignore")
++            else:
++                s = str(elem)
++            return _fix_wkt_structure_scalar(s)
++        if arr.ndim == 0:
++            geometry = _fix_elem(arr.item())
++        else:
++            # vectorized apply
++            geometry = np.vectorize(_fix_elem, otypes=[object])(arr)
++
+     return lib.from_wkt(geometry, invalid_handler, **kwargs)
+ 
+ 
+diff --git a/shapely/wkt.py b/shapely/wkt.py
+index 7bc19c9..4c08782 100644
+--- a/shapely/wkt.py
++++ b/shapely/wkt.py
+@@ -6,20 +6,38 @@ Also provides pickle-like convenience functions.
+ import shapely
+ 
+ 
+-def loads(data):
++def loads(data, strict=True, fix_structure=None, **kwargs):
+     """Load a geometry from a WKT string.
+ 
+     Parameters
+     ----------
+     data : str
+         A WKT string
++    strict : bool, default True
++        If False, automatically repair certain structural issues when possible,
++        such as closing unclosed LinearRing coordinates in polygons.
++        This maps to ``fix_structure=True``.
++    fix_structure : bool, optional
++        Explicitly control structural repairs when reading WKT.
++        If provided, overrides ``strict`` mapping.
++    **kwargs :
++        Additional keyword options forwarded to :func:`shapely.from_wkt`.
+ 
+     Returns
+     -------
+     Shapely geometry object
+ 
++    Notes
++    -----
++    This function forwards options to the underlying WKT reader. If the
++    environment's GEOS/Shapely backend supports ``fix_structure``, setting
++    ``strict=False`` or ``fix_structure=True`` will attempt to automatically
++    close rings and fix minor structural issues during load.
+     """
+-    return shapely.from_wkt(data)
++    # Map strict flag to fix_structure unless explicitly provided
++    if fix_structure is None:
++        fix_structure = not strict
++    return shapely.from_wkt(data, fix_structure=fix_structure, **kwargs)
+ 
+ 
+ def load(fp):

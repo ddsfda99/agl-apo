@@ -1,0 +1,71 @@
+You are given a code repository in the current directory (this is Sphinx). Your goal is to fix a regression:
+
+Regression: CSS file added by extension cannot be overridden by users anymore.
+
+Context: An extension (e.g., nbsphinx) uses Sphinx’s `add_css_file()` to add a CSS file such as `nbsphinx-gallery.css`. Users want to override that CSS by placing a file with the same name in their own `html_static_path` (e.g. `my-static-path/nbsphinx-gallery.css`). This used to work before commit `ae206694e68bea074aca633ea0d32e9ed882a95f` (first released in Sphinx 7.1.0). After that commit, the extension-provided CSS ends up “winning” and user overrides no longer take effect.
+
+You must implement a fix in Sphinx so that user-provided static files can override extension-provided CSS files again, while preserving correct behavior for non-conflicting assets.
+
+Non-negotiable: Do not commit changes.
+
+Operational constraints (follow strictly):
+1) If you cannot access remote model infrastructure (e.g., Azure auth errors), stop immediately and report that you cannot proceed due to missing credentials. Do not pretend to have run commands.
+2) Start by running tests to get concrete failures. Do not do broad exploratory reading first.
+3) Work in a tight loop: reproduce → failing test → minimal code inspection → patch → rerun tests.
+4) Keep changes minimal and add/adjust tests to lock in the intended behavior.
+
+What “fixed” means (expected behavior):
+- If a user places `nbsphinx-gallery.css` (or any CSS filename referenced via `add_css_file()`) in a directory listed in `html_static_path`, the built HTML should use the user’s version (or, at minimum, the user’s CSS must be able to override the extension’s CSS by being included later or by taking precedence in the output).
+- The fix should be generic: it must apply to any extension that uses `add_css_file()` and any user file in `html_static_path`.
+- The solution should not require changes in third-party extensions.
+
+Required approach:
+
+A. Reproduce with an automated test
+1) Create a new pytest in Sphinx’s test suite (find where HTML builder asset/static behavior is tested; place it in the appropriate `tests/` area).
+2) Build a minimal Sphinx project fixture in the test that:
+   - registers a CSS file through an extension-like mechanism (either a tiny local extension inside the test or via Sphinx app setup hook calling `app.add_css_file('example.css')`).
+   - sets `html_static_path` to include a user static directory containing a file with the same name (`example.css`) with clearly identifiable content.
+3) Run an HTML build in the test and assert one (or both) of the following:
+   - The output `_static/example.css` content equals the user’s content (strongest assertion), OR
+   - The output HTML includes a `<link>` tag ordering such that user CSS is included after extension CSS, enabling overrides (only if Sphinx’s design is “order-based override” rather than “file overwrite-based override”).
+Pick the assertion that matches how Sphinx historically behaved before the regression. Prefer asserting built artifact content when feasible.
+
+B. Locate the regression and implement the fix
+1) Use ripgrep to find where `add_css_file`, `html_static_path`, and copying `_static` assets are handled. Likely areas include:
+   - HTML builder static file collection/copy code
+   - Asset pipeline logic (e.g., `_assets.py`, builder init, copying routines)
+2) Identify why extension-added CSS now takes precedence. Common causes:
+   - Changed copy order: extension assets copied after user static paths, overwriting them.
+   - Changed logic around “last one wins” when merging asset sources.
+   - Changed treatment of `html_static_path` vs extension “static” directories.
+3) Implement a minimal change so user static files win again. Usually the safest policy is:
+   - If a file path under `_static/` already exists from user static directories, do not overwrite it with extension-provided assets of the same relative path.
+   - Alternatively, change the copy order so user static is copied last.
+4) Be careful about side effects:
+   - Avoid breaking other assets (JS, images) and avoid changing behavior when there is no conflict.
+   - Keep or adjust any existing “overwrite” warning behavior only if necessary; if you change warnings, update tests accordingly.
+
+C. Validate
+1) Run the new test and the relevant existing HTML builder tests.
+2) Run `pytest -q` (or at least the relevant subset) until green.
+3) Remove any temporary files you created outside the test suite.
+
+Implementation notes / hints:
+- The bug report indicates the regression was introduced in a specific commit tied to PR #11415. You can use `git show ae206694e68bea074aca633ea0d32e9ed882a95f` to inspect what changed in asset handling, but still rely on your new test to guide the fix.
+- The most robust fix is one that preserves deterministic build outputs and avoids copying the same file multiple times if possible.
+- If Sphinx intentionally logs about overwriting mismatched content (e.g., “copy_overwrite”), ensure your change doesn’t cause noisy logs in the common case. If conflicts happen, decide whether to:
+  - silently prefer user static, or
+  - log a one-time info/debug that the extension asset was skipped because user provided an override.
+Match Sphinx’s typical logging severity.
+
+Deliverables:
+- A new/updated pytest that fails on current main and passes with your fix.
+- A minimal code change in Sphinx that restores user override behavior for extension-added CSS (and ideally other static assets) when the same relative filename exists in `html_static_path`.
+- Evidence via test runs (command + summarized output) that the fix works.
+
+Now proceed:
+1) Run tests (or a focused subset) to orient yourself.
+2) Add the reproduction test (ensuring it fails before the fix).
+3) Implement the fix.
+4) Rerun tests and iterate until passing.

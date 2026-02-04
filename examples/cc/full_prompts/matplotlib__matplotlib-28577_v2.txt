@@ -1,0 +1,194 @@
+You are an expert Matplotlib contributor tasked with fixing a nondeterministic spacing bug in constrained layout. Follow the process steps below exactly, and respect the constraints that caused previous attempts to fail.
+
+Task to implement:
+Bug: Nondeterministic behavior with subplot spacing and constrained layout
+Summary:
+- With constrained layout enabled and spacings set to zero (h_pad, w_pad, wspace, hspace, axes.labelpad, tick directions “in”), two subplots intended to abut sometimes show a small, nondeterministic gap when displayed in notebooks or interactive windows. Spacing becomes deterministic and zero if fig.canvas.draw() is called explicitly or when saving the figure.
+Goal:
+- Make constrained layout deterministically compute zero spacing between subplots in this example without requiring a manual fig.canvas.draw().
+- Implement a minimal, safe fix within the constrained layout engine.
+- Validate the change with targeted, temporary scripts and tests; do not permanently add or commit files.
+
+Important constraints and improvements based on prior failures:
+- Do not add new test files to the repository. Use a temporary script under /tmp to validate behavior and remove it afterward.
+- Avoid running the full pytest suite; run only targeted tests related to constrained layout and closely affected behaviors.
+- Minimize repository edits. Implement the fix in the constrained layout engine code only; do not touch unrelated files.
+- If your environment shows a safety reminder about not modifying code after reading files, plan the minimal change first, make that edit without browsing unrelated files, and validate via targeted scripts. Do not introduce broad or exploratory edits.
+- Do not commit any changes.
+
+Steps to complete:
+
+1) Understand the requirements and failure mode
+- The desired behavior: with constrained layout and spacing rcParams set to zero, two horizontally adjacent axes should deterministically abut with zero gap on first display or save, without requiring the user to call fig.canvas.draw().
+- The current nondeterminism strongly suggests constrained layout’s size and tightbbox measurements depend on renderer draw-state. Performing layout without a stabilized draw can produce slight differences between runs, especially under interactive backends or notebook display.
+- TightLayoutEngine wraps its computations under renderer._draw_disabled to stabilize measurements; ConstrainedLayoutEngine likely does not in all paths.
+
+2) Create a clear, targeted reproduction script that captures nondeterminism without an explicit manual draw
+- Use a temporary script saved at /tmp/repro_constrained_layout.py. This script should:
+  - Exercise both an interactive backend (if available) and Agg.
+  - In the interactive path, avoid explicit fig.canvas.draw(); instead use draw_idle plus an event loop flush (plt.pause) to simulate notebook/GUI display.
+  - Measure the gap deterministically across multiple runs to detect variability.
+  - In the Agg path, measure gap across saved images without calling fig.canvas.draw() explicitly, relying on savefig-triggered layout.
+
+Suggested temporary script content:
+
+import matplotlib
+import os
+
+# Try an interactive backend first; fall back to Agg if unavailable.
+preferred_backends = ["TkAgg", "Qt5Agg", "QtAgg"]
+backend = None
+for be in preferred_backends:
+    try:
+        matplotlib.use(be, force=True)
+        backend = be
+        break
+    except Exception:
+        continue
+if backend is None:
+    matplotlib.use("Agg", force=True)
+    backend = "Agg"
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+rc = {
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "figure.constrained_layout.use": True,
+    "figure.constrained_layout.h_pad": 0,
+    "figure.constrained_layout.w_pad": 0,
+    "figure.constrained_layout.wspace": 0,
+    "figure.constrained_layout.hspace": 0,
+    "axes.labelpad": 0,
+}
+
+def compute_gap_after_display_interactive():
+    with plt.style.context(rc):
+        fig, axes = plt.subplots(1, 2, figsize=(6, 2), sharey=True)
+        for ax in axes.flat:
+            ax.set_xlim(-0.1, 1.1)
+        # Do not call fig.canvas.draw() explicitly.
+        # Schedule a draw and let the event loop process it, simulating notebook/GUI display.
+        fig.canvas.draw_idle()
+        plt.pause(0.05)
+        pos0 = axes[0].get_position().bounds
+        pos1 = axes[1].get_position().bounds
+        plt.close(fig)
+        right0 = pos0[0] + pos0[2]
+        left1 = pos1[0]
+        return left1 - right0
+
+def compute_gap_after_savefig_agg():
+    with plt.style.context(rc):
+        fig, axes = plt.subplots(1, 2, figsize=(6, 2), sharey=True)
+        for ax in axes.flat:
+            ax.set_xlim(-0.1, 1.1)
+        # Do not call fig.canvas.draw(); rely on savefig triggering layout/draw.
+        outfile = "/tmp/repro_constrained_layout_out.png"
+        fig.savefig(outfile, dpi=100)
+        pos0 = axes[0].get_position().bounds
+        pos1 = axes[1].get_position().bounds
+        plt.close(fig)
+        right0 = pos0[0] + pos0[2]
+        left1 = pos1[0]
+        try:
+            os.remove(outfile)
+        except Exception:
+            pass
+        return left1 - right0
+
+def run_trials(n=20):
+    gaps = []
+    # Interactive path
+    if backend != "Agg":
+        for _ in range(n):
+            gaps.append(compute_gap_after_display_interactive())
+    else:
+        print("Interactive backend unavailable; using Agg/savefig path.")
+        for _ in range(n):
+            gaps.append(compute_gap_after_savefig_agg())
+    return gaps
+
+if __name__ == "__main__":
+    gaps = run_trials(30)
+    print("Backend:", backend)
+    print("Gaps:", gaps)
+    print("Min gap:", min(gaps))
+    print("Max gap:", max(gaps))
+    print("Max abs gap:", max(abs(g) for g in gaps))
+
+- Before making any changes, run this script and keep the printed output. The goal is to show either variability across runs or non-zero gaps, especially with the interactive backend. Do not call fig.canvas.draw() in this script; using draw_idle is acceptable because users typically do not manually call draw in notebooks.
+
+3) Locate the precise place for the fix and audit existing draw-state handling
+- Use grep to find the constrained layout engine code and TightLayoutEngine’s execute implementation:
+  - grep -R "class ConstrainedLayoutEngine" -n lib
+  - grep -R "def execute" -n lib/matplotlib/layout_engine
+  - grep -R "_draw_disabled" -n lib
+- Inspect ConstrainedLayoutEngine.execute(fig, renderer) and the call chain (e.g., do_constrained_layout, make_layoutgrid). Verify whether constrained layout computations are currently wrapped in a draw-disabled context.
+- Inspect TightLayoutEngine.execute(fig, renderer) to see how it uses renderer._draw_disabled. The fix should mirror that approach.
+- Do not browse unrelated files. Plan the minimal change before editing.
+
+4) Implement the minimal fix in the constrained layout engine
+- Wrap the constrained layout computation in ConstrainedLayoutEngine.execute within renderer._draw_disabled to stabilize artist measurement and tightbbox computation without performing a real render.
+- Use the renderer argument passed to execute; do not call fig._get_renderer(). Avoid introducing any explicit fig.canvas.draw() calls.
+- Guard the use of the private context manager cautiously to avoid backend-specific breakage:
+
+Example patch concept (adjust exact names/paths to match your tree):
+File: lib/matplotlib/layout_engine/constrained_layout.py
+Locate: class ConstrainedLayoutEngine(...):
+    def execute(self, fig, renderer):
+        # original body
+Change to:
+    def execute(self, fig, renderer):
+        # Ensure layout calculations run with rendering disabled to stabilize measurements.
+        _cm = getattr(renderer, "_draw_disabled", None)
+        if _cm is not None:
+            with _cm():
+                # original constrained layout computation (e.g., do_constrained_layout)
+                ...
+        else:
+            # Fallback: run original body unwrapped
+            ...
+
+- Keep the change strictly local to ConstrainedLayoutEngine.execute. Do not modify unrelated modules or public APIs.
+
+Rationale:
+- The nondeterminism stems from computing artist sizes/tight bounding boxes in a draw-dependent state. TightLayoutEngine already stabilizes this by using renderer._draw_disabled. Aligning ConstrainedLayoutEngine with that pattern is consistent and low risk.
+
+5) Validate the fix with the reproduction script and additional targeted scenarios
+- Re-run /tmp/repro_constrained_layout.py. Compare before/after outputs:
+  - Before: You should see variability across runs or small but non-zero gaps in some iterations. On Agg/savefig path, gaps may already be zero; focus on the interactive path if available.
+  - After: Gaps should be consistently zero or within a tiny tolerance (e.g., |gap| < 1e-12) across all iterations, on first display without an explicit fig.canvas.draw().
+- Expand targeted validation beyond the minimal example. Create a second temporary script at /tmp/repro_constrained_layout_variants.py to sanity-check:
+  - Figures with colorbars (both inset and axes-attached), suptitles, legends.
+  - Nested GridSpecs and subfigures with constrained layout.
+  - Twinned axes (twinx/twiny), shared axes, manual set_position adjustments.
+  - Savefig with bbox_inches="tight" and pad_inches="layout".
+  - Resize events on interactive backends: change fig.set_size_inches, call draw_idle, pause, re-measure gap.
+- For each scenario, measure axes positions and confirm deterministic zero-spacing behavior where expected and absence of regressions.
+
+6) Run a targeted subset of Matplotlib tests to catch regressions
+- Avoid the full test suite. Run only constrained layout and nearby tests:
+  - pytest lib/matplotlib/tests/test_constrainedlayout.py
+  - pytest lib/matplotlib/tests -k "constrained_layout and not network"
+  - Optionally: pytest lib/matplotlib/tests -k "colorbar or suptitle or legend or subfigure or gridspec or twinx or bbox_inches"
+- If failures occur, investigate only those related to constrained layout or layout engines. Do not broaden edits; adjust the fix only if necessary.
+
+7) Double-check backend coverage and private API usage
+- Verify behavior on at least one interactive backend (TkAgg or Qt5Agg) and Agg. If interactive backends are unavailable in your environment, document that and rely on Agg/savefig path; ensure no regressions there.
+- Confirm that wrapping execute with renderer._draw_disabled does not interfere with artists that rely on a real draw for extents. TightLayoutEngine’s existing use is your guide; mirror the same scope and timing.
+
+8) Document your findings and clean up
+- Prepare brief notes with:
+  - Before/after outputs from /tmp/repro_constrained_layout.py (backend used, gaps, min/max, max abs gap).
+  - Results of variant scenarios and any targeted pytest runs.
+  - Confirmation that the fix achieves deterministic zero spacing on first display/save without explicit fig.canvas.draw().
+- Delete temporary scripts (/tmp/repro_constrained_layout.py and /tmp/repro_constrained_layout_variants.py).
+- Do not commit changes.
+
+Success criteria:
+- Constrained layout now deterministically yields zero spacing between the two subplots under zero spacing rcParams on first display/save, without requiring an explicit fig.canvas.draw().
+- The change is minimal, localized to ConstrainedLayoutEngine.execute, and safe across relevant backends.
+- Targeted tests and scenarios pass without regressions.
+- No new files were added to the repository and no changes were committed.

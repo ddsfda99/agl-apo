@@ -1,0 +1,25 @@
+diff --git a/lib/matplotlib/layout_engine.py b/lib/matplotlib/layout_engine.py
+index 5a96745d06..1528b9bffd 100644
+--- a/lib/matplotlib/layout_engine.py
++++ b/lib/matplotlib/layout_engine.py
+@@ -270,11 +270,15 @@ class ConstrainedLayoutEngine(LayoutEngine):
+         w_pad = self._params['w_pad'] / width
+         h_pad = self._params['h_pad'] / height
+ 
+-        return do_constrained_layout(fig, w_pad=w_pad, h_pad=h_pad,
+-                                     wspace=self._params['wspace'],
+-                                     hspace=self._params['hspace'],
+-                                     rect=self._params['rect'],
+-                                     compress=self._compress)
++        # Ensure layout computations use a draw-disabled renderer context,
++        # mirroring tight_layout's behavior for deterministic results.
++        renderer = fig._get_renderer()
++        with getattr(renderer, "_draw_disabled", nullcontext)():
++            return do_constrained_layout(fig, w_pad=w_pad, h_pad=h_pad,
++                                         wspace=self._params['wspace'],
++                                         hspace=self._params['hspace'],
++                                         rect=self._params['rect'],
++                                         compress=self._compress)
+ 
+     def set(self, *, h_pad=None, w_pad=None,
+             hspace=None, wspace=None, rect=None):

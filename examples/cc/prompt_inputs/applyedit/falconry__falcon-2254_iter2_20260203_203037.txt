@@ -1,0 +1,179 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+Deprecate asyncio aliases in `falcon.util`
+I have soft-deprecated them in the docs in https://github.com/falconry/falcon/pull/2252.
+Emit a deprecation warning in a 4.x release, remove in 5.0. Unless we need them again for, e.g., Trio support (?)
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## What the task actually required
+
+The prompt is narrowly scoped:
+
+- “Deprecate asyncio aliases in `falcon.util`”
+- Soft-deprecated in docs already.
+- **Emit a deprecation warning in a 4.x release**, and **remove in 5.0**.
+
+So for 4.x, the correct behavior is:
+
+- `falcon.util.create_task` and `falcon.util.get_running_loop` (and any other asyncio re-exports in `falcon.util`) should still work.
+- Accessing them should emit a `DeprecatedWarning` (Falcon’s custom warning type).
+- Existing internal code/tests should not be mass-refactored away from them unless there is a strong reason. If Falcon code uses these aliases internally, it should either:
+  - keep using them but silence warnings internally, or
+  - switch internal use to `asyncio.*` so only user code sees warnings.
+- There should be a **repro test** that asserts the warning happens.
+
+## Why the agent failed (key issues)
+
+### 1) No reproduction test was added
+The agent never created a focused test like:
+
+- `with pytest.warns(falcon.util.deprecation.DeprecatedWarning): falcon.util.get_running_loop`
+- or `falcon.util.create_task(...)` warning behavior.
+
+Without this, the agent was “flying blind” and ended up making broad refactors that likely broke expectations.
+
+### 2) It changed public API behavior beyond the request
+The agent **removed** `create_task` and `get_running_loop` from `falcon/util/__init__.py` top-level imports (i.e., from `falcon.util` namespace initialization) and tried to “recover” them via `__getattr__`.
+
+This is a semantic change:
+
+- Previously: `from falcon.util import create_task` worked as a normal import binding at import time.
+- After change: `from falcon.util import create_task` triggers attribute resolution during import; it *might* work, but it is behaviorally different and can affect tooling, static analysis, introspection, and `__all__` behavior.
+
+Also, the change *implicitly* makes the symbol absent from `dir(falcon.util)` until accessed, etc. That’s not part of “emit a warning” and is risky.
+
+### 3) It broke internal imports that relied on `from falcon.util import create_task/get_running_loop`
+A concrete break is visible in the trace:
+
+- `falcon/testing/client.py` originally did `from falcon.util import create_task, get_running_loop`
+- The agent removed these imports and updated call sites.
+
+But it did **not** update all call sites correctly: `client.py` still contains references like `get_running_loop()` (I saw at least one block updated, but the file is huge and the edits were partial and search/replace-based). Any remaining `get_running_loop` reference would now raise `NameError`.
+
+This is exactly the kind of failure you get when you refactor across many files without running tests.
+
+### 4) It modified `falcon/__init__.py` exports (API surface) incorrectly
+The agent removed:
+
+```py
+from falcon.util import create_task
+from falcon.util import get_running_loop
+```
+
+This means `falcon.create_task` and `falcon.get_running_loop` are now missing (unless something else defines them later). That is a **public API break** not requested by the prompt.
+
+Even if the goal is “deprecate util aliases”, Falcon’s top-level exports are a separate compatibility promise. If those are also deprecated, it must be explicit and tested. The prompt didn’t ask for this.
+
+### 5) It refactored tests to stop using the deprecated API
+The agent edited multiple tests (`tests/asgi/test_sync.py`, `_asgi_test_app.py`, attempted `test_ws.py`) to use `asyncio.get_running_loop()` instead of the `falcon.util` alias.
+
+That’s the opposite of what you want in a deprecation change:
+
+- You need tests verifying the deprecated API still works and emits warnings.
+- Refactoring tests away removes coverage and can mask regressions.
+
+Also: changing tests in a library repo is allowed, but here it’s counterproductive: the feature request is about warnings, not about eliminating usage.
+
+### 6) The deprecation warning implementation is incomplete / incorrect in details
+In `falcon/util/__init__.py` the agent added:
+
+```py
+if name in ('create_task', 'get_running_loop'):
+    warnings.warn(f'falcon.util.{name} is deprecated; use asyncio.{name} instead.',
+                  DeprecatedWarning)
+    import asyncio
+    return getattr(asyncio, name)
+```
+
+Problems:
+
+- No `stacklevel=` argument. Warnings will point inside Falcon internals instead of the caller. Falcon’s own `deprecated()` uses `stacklevel=2` for this reason.
+- Return annotation of `__getattr__` is `ModuleType`, but it returns a function; wrong typing (minor, but indicates sloppiness).
+- This only covers attribute access (`falcon.util.get_running_loop`), not `from falcon.util import get_running_loop` edge cases in older Python versions or in certain tooling scenarios. (It will usually call module `__getattr__`, but relying on this for a core alias is unnecessary.)
+
+### 7) It edited core runtime code (`falcon/asgi/app.py`, `falcon/asgi/ws.py`) unrelated to the task
+The agent changed internal usage:
+
+- `falcon.asgi.ws._BufferedReceiver` now uses `asyncio.get_running_loop()` instead of `falcon.get_running_loop()`.
+- `falcon.asgi.app.App` now uses `asyncio.get_running_loop()` instead of importing `get_running_loop` from `falcon.util.sync`.
+
+These might be fine on their own, but doing them together with API surface changes increases risk. More importantly: it did not ensure that deprecation warnings don’t turn into errors in test suite configurations (Falcon’s test suite is strict about certain warnings).
+
+### 8) It never ran the test suite
+No `pytest` run is shown. Given the breadth of changes, this is the biggest process failure: the agent introduced many likely `ImportError`/`NameError` failures and didn’t catch them.
+
+## How to fix the approach (what should have been done)
+
+### Minimal, correct implementation strategy
+
+1) **Keep the aliases defined in `falcon.util`** exactly as before (so imports and introspection remain stable).
+2) Wrap them in thin functions that emit `DeprecatedWarning` once per call (or per access) and forward to `asyncio.*`, with a proper `stacklevel`.
+   - Or use Falcon’s existing `deprecated()` decorator if appropriate (but these are functions, not decorators).
+3) Add a targeted test asserting the warning is emitted.
+
+A robust pattern:
+
+- In `falcon/util/__init__.py`, keep exporting `create_task` and `get_running_loop` as callables.
+- Implement them either in `falcon/util/sync.py` or directly in `falcon/util/__init__.py` as wrappers.
+
+Example of *desired* behavior (conceptual):
+
+```py
+def get_running_loop():
+    warnings.warn(..., DeprecatedWarning, stacklevel=2)
+    return asyncio.get_running_loop()
+
+def create_task(coro, *, name=None, context=None):
+    warnings.warn(..., DeprecatedWarning, stacklevel=2)
+    return asyncio.create_task(coro, name=name, context=context)
+```
+
+(Exact signature depends on supported Python versions; a safe `*args, **kwargs` wrapper might be needed.)
+
+### Test that should have been added
+
+Add a new test file or extend `tests/test_utils.py` near `test_json_deprecation()`:
+
+- `with pytest.warns(deprecation.DeprecatedWarning, match='falcon.util.get_running_loop'):` call inside an async test using `pytest.mark.asyncio`.
+- Similarly for `create_task` (async test creates a trivial task).
+
+This gives a clear “definition of done”.
+
+### Don’t touch tests and unrelated modules unless necessary
+Keep existing tests as-is, and only add warning assertions. Don’t refactor internal call sites unless warnings cause failures; if they do, filter warnings internally in Falcon code, not by removing API.
+
+## Specific places in the trace that are likely breaking tests now
+
+- `falcon/__init__.py`: removal of `create_task` and `get_running_loop` exports will break any test/import expecting `falcon.create_task` or `falcon.get_running_loop` (and internal code like `falcon/asgi/ws.py` previously used `falcon.get_running_loop()`).
+- `falcon/testing/client.py`: partial refactor risks leftover `get_running_loop()` symbol usage without import → `NameError`.
+- `falcon/util/__init__.py`: removing direct imports means those names aren’t in module globals; anything that expects them present without triggering `__getattr__` might fail.
+- Test edits: changes in `tests/asgi/test_sync.py` and `_asgi_test_app.py` reduce coverage and might not match expected behavior if other parts depend on falcon.util alias semantics.
+
+## Process improvements for the agent
+
+1) **Start with a failing test** that describes the new required behavior (warning emission).
+2) **Make the smallest change** to implement that behavior.
+3) **Run pytest** early and often, especially after refactors.
+4) Avoid cross-repo refactors when the prompt is about a narrow compatibility change.
+5) When introducing warnings, always set `stacklevel` so warnings point at user code.
+
+If you revert the broad refactors and implement stable wrappers + tests, this task should be straightforward and low-risk.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

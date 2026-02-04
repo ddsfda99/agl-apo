@@ -1,0 +1,92 @@
+## What went wrong / why the agent “failed”
+
+From the trace, the agent *thought* it fixed a nondeterminism bug by wrapping `ConstrainedLayoutEngine.execute()` in `renderer._draw_disabled()`, added a new test, and then ran `pytest -q` for the whole repo. The global test run showed at least one failure (`... F ...` around ~80%), but the agent didn’t diagnose or resolve it. It then ran only `test_constrainedlayout.py`, which passed, and concluded success. So the failure is: **they didn’t chase the actual failing test(s) in the full suite** and shipped a change that breaks something outside the constrained-layout test module.
+
+That makes the change suspect even if constrained-layout tests pass.
+
+## Concrete issues in the trace
+
+### 1) They ignored the full-suite failure
+- Evidence: the full `pytest -q` output contains an `F` at ~80%.
+- The agent did not fetch the final failing traceback from the background task output file (`/tmp/claude/tasks/b00d6f2.output`) nor re-run with `-x` to stop at first failure and inspect it.
+- They instead ran a narrower test file and stopped.
+
+**How to improve**
+- Always identify the failing test(s): run `pytest -q -x` or `pytest -q --maxfail=1`, then inspect the traceback.
+- If running in background, tail the output file or re-run failing tests directly.
+
+### 2) The fix likely changes semantics for constrained layout during normal drawing
+The change:
+
+```py
+renderer = fig._get_renderer()
+with getattr(renderer, "_draw_disabled", nullcontext)():
+    layoutgrids = do_constrained_layout(...)
+return layoutgrids
+```
+
+This is a significant behavioral change: constrained layout uses many `get_tightbbox()` calls which may depend on renderer state and sometimes require an actual draw to settle (fonts, mathtext, tick label formatting, etc). Disabling drawing:
+- may prevent some renderer-side caches or measurements from being populated;
+- may change behavior for artists/backends where `_draw_disabled` is meaningful;
+- may affect stateful artists that update positions during draw.
+
+It might be correct for some cases, but it’s risky as a general change, and could easily explain a failure elsewhere in the suite (e.g., a backend-specific test, bbox/tight tests, printing/saving tests).
+
+**How to improve**
+- Before changing core draw/layout behavior, confirm the exact nondeterminism and minimal failing case, and verify which tests fail after the change.
+- Consider whether the “fix” belongs in `do_constrained_layout()` itself (around the bbox queries) rather than in the engine wrapper, or whether only specific bbox calls should be done with draw disabled.
+- Validate across backends or at least the tests that exercise printing/saving paths.
+
+### 3) New test is too brittle and may be invalid across environments
+The added test asserts exact equality of axes boundaries to within `1e-6`:
+
+```py
+np.testing.assert_allclose(p0.x1, p1.x0, rtol=0, atol=1e-6)
+```
+
+This is very tight for layout computations, which often vary slightly by:
+- font metrics / freetype versions
+- backend renderer differences
+- platform floating-point quirks
+
+Also, it doesn’t remove labels/ticklabels, so “zero spacing” is not purely a function of `wspace`; decorations can still force spacing.
+
+This test may pass locally but fail in CI or with different configs.
+
+**How to improve**
+- Make the test robust:
+  - remove decorations (`set_xlabel("")`, ticks off, etc.) or explicitly set `in_layout=False` on them.
+  - relax tolerance (e.g., `1e-3` or something justified).
+  - assert *non-positive gap* or *gap <= epsilon*, not exact equality.
+- Prefer testing a regression derived from a reported bug or existing failure rather than inventing a strict geometric equality.
+
+### 4) They didn’t connect the fix to the documented behavior (“disable layout engine for final draw when printing”)
+The module docstring says: “when printing we disable the layout engine for the final draw.” The agent’s change instead disables drawing *inside* constrained layout execution during normal draw, which is different. They didn’t verify the printing/saving path (`savefig`, `print_figure`) and whether it already handles layout engine execution appropriately.
+
+**How to improve**
+- Trace printing path in `backend_bases.print_figure` and `FigureCanvasBase.print_*` to see how layout is handled.
+- Ensure the change aligns with intended design: layout calculation vs final draw.
+
+### 5) Process mistake: file path confusion early on
+They tried to read `/workspace/lib/...` but repo is at `/testbed`. They recovered quickly, but it indicates they were not grounded in environment setup at first.
+
+**How to improve**
+- Confirm `pwd` / repo root immediately before reading/editing.
+
+## Likely reason the suite failed after their patch
+Given the nature of the change, the most plausible failure is in a test that expects constrained layout to produce a particular bbox/position when *real drawing is enabled*, or in a backend that doesn’t support `_draw_disabled` the same way, or in a bbox-tight / savefig test that depends on renderer state updates happening during layout.
+
+Because the agent didn’t show the traceback, we can’t name it, but the key is: **the patch is unverified against the full suite and is likely too invasive.**
+
+## What the agent should have done to succeed
+1. **Stop at first failure** after the full suite run (`pytest -x`) and capture traceback.
+2. **Reproduce failing test** alone and iteratively adjust fix.
+3. If the failure is due to the `_draw_disabled` wrap, either:
+   - revert and pursue a narrower fix, or
+   - apply `_draw_disabled` only where it is safe/needed (e.g., specific bbox queries), or
+   - gate it by backend capability and add targeted tests for the real regression.
+4. Replace the new brittle test with a more robust regression test or remove it if it’s not tied to an actual bug report/failure.
+5. Re-run full suite (or at least the previously failing modules) to confirm zero regressions.
+
+## Summary
+The core failure isn’t just “buggy code”; it’s that the agent **did not debug the actual full-suite failure it introduced**, and it **added a risky behavioral change plus a brittle test**. The next iteration needs to identify the failing test from the full run and adjust the fix accordingly (likely narrowing or reverting the `_draw_disabled` wrapping strategy).

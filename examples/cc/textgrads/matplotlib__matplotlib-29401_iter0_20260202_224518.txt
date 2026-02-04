@@ -1,0 +1,66 @@
+## What the agent did well
+- Correctly located the root cause: `ErrorbarContainer.remove()` only removes the artists and *optionally* removes the container itself from `ax.containers` if `_remove_method` is set; `Axes.add_container()` is what sets that hook.
+- Correctly identified the bug location: `Axes.errorbar()` appended directly to `self.containers` instead of calling `add_container()`.
+- Implemented the minimal, correct fix in `lib/matplotlib/axes/_axes.py`.
+- Added a focused regression test and verified it locally.
+
+## Why the agent “failed” (process / final-state problems)
+Even though `pytest -q` passed in the trace, the agent left the working tree in a state that will fail the evaluation harness (and/or violates expected contribution conventions). The failure is not the code fix; it’s the *delivered patch contents*.
+
+### 1) The agent deleted the regression test it wrote
+- It created: `lib/matplotlib/tests/test_errorbar_remove_legend.py`
+- Then it ran: `rm -f /testbed/lib/matplotlib/tests/test_errorbar_remove_legend.py`
+- So the final patch **does not include a test** proving the bug is fixed.
+- Many tasks in these environments implicitly require adding/keeping a regression test; without it, reviewers/harnesses often mark it incomplete even if tests pass.
+
+**How to improve:** Do not delete the regression test. Keep it, and integrate it into an existing relevant test module if preferred (e.g., `test_container.py` or `test_legend.py`) to match project organization.
+
+### 2) It modified 3D code but did not validate after that change
+- It changed `lib/mpl_toolkits/mplot3d/axes3d.py` to use `self.add_container(errorbar_container)`.
+- It never reran the full test suite after this second change (only reran the single new test, which doesn’t exercise 3D).
+- This is risky because `Axes3D` historically has its own container semantics and return values; also, `Axes3D.add_container` comes from the base `Axes`, but it’s still a behavior change.
+
+**How to improve:**
+- After making the 3D change, run at least targeted tests: `pytest -q lib/mpl_toolkits/mplot3d/tests/test_axes3d.py lib/mpl_toolkits/mplot3d/tests/test_legend3d.py`.
+- Or rerun `pytest -q` if time allows.
+
+### 3) The 3D change may be conceptually wrong / inconsistent with 3D `errorbar` return
+In `axes3d.py`, the 3D `errorbar` method returns:
+```py
+return errlines, caplines, limmarks
+```
+not the container. The container is created, appended, and then ignored by the return value. Changing how it’s stored may still be correct, but:
+- The labeling/legend story for 3D errorbars might not match 2D (`has_xerr` is set based on `(xerr is not None or yerr is not None)` and `has_yerr` is based on `zerr`, which is already a bit semantically odd but existing).
+- If the original reported bug is strictly 2D (as the agent’s test indicates), changing 3D is scope creep and adds risk.
+
+**How to improve:**
+- Either (a) keep the fix strictly to 2D unless you have a failing 3D reproduction, or (b) add a 3D regression test to justify the change.
+
+### 4) Left an unexpected untracked directory: `?? .claude/`
+- `git status --porcelain` shows `?? .claude/`.
+- Many grading harnesses treat untracked files as a failure, or they get included in the patch unexpectedly.
+
+**How to improve:** Remove untracked artifacts before finishing, or ensure they are ignored and not part of the submitted diff.
+
+### 5) Minor: initial path mistake and inefficient full-suite run
+- Tried to read `/workspace/default/...` then corrected to `/testbed/...`. Not fatal, but shows lack of environment awareness.
+- Ran the entire suite (`~14 minutes`) before finishing all changes; that was expensive and then became stale after further edits.
+
+**How to improve:** Use targeted tests during iteration; run full suite only at the end.
+
+## What the final patch should look like to pass reliably
+1) Keep the functional fix:
+- In `lib/matplotlib/axes/_axes.py`, replace:
+  - `self.containers.append(errorbar_container)`
+  - with `self.add_container(errorbar_container)`
+
+2) Keep a regression test (do **not** delete it):
+- Prefer placing it into an existing file like `lib/matplotlib/tests/test_container.py` or `test_legend.py` to reduce file sprawl, but a new file is fine.
+
+3) Remove `.claude/` from the workspace or ensure it’s not part of the patch.
+
+4) Decide on the 3D change:
+- If you keep it, add a 3D test and run the 3D test modules.
+- If you don’t have a 3D reproduction, revert that hunk to minimize risk.
+
+That’s why the agent’s run is considered a failure: it didn’t leave a clean, reviewable, regression-tested final state, despite finding the correct root cause and implementing a correct 2D fix.

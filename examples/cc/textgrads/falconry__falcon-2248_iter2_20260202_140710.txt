@@ -1,0 +1,83 @@
+## What went wrong (root cause)
+
+The agent added support for a new cookie attribute, **Partitioned**, but the implementation has a logical ordering bug in `Response.set_cookie()`:
+
+- The code tries to **auto-enable `partitioned=True` when `same_site == 'none'`**.
+- However, it performs this check **before normalizing/validating** `same_site`.
+- At that point, `same_site` is still the original user-supplied value, and later in the method the code does:
+
+```py
+if same_site:
+    same_site = same_site.lower()
+    ...
+    self._cookies[name]['samesite'] = same_site.capitalize()
+```
+
+This means:
+- If `same_site='none'`, auto-enable sets partitioned True and sets `self._cookies[name]['partitioned']=True`.
+- **But then later the `same_site` block runs**, and (critically) `Morsel.__setitem__` behavior interacts with reserved attrs / flags such that the previously-set `partitioned` value is effectively reset back to empty-string in the stored morsel (as observed in the trace: `partitioned: ''`), so it does not render in `OutputString()`.
+
+The evidence is clear in the debug output:
+
+- After `resp.set_cookie('baz','foo', same_site='none', secure=True)`:
+  - `OutputString()` is missing `Partitioned`
+  - morsel items show `'partitioned': ''`
+- If you manually set `resp._cookies['baz']['partitioned'] = True` afterwards, it then renders correctly.
+
+So the agent’s code *writes* the attribute, but it gets undone later by subsequent operations in the same method.
+
+## Secondary failure: test client parsing was a red herring
+
+The agent initially failed tests because `falcon.testing.client.Cookie` lacked a `.partitioned` property. They added it, but tests still failed because the **response header never contained `Partitioned`**, so parsing was irrelevant. The additional complicated hack in `_ResultBase.__init__` that scans header strings for `"partitioned"` is unnecessary and also brittle (it can mis-detect, breaks with multiple cookies, etc.).
+
+## Additional issues / quality concerns
+
+### 1) Incorrect/backwards compatibility assumptions about stdlib `http.cookies`
+- The agent attempted to patch `http.cookies.Morsel._flags` and `_reserved` to support Partitioned.
+- While patching `_reserved` is aligned with the existing SameSite backport pattern, **touching `_flags` is CPython-internal and not guaranteed stable** across versions/implementations.
+- In Falcon’s codebase, this kind of backport should be done minimally and consistently with the existing SameSite approach; introducing new assumptions increases maintenance risk.
+
+### 2) API design mismatch / questionable behavior
+- The agent added `partitioned` kwarg and also auto-enables it whenever `SameSite=None`.
+  - That’s a policy decision that is not universally correct. Partitioned cookies are specifically for third-party contexts and typically require `Secure` + `SameSite=None`; auto-enabling may surprise users.
+  - If the upstream task requires it, fine—but it must be implemented correctly and covered by tests. The current tests were modified to assert auto-enable, which forced the behavior even though it wasn’t working.
+
+### 3) The tests were modified in a way that can contradict the library’s existing semantics
+- They edited `CookieResourceSameSite.on_put()` to set `secure=True` just to “support” Partitioned. This changes existing behavior for SameSite=None cookies and might be unacceptable unless the original task explicitly required it.
+- Ideally, new tests should be additive (new endpoint or new cookie) rather than modifying existing ones unless the spec actually changed.
+
+### 4) Documentation inaccuracies
+- Docstring says: “If `partitioned` is not specified, Falcon will set it automatically when `same_site` is set to `'None'` (requires `secure=True`…)”
+- But the implementation doesn’t enforce `secure=True`; it just sets Partitioned even if `secure=False`. That mismatch is another correctness gap.
+
+## How to fix (conceptually)
+
+To make this pass all tests, the key is:
+
+- **Set `partitioned` after `same_site` is normalized and applied to the morsel**, or base the auto-enable decision on the normalized value and apply it at the very end.
+
+In other words:
+- Move the `partitioned` logic to *after*:
+
+```py
+if same_site:
+    same_site = same_site.lower()
+    validate...
+    self._cookies[name]['samesite'] = same_site.capitalize()
+```
+
+Then:
+- if `partitioned is None and same_site == 'none'`: set `partitioned=True`
+- if `partitioned`: set `self._cookies[name]['partitioned']=True`
+
+This matches the empirical observation that setting it *afterwards* works.
+
+Once that is fixed, the test client “hack” that scans for `"partitioned"` becomes unnecessary, since `SimpleCookie.load()` should see it (given Falcon already patched `_reserved`), and even if it doesn’t, the right solution is to adjust parsing cleanly rather than substring scanning.
+
+## Summary of why the agent failed
+
+- Implemented Partitioned support but **placed the attribute-setting in the wrong part of the cookie-building sequence**, causing the attribute to be cleared before output.
+- Then tried to “fix” the failing test by enhancing the testing wrapper and adding brittle parsing hacks, instead of noticing the real issue: **the header never contained `Partitioned`**.
+- Modified tests/behavior in a potentially intrusive way (changing secure defaults in an existing handler) to make the new feature plausible, instead of adding isolated new coverage.
+
+Fix the `set_cookie()` ordering and simplify the test client parsing accordingly; then the suite should pass.

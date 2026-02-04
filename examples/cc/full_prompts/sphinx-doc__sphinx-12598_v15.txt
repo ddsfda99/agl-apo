@@ -1,0 +1,216 @@
+You are an expert Sphinx/LaTeX builder developer working in an existing code repository in the **current directory** (unknown path until you check).
+
+## Goal
+Fix a regression in the LaTeX builder that causes two LaTeX compilation failures:
+
+1) Nesting a `figure` directive inside a `.. seealso::` admonition now fails LaTeX compilation with:
+
+```
+! LaTeX Error: Not in outer par mode.
+l.... \begin{figure}[htbp]
+```
+
+2) Emitting a `sphinxadmonition` inside a `tabulary` table now fails compilation with:
+
+```
+! Missing \endgroup inserted.
+l.... \end{tabulary}
+```
+
+This likely came from changes around float handling / grouping (“Presumably due to #12508”).
+
+---
+
+## Non‑negotiable requirements (must follow)
+1) **Reproduce both failures before changing production code**:
+   - Build LaTeX `.tex` for a dedicated new testroot.
+   - When LaTeX is available, compile it using the existing test helper (likely `compile_latex_document()`).
+   - If LaTeX isn’t available, add **strong `.tex` assertions** that would have triggered the exact error (e.g., prove `\begin{figure}[htbp]` appears inside a `seealso`-like environment; prove `tabulary` is used and contains a `sphinxadmonition`).
+
+2) **Do not edit shared fixtures** like `tests/roots/test-root/markup.txt`. Create a **dedicated minimal testroot** for these regressions.
+
+3) **Avoid path/testroot naming mistakes**:
+   - Start by running `pwd` + `ls` and verify the real repo layout.
+   - List `tests/roots` before creating anything.
+   - Create exactly one new testroot directory and ensure the name matches what the test uses.
+
+4) **Read-before-write**:
+   - If you need to edit an existing file, read it first in full (or relevant parts) before writing.
+
+5) **Run pytest** at least for the new tests you add.
+
+---
+
+## Deliverables
+1) A new dedicated regression testroot containing **both reproductions** and any needed assets.
+2) Two regression tests that:
+   - fail before the fix (via compilation failure or deterministic `.tex` assertions),
+   - pass after the fix,
+   - compile LaTeX via helper when possible (skip appropriately if LaTeX absent).
+3) A minimal, correct production code fix in the LaTeX writer/builder.
+4) Show the pytest commands you ran and results.
+
+Do **not** commit changes.
+
+---
+
+## Mandatory workflow (do this in order)
+
+### Step 0 — Establish correct paths (prevents earlier failures)
+Run and inspect:
+- `pwd`
+- `ls`
+- `ls tests`
+- `ls tests/roots`
+- `ls tests/test_builders`
+
+Do not assume `/workspace`; use the actual current directory.
+
+---
+
+### Step 1 — Find the existing LaTeX test patterns/helpers
+Before writing any tests, locate and read the existing LaTeX builder tests and helpers:
+- Open `tests/test_builders/test_build_latex.py` (or the module where LaTeX compilation tests live).
+- Search within it for:
+  - `compile_latex_document`
+  - `pdflatex`
+  - skip markers/conditions (e.g. env vars like `SKIP_LATEX_BUILD`, or a `pytest.skip` if latex toolchain missing)
+  - how it reads the generated `.tex` file and where `_build/latex/*.tex` ends up for a testroot.
+- Identify the canonical pattern for:
+  - `@pytest.mark.sphinx('latex', testroot=...)`
+  - building (`app.build()`)
+  - locating output `.tex`
+  - compiling with helper
+
+If there is already a separate `test_build_latex_*.py` for regressions, follow that convention; otherwise add to `test_build_latex.py`.
+
+---
+
+### Step 2 — Create one dedicated minimal testroot (must include both repros)
+Create a new testroot under `tests/roots/`. **First confirm no existing directory name conflicts** by listing `tests/roots`.
+
+Use a name that is unlikely to collide, e.g.:
+
+`tests/roots/test-latex-regression-floats-and-tabulary/`
+
+This root must contain at minimum:
+- `conf.py`
+- `index.rst`
+- an image file used by the figure directive (prefer copying an existing small test image from another root if present; otherwise add a tiny placeholder PNG).
+
+**conf.py** should be minimal and correct for LaTeX:
+- set `master_doc = 'index'` if needed by this repo
+- keep extensions minimal (or none)
+- set `project = 'Project name not set'` only if other tests rely on a specific output filename; otherwise rely on default. (You’ll verify the output `.tex` filename after the first build.)
+
+**index.rst** must contain TWO sections (keep them minimal and deterministic):
+
+#### (A) seealso containing figure
+```rst
+Seealso with nested figure
+=========================
+
+.. seealso::
+
+   .. figure:: img.png
+      :alt: alt text
+
+      caption text
+```
+
+#### (B) admonition inside a table that produces tabulary
+Start with a `list-table` likely to become `tabulary` due to auto-width columns. Put an admonition inside a cell:
+
+```rst
+Admonition in table
+===================
+
+.. list-table::
+   :widths: 50 50
+   :header-rows: 0
+
+   * - left cell with long long long long long long long text to encourage tabulary
+     - .. admonition:: Title
+
+          body text
+```
+
+After generating `.tex`, you must confirm whether this becomes `tabulary`. If it does not, adjust the RST (e.g. longer text, different table type) until it does. Do not “guess”; confirm from `.tex`.
+
+---
+
+### Step 3 — Add two regression tests (must fail pre-fix)
+Add two tests (either in the existing LaTeX test module or a new adjacent module if that’s the convention). The tests must:
+
+- Build LaTeX for the new root.
+- Read the generated `.tex` file.
+- Make **assertions that demonstrate the pre-fix broken output** and the post-fix corrected output.
+- When LaTeX toolchain is available, compile using `compile_latex_document()` and assert success.
+- When LaTeX toolchain is not available, skip compilation but keep strong `.tex` assertions.
+
+#### Test A: `seealso` with nested `figure`
+Required checks:
+- Confirm `.tex` contains the seealso/admonition environment around the figure (or at least confirm the figure is emitted within the seealso block region).
+- Pre-fix symptom likely: `\begin{figure}[htbp]` emitted in a restricted context. Post-fix expectation: figure should be non-floating (`[H]`) or otherwise suppressed/handled safely.
+- Assert that in the generated `.tex` the nested figure is *not* using `[htbp]` in that context; ideally assert it uses `[H]` when floats are suppressed.
+
+Then compile via helper when possible.
+
+#### Test B: admonition inside `tabulary`
+Required checks:
+- Confirm the table environment is `tabulary` in the `.tex` (or if the fix changes it to `tabular`, assert that change explicitly and justify it).
+- Confirm the admonition environment/macro appears inside the table cell in `.tex`.
+- Post-fix must compile. If compilation is unavailable, assert that the `.tex` structure includes the mitigation you implement (e.g. `tabular` fallback; or explicit grouping fixes; or marking the table as problematic).
+
+Then compile via helper when possible.
+
+**Important:** These tests must demonstrably fail on current code before your fix:
+- Either by LaTeX compilation failure (preferred if LaTeX is present)
+- Or by deterministic `.tex` assertions that match the known failing patterns (`[htbp]` nested; `tabulary` containing `sphinxadmonition` without mitigation).
+
+---
+
+### Step 4 — Reproduce failures NOW (no production changes yet)
+Run pytest for just the new tests:
+- Use `-k` to select them or run the new test file only.
+- Ensure the failing behavior is observed:
+  - If LaTeX toolchain exists: show compilation failure logs matching the reported errors.
+  - If LaTeX toolchain doesn’t exist: show the `.tex` lines that would cause it (e.g. `\begin{figure}[htbp]` in the wrong place; `tabulary` + `sphinxadmonition` combination).
+
+Do not proceed until both failures are reproduced (by compilation or by `.tex` proof).
+
+---
+
+### Step 5 — Implement minimal production fix (driven by the failing tests)
+Now locate the actual bug in the LaTeX writer (likely `sphinx/writers/latex.py` or similar). Read relevant parts first.
+
+Strong suspected causes (validate with code and `.tex` output):
+- `visit_seealso()` likely does not increment `no_latex_floats`, so a nested `figure` uses `[htbp]` and breaks inside the admonition environment (“Not in outer par mode”).
+- Admonitions inside tables likely need to mark the table as problematic (e.g. set `self.table.has_problematic = True`) so `tabulary` is avoided or content is wrapped safely, preventing grouping errors at `\end{tabulary}`.
+
+Apply the minimal fix that makes the two tests pass, for example:
+- Treat `seealso` like other admonition-like nodes: increment/decrement `no_latex_floats` in `visit_seealso`/`depart_seealso` (or whichever mechanism this writer uses).
+- For admonitions inside tables: either
+  - force `tabular` fallback when an admonition appears in a cell by setting the same “problematic” flag used for other complex nodes, or
+  - adjust grouping/paragraph handling in the admonition environment emission so it is safe inside `tabulary`.
+  
+Do not introduce broad unrelated refactors. Keep changes localized and justified by the two regressions.
+
+---
+
+### Step 6 — Verify: rerun tests and (if available) compile
+- Rerun the two new tests.
+- If LaTeX is available, compilation must succeed for both.
+- Also run a small relevant subset of existing LaTeX tests to ensure no regressions (use the repo’s typical command; at minimum run `tests/test_builders/test_build_latex.py -k latex` or similar).
+
+---
+
+## What to show in your final response
+- The exact files you created/modified (paths).
+- The key `.tex` snippets:
+  - before fix and after fix for the nested figure case
+  - before fix and after fix for the `tabulary` + admonition case
+- The pytest commands you ran and their outcomes.
+- If LaTeX compilation is skipped due to environment, explicitly show the skip reason and provide the `.tex` assertions that prove the regression is addressed.
+
+Remember: **reproduce → failing tests → minimal fix → passing tests**.

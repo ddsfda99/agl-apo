@@ -1,0 +1,156 @@
+You are an expert Shapely/GEOS contributor working in a local checkout of this repository.
+
+## Task
+Implement the enhancement: **Expose the GEOS WKTReader “fix_structure” option in Shapely’s WKT reader**, so that invalid-but-repairable structures like **unclosed polygon rings** can be loaded when requested.
+
+### Key requirement (do not deviate)
+- **Do NOT implement a custom WKT parser/rewriter in Python.**
+- The issue is specifically “expose fix_structure keyword in WKT reader”: GEOS already provides it; Shapely must wire it through the C-extension/ufunc layer.
+- Implement at the correct layer (GEOS bindings / ufunc), and then expose in Python (`shapely.from_wkt`, and `shapely.wkt.loads` wrapper).
+
+---
+
+## Expected behavior
+Given:
+```python
+bad = "POLYGON ((0 0, 1 0, 1 1, 0 1))"
+```
+
+- Default strict behavior unchanged:
+  - `from shapely import from_wkt; from_wkt(bad)` raises a `GEOSException` about an unclosed LinearRing.
+- New behavior:
+  - `from_wkt(bad, fix_structure=True)` loads successfully and returns a polygon whose exterior ring is closed (`coords[0] == coords[-1]`).
+  - `import shapely.wkt as wkt; wkt.loads(bad, fix_structure=True)` also works (but **do not** modify `shapely/__init__.py` to attach `wkt`).
+
+---
+
+## API design constraints
+- Add **only** `fix_structure` (bool, default `False`).
+- Do not introduce new public parameters (`strict=`, `on_invalid=`, etc.) unless already present and required for wiring.
+- Backward compatible: calls without `fix_structure` must behave identically.
+
+---
+
+## Critical lessons from previous failures (must follow)
+1) **Do not change `shapely/__init__.py`** to expose `shapely.wkt` on the top-level namespace.  
+   Tests must import the submodule explicitly (`import shapely.wkt as wkt`) or primarily test `shapely.from_wkt`.
+
+2) **If you change the ufunc signature / arity, you must update everything consistently**:
+   - dtype table for the ufunc (e.g., `from_wkt_dtypes`)
+   - the ufunc loop arg indexing/steps
+   - the ufunc registration macro / `nin` (`DEFINE_CUSTOM(..., N_IN)` or equivalent)
+   - any Python wrapper calls into `lib.from_wkt`
+   After doing so, **rebuild the extension before running tests**, otherwise pytest import-time will fail with confusing errors.
+
+   Add a quick sanity check after rebuild:
+   ```bash
+   python -c "import shapely; import shapely.lib as lib; print('from_wkt.nin', lib.from_wkt.nin)"
+   ```
+   Ensure it matches your expected number of inputs.
+
+3) **GEOS version/feature guard must be correct and robust**.
+   - Do not “guess” a GEOS version macro like `GEOS_SINCE_3_11_0` unless you confirm it from headers used by this repo/support matrix.
+   - Prefer **compile-time feature detection** if feasible:
+     - e.g., `#if defined(GEOSWKTReader_setFixStructure_r)` (or whatever symbol exists) or other header-provided defines.
+   - If not possible, use the repo’s established GEOS version macros **only after verifying** which minimum version contains the setter.
+   - Behavior when unavailable: if user requests `fix_structure=True` but GEOS lacks support, **raise a clear error** (NotImplementedError or GEOSException per project convention). Do not silently ignore.
+
+4) **Avoid brittle test edits**. Add a new test function normally in an existing test module near other WKT/from_wkt tests—no “string replace injection” hacks.
+
+5) **Be careful raising Python exceptions inside ufunc loops**. Follow existing patterns in this repo for:
+   - setting errors in ufunc loops
+   - ensuring outputs are in a consistent state
+   - not clobbering exceptions in cleanup macros
+
+---
+
+## Implementation guidance (follow in order)
+
+### 1) Add a failing test (first)
+- Find existing tests for WKT IO / `from_wkt` (commonly `shapely/tests/test_io.py` or similar).
+- Add a new test function near other `from_wkt` tests. It must:
+  1. Assert default strict behavior raises for `bad`.
+  2. Assert `from_wkt(bad, fix_structure=True)` loads and has a closed exterior ring.
+  3. Also test the wrapper: `import shapely.wkt as wkt; wkt.loads(bad, fix_structure=True)` loads successfully.
+- **Do not** write `shapely.wkt.loads` assuming `shapely.wkt` is attached to `shapely`.
+
+Suggested assertions:
+```python
+from shapely import from_wkt
+import shapely.wkt as wkt
+import pytest
+
+bad = "POLYGON ((0 0, 1 0, 1 1, 0 1))"
+
+with pytest.raises(Exception):  # tighten to GEOSException if that’s what repo uses
+    from_wkt(bad)
+
+g = from_wkt(bad, fix_structure=True)
+assert g.exterior.coords[0] == g.exterior.coords[-1]
+
+g2 = wkt.loads(bad, fix_structure=True)
+assert g2.exterior.coords[0] == g2.exterior.coords[-1]
+```
+
+### 2) Locate the correct code path
+- Find `shapely.from_wkt` implementation (likely in `shapely/io.py` or similar).
+- Find where the compiled extension is called (`shapely.lib.from_wkt` ufunc).
+- In C sources (often `src/ufuncs.c`), locate the WKT reader usage:
+  - `GEOSWKTReader_create_r`
+  - `GEOSWKTReader_read_r`
+  - and the needed setter: **identify the exact function name available in GEOS** for fix_structure.
+
+### 3) Wire `fix_structure` into GEOS WKTReader
+- The option must be per-call/per-reader instance; do not use global state.
+- Typical flow inside the ufunc loop:
+  - Create reader
+  - **If `fix_structure=True`: call the GEOS setter on the reader before reading**
+  - Read WKT
+  - Destroy reader
+- Add a feature/version guard so compilation works on all supported GEOS versions.
+  - If unsupported and `fix_structure=True`, raise a clear error.
+  - If `fix_structure=False`, proceed normally regardless of version.
+
+### 4) Update ufunc signature carefully (if needed)
+- If the ufunc currently accepts only the WKT string (and perhaps an invalid-handler), you may need to add an additional boolean input.
+- If you add a new input:
+  - update the dtype arrays
+  - update `nin`/`N_IN`
+  - update the loop signature and arg indexing
+  - update Python wrapper call sites
+- Rebuild immediately, then run:
+  ```bash
+  python -c "import shapely.lib as lib; print(lib.from_wkt.nin)"
+  ```
+  and only then run pytest.
+
+### 5) Expose in Python wrappers
+- `shapely.from_wkt(..., fix_structure=False)` must accept and pass through.
+- `shapely.wkt.loads` must accept `fix_structure=False` and pass through.
+  - Do **not** change package namespace exports.
+  - Prefer making `fix_structure` keyword-only if consistent with this repo style, but keep surface area minimal.
+
+### 6) Run tests and fix regressions
+- Run the specific test module first.
+- Then run relevant IO/WKT related suites.
+- If failures occur at import/collection time, suspect ufunc signature mismatch (Python vs compiled extension) and rebuild.
+
+---
+
+## Deliverables
+- Code changes wiring `fix_structure` from Python → ufunc → GEOS WKTReader.
+- Tests proving:
+  - Default strict behavior unchanged.
+  - `fix_structure=True` repairs/accepts unclosed polygon rings.
+  - Wrapper `shapely.wkt.loads(..., fix_structure=True)` also works (importing the submodule explicitly).
+- No unrelated public API additions (especially no `shapely/__init__.py` changes to attach submodules).
+
+---
+
+## Non-negotiable pitfalls to avoid
+- No regex/manual WKT rewriting in Python.
+- No polygon-only hacks: this must be a reader-level option applied by GEOS.
+- No global/shared reader state; options must be per call/instance.
+- No test that assumes `shapely.wkt` is an attribute on the `shapely` package object.
+
+Proceed now: add failing test, identify the GEOS setter, wire through C/ufunc safely with correct guards, rebuild, verify `lib.from_wkt.nin`, and run tests.

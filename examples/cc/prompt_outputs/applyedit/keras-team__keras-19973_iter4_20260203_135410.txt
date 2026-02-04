@@ -1,0 +1,83 @@
+You are given a code repository in the current directory.
+
+## Task (Bugfix + Regression Coverage)
+Fix **inconsistent validation behavior** in `keras.layers.MultiHeadAttention` when `query.shape[-1] != value.shape[-1]` under the **Torch backend**:
+
+- In **symbolic** usage (`keras.Input(...)` / KerasTensors), Keras raises:
+  > “The last dimension of `query_shape` and `value_shape` must be equal …”
+- In **eager** usage with **torch.Tensors**, the same mismatch currently does **not** reliably raise (it may silently proceed).
+
+The repository’s existing tests and current error message strongly indicate the intended contract is:
+> `query.shape[-1]` must equal `value.shape[-1]`.
+
+So **do not “fix” this by removing the check**. The goal is to make eager and symbolic behavior **consistent**, preserving the existing API contract.
+
+## What to deliver
+1. A minimal regression test that reproduces the inconsistency with:
+   - `KERAS_BACKEND="torch"`
+   - eager `torch.randn(...)` tensors
+   - symbolic `keras.Input(...)`
+2. A code fix that makes eager execution raise the **same ValueError** (or same message substring) when the last dims mismatch.
+3. Ensure existing contract tests remain (do not delete/loosen them). Add coverage; don’t remove validation.
+4. Run the relevant unit tests for MultiHeadAttention (not necessarily the whole suite if the environment is missing optional deps like `tf_keras`).
+5. Clean up any temporary scripts you created (but keep proper unit tests added to the repo).
+
+---
+
+## Important constraints / guidance (read carefully)
+### A. Preserve semantics
+- **Keep** the existing mismatch validation in shape inference paths (e.g., `compute_output_shape` / `compute_output_spec`).
+- Implement the **same validation for eager runtime** so eager tensors behave like symbolic tensors.
+- Do **not** change tests to accept mismatched dims. If a test expects an error for mismatch, it should still pass.
+
+### B. Reproduce the exact reported scenario
+Your repro must use:
+- `os.environ["KERAS_BACKEND"] = "torch"`
+- `import torch` and `import keras`
+- Eager tensors: `torch.randn(batch, seq_len, ...)`
+- Symbolic tensors: `keras.Input(shape=(seq_len, ...))`
+
+### C. Where the bug likely is
+Symbolic mode triggers shape checks during graph construction via output spec/shape inference.
+Eager mode may bypass those checks. The fix is likely adding a **runtime** validation early in `call()` and/or `build()`.
+
+Implement runtime validation like:
+- If both last dimensions are statically known (they will be for eager torch tensors), raise `ValueError` when unequal.
+- Keep the error message aligned with the existing one (reuse the same wording or at least a stable substring that tests can assert).
+
+Avoid heavy backend-specific runtime asserts; a simple Python-side check using `.shape` is sufficient for eager torch tensors because shapes are concrete.
+
+### D. Testing expectations
+- Restore/keep any existing test cases that assert mismatch errors (do not delete them).
+- Add a new test ensuring eager torch tensors raise on mismatch (this is the regression for the inconsistency).
+
+If the test suite has optional dependency issues (e.g., `ModuleNotFoundError: tf_keras`), run a narrower set of tests, e.g. the MultiHeadAttention test module(s), and ensure your added tests run in this environment.
+
+---
+
+## Step-by-step workflow you must follow
+1. **Inspect repo structure**: find the implementation of `MultiHeadAttention` and its tests.
+2. **Write a failing regression test first**:
+   - One test for symbolic KerasTensors mismatch (should already fail/raise; assert it does).
+   - One test for eager torch tensors mismatch (currently inconsistent; should fail before your fix).
+   - Ensure both tests set backend to torch appropriately (follow repo conventions for backend selection in tests).
+3. **Locate the validation** responsible for the symbolic error message (search the exact string).
+4. **Implement fix**:
+   - Add/centralize validation so it runs in eager execution too (likely in `call()` before projections).
+   - Keep existing `compute_output_shape` validation intact.
+5. **Run relevant tests** (at least MultiHeadAttention tests). Confirm:
+   - symbolic mismatch still raises
+   - eager mismatch now also raises
+   - no unrelated behavior change
+6. **Remove any temporary repro scripts**, but keep the added unit test(s).
+
+---
+
+## Acceptance criteria
+- Eager torch tensors with mismatched `query.shape[-1]` and `value.shape[-1]` raise a `ValueError` (matching symbolic behavior).
+- No removal/loosening of the existing contract checks.
+- Existing unit tests that assert mismatch errors remain valid.
+- New regression test added that would fail on the old behavior and passes with your fix.
+- Only repo code + proper tests are modified; no commits.
+
+Now proceed to implement the fix in the repository.

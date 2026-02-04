@@ -1,0 +1,91 @@
+The agent got “green” locally, but the change is subtly wrong and likely to fail in the full suite (and/or violates the prompt’s “same error message” requirement). Main issues:
+
+## 1) The new runtime error message is malformed (uses undefined f-string variables)
+In `call()` the agent added:
+
+```py
+raise ValueError(
+  "The last dimension of `query_shape` and `value_shape` "
+  f"must be equal, but are {d_query}, {d_value}. "
+  "Received: query_shape={query_shape}, value_shape={value_shape}"
+)
+```
+
+Problems:
+- The last string is **not** an f-string, so it literally contains `{query_shape}` and `{value_shape}` rather than actual shapes.
+- This means eager and symbolic messages are **not the same**, and any test that asserts the message includes actual shapes (or matches the exact message) will fail.
+- The original `compute_output_shape()` message also appears buggy in the repo (it also misses `f` on the “Received …” line). But the prompt explicitly asks eager to raise the **same** ValueError **or same message substring**. If the project already has tests checking the full message somewhere else, this mismatch will break them.
+
+**How to improve**
+- Centralize the message formatting in a helper and reuse it from both `compute_output_shape()` and `call()`, or
+- At minimum, make the runtime message include the same stable substring and avoid broken placeholders. E.g. include actual shapes with `query.shape`/`value.shape` or remove the “Received …” clause entirely and rely on the existing substring assertion.
+
+## 2) The runtime check is not backend-conditional (could change behavior beyond Torch)
+The task is specifically: “inconsistent validation … under the Torch backend … eager torch.Tensors”.
+The agent added the check unconditionally in `call()` for all backends.
+
+That can be acceptable if it preserves overall Keras contract, but it is risky:
+- Other backends might already raise earlier/differently (or support more flexibility), so adding a new eager-time ValueError could cause unrelated failures.
+- The prompt guidance suggested a Python-side check is sufficient “for eager torch tensors”; it didn’t ask to change TF/JAX behavior.
+
+**How to improve**
+- Gate the check on `backend.backend() == "torch"` and `isinstance(query, torch.Tensor)` / `isinstance(value, torch.Tensor)` (or a backend-agnostic check for “eager tensors”, but only under torch backend).
+
+## 3) The test module forces `KERAS_BACKEND` too late / in a nonstandard way
+The new test file does:
+
+```py
+os.environ["KERAS_BACKEND"] = "torch"
+torch = pytest.importorskip("torch")
+from keras.src import layers
+```
+
+This is fragile:
+- In the real test run, `keras` (or `keras.src.backend`) may already be imported by other tests before this module is imported; then setting `KERAS_BACKEND` here won’t switch anything.
+- Many Keras repos use a test utility / fixture to set backend before importing keras, or run separate CI shards with env var set at process start.
+
+**How to improve**
+- Follow repo conventions for backend selection (likely fixtures in `keras/src/testing` or `conftest.py`).
+- If no fixture exists, the safest pattern is: backend is set by the test runner environment, not inside the test file. The prompt explicitly requires the repro to use `os.environ["KERAS_BACKEND"]="torch"`—but in the actual unit suite you should ensure it happens **before importing keras** (potentially by using `monkeypatch` + `importlib.reload`, or by marking tests to run only in torch-backend jobs).
+
+## 4) The symbolic test does not actually validate the reported inconsistency
+The symbolic test uses:
+
+```py
+x = layers.Input(shape=(4, 8))
+y = layers.Input(shape=(2, 7))
+_ = mha(x, y)
+```
+
+But the prompt’s reported symbolic error is tied to KerasTensors and the layer’s `compute_output_spec` path. That’s OK, but:
+- The prompt asked for **keras.Input(...)** specifically; using `layers.Input` is probably fine but slightly off-spec.
+- More importantly, the key inconsistency described is: symbolic raises, eager torch sometimes doesn’t. The symbolic half is already covered elsewhere in existing tests (`test_shape_mismatch_error` only checks `compute_output_shape` though). The new symbolic test may be redundant and doesn’t ensure it’s exercising the exact codepath/message.
+
+**How to improve**
+- Use `import keras` and `keras.Input` explicitly (as requested).
+- Assert on a stable substring that matches the symbolic error message exactly as it appears when constructing graphs under torch backend.
+
+## 5) No demonstration that the eager failure existed before the fix
+The agent wrote the regression test after the fix and only ran it post-fix. There’s no evidence the test would fail on old code (important for a regression test). This is less about correctness and more about process, but it often correlates with brittle tests.
+
+**How to improve**
+- In the PR-level workflow: add the test first, confirm it fails on main, then fix.
+
+## 6) Better placement: validation should ideally be shared with `compute_output_shape`
+The runtime check is currently duplicated logic. If future changes adjust the contract/message, the two paths can drift again.
+
+**How to improve**
+- Add a small private method like `_validate_qv_last_dim(query_shape, value_shape)` used by both `compute_output_shape` and `call()` (and maybe `build()`), ensuring identical behavior/message.
+
+---
+
+### Net: why this may fail CI
+Most likely failures:
+1) Message mismatch / malformed “Received … {query_shape} …” content if any test asserts message details.
+2) Backend selection issues: the new torch-specific tests may run under non-torch backend in CI and fail or be skipped incorrectly, or fail because backend was already initialized before env var assignment.
+3) Unintended behavior change on non-torch backends due to unconditional runtime validation.
+
+To make the agent’s solution robust, it should:
+- Fix the error message formatting (no literal `{query_shape}` placeholders; ideally unify message generation).
+- Ensure the regression test reliably runs with torch backend by using repo backend test infrastructure (or by reloading keras after setting env var).
+- Consider scoping the eager-time validation to torch backend (or at least ensure it doesn’t break other backends).

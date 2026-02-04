@@ -1,0 +1,179 @@
+diff --git a/sphinx/texinputs/make.bat.jinja b/sphinx/texinputs/make.bat.jinja
+index da2805afd..275fd1232 100644
+--- a/sphinx/texinputs/make.bat.jinja
++++ b/sphinx/texinputs/make.bat.jinja
+@@ -1,50 +1,50 @@
+-@ECHO OFF
+-
+-REM Command file for Sphinx documentation
+-
+-pushd %~dp0
+-
+-{% if latex_engine in ('platex', 'uplatex') -%}
+-REM latexmkrc is read then overridden by latexmkjarc
+-set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
+-{% else -%}
+-set PDFLATEX=latexmk -pdf -dvi- -ps-
+-{% endif %}
+-set "LATEXOPTS= "
+-
+-{% if xindy_use -%}
+-set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
+-{% if latex_engine == 'pdflatex' -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
+-{% endif -%}
+-{% endif -%}
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
+-{% endif -%}
+-set XINDYOPTS=%XINDYOPTS% -I xelatex
+-{% endif -%}
+-
+-
+-if "%1" == "" goto all-pdf
+-
+-if "%1" == "all-pdf" (
+-	:all-pdf
+-	for %%i in (*.tex) do (
+-		%PDFLATEX% %LATEXMKOPTS% %%i
+-	)
+-	goto end
+-)
+-
+-if "%1" == "all-pdf-ja" (
+-	goto all-pdf
+-)
+-
+-if "%1" == "clean" (
+-	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
+-	goto end
+-)
+-
+-:end
+-popd
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++pushd %~dp0
++
++{% if latex_engine in ('platex', 'uplatex') -%}
++REM latexmkrc is read then overridden by latexmkjarc
++set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
++{% else -%}
++set PDFLATEX=latexmk -pdf -dvi- -ps-
++{% endif %}
++set "LATEXOPTS= "
++
++{% if xindy_use -%}
++set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
++{% if latex_engine == 'pdflatex' -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
++{% endif -%}
++{% endif -%}
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
++{% endif -%}
++set XINDYOPTS=%XINDYOPTS% -I xelatex
++{% endif -%}
++
++
++if "%1" == "" goto all-pdf
++
++if "%1" == "all-pdf" (
++	:all-pdf
++	for %%i in (*.tex) do (
++		%PDFLATEX% %LATEXMKOPTS% %%i
++	)
++	goto end
++)
++
++if "%1" == "all-pdf-ja" (
++	goto all-pdf
++)
++
++if "%1" == "clean" (
++	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
++	goto end
++)
++
++:end
++popd
+diff --git a/sphinx/util/inventory.py b/sphinx/util/inventory.py
+index 9065d31c9..c37192a34 100644
+--- a/sphinx/util/inventory.py
++++ b/sphinx/util/inventory.py
+@@ -155,12 +155,26 @@ class InventoryFile:
+                 # Some types require case insensitive matches:
+                 # * 'term': https://github.com/sphinx-doc/sphinx/issues/9291
+                 # * 'label': https://github.com/sphinx-doc/sphinx/issues/12008
++                #
++                # For 'std:term', if two definitions differ only by case but have
++                # different contents, they are considered ambiguous and a warning
++                # should be emitted. For 'std:label', however, HTML anchors are
++                # case-sensitive and projects may intentionally define labels that
++                # differ only by case (e.g. command options '-v' vs '-V'). In that
++                # case, do not emit a warning at inventory load time; ambiguity
++                # will be handled (and warned) during reference resolution if it occurs.
+                 definition = f"{type}:{name}"
+                 content = prio, location, dispname
+                 lowercase_definition = definition.lower()
+                 if lowercase_definition in potential_ambiguities:
+                     if potential_ambiguities[lowercase_definition] != content:
+-                        actual_ambiguities.add(definition)
++                        if type == 'std:term':
++                            actual_ambiguities.add(definition)
++                        else:
++                            # std:label case-insensitive duplicates with different content
++                            # are allowed; avoid warning at load time.
++                            logger.debug(__("inventory <%s> contains potentially ambiguous label %s"),
++                                         uri, definition, type='intersphinx',  subtype='external')
+                     else:
+                         logger.debug(__("inventory <%s> contains duplicate definitions of %s"),
+                                      uri, definition, type='intersphinx',  subtype='external')
+diff --git a/tests/test_util/intersphinx_data.py b/tests/test_util/intersphinx_data.py
+index 95cf80a9b..b0ee7d7ed 100644
+--- a/tests/test_util/intersphinx_data.py
++++ b/tests/test_util/intersphinx_data.py
+@@ -40,6 +40,9 @@ foo.bar.baz js:method 1 index.html#foo.bar.baz -
+ foo.bar.qux js:data 1 index.html#foo.bar.qux -
+ a term including:colon std:term -1 glossary.html#term-a-term-including-colon -
+ The-Julia-Domain std:label -1 write_inventory/#$ The Julia Domain
++# std:label entries that differ only by case should not cause load-time warnings.
++python--m-build--V std:label -1 index.html#python--m-build--V -
++python--m-build--v std:label -1 index.html#python--m-build--v -
+ ''')
+ 
+ INVENTORY_V2_NO_VERSION: Final[bytes] = b'''\
+diff --git a/tests/test_util/test_util_inventory.py b/tests/test_util/test_util_inventory.py
+index d01785fda..c48bb7906 100644
+--- a/tests/test_util/test_util_inventory.py
++++ b/tests/test_util/test_util_inventory.py
+@@ -40,6 +40,9 @@ def test_read_inventory_v2():
+         '/util/glossary.html#term-a-term'
+     assert invdata['std:term']['a term including:colon'][2] == \
+         '/util/glossary.html#term-a-term-including-colon'
++    # Case-differing std:label entries should both be present without ambiguities
++    assert invdata['std:label']['python--m-build--V'][2] == '/util/index.html#python--m-build--V'
++    assert invdata['std:label']['python--m-build--v'][2] == '/util/index.html#python--m-build--v'
+ 
+ 
+ def test_read_inventory_v2_not_having_version():
+@@ -57,6 +60,13 @@ def test_ambiguous_definition_warning(warning):
+     assert 'contains multiple definitions for std:term:b' in warning.getvalue().lower()
+ 
+ 
++def test_ambiguous_label_no_warning(warning):
++    # Ensure that case-differing std:label entries do not trigger load-time warnings
++    f = BytesIO(INVENTORY_V2)
++    InventoryFile.load(f, '/util', posixpath.join)
++    assert 'contains multiple definitions for std:label' not in warning.getvalue().lower()
++
++
+ def _write_appconfig(dir, language, prefix=None):
+     prefix = prefix or language
+     os.makedirs(dir / prefix, exist_ok=True)

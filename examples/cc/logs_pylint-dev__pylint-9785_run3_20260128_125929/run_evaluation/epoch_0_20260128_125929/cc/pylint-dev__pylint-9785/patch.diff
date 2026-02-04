@@ -1,0 +1,27 @@
+diff --git a/pylint/checkers/typecheck.py b/pylint/checkers/typecheck.py
+index 67852d38f..e5488dc26 100644
+--- a/pylint/checkers/typecheck.py
++++ b/pylint/checkers/typecheck.py
+@@ -1609,6 +1609,22 @@ accessed. Python regular expressions are accepted.",
+                 pass
+             elif not overload_function:
+                 # Unexpected keyword argument.
++                # Special-case typing's TypeVar and typing_extensions' backport which
++                # accept extra keywords like "default" (PEP 696) and "infer_variance".
++                # Astroid may not evaluate runtime guards in typing_extensions and can
++                # resolve to typing.TypeVar without these keywords, leading to false positives.
++                try:
++                    parent = getattr(called, "parent", None)
++                    is_typevar_like = (
++                        isinstance(parent, nodes.ClassDef)
++                        and parent.qname() in {"typing.TypeVar", "typing_extensions.TypeVar"}
++                    )
++                except Exception:
++                    is_typevar_like = False
++                if is_typevar_like and keyword in {"default", "infer_variance"}:
++                    # Allow these keywords unconditionally to avoid false positives
++                    # when using typing_extensions >= 4.12 where they are supported.
++                    continue
+                 self.add_message(
+                     "unexpected-keyword-arg", node=node, args=(keyword, callable_name)
+                 )

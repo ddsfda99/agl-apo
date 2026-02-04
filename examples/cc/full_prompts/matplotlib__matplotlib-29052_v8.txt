@@ -1,0 +1,127 @@
+You are an expert Python contributor working in the **Matplotlib** repository in the current directory.
+
+Your task is to **fix a bug** in `matplotlib.colors.LinearSegmentedColormap.from_list` and add **correct, robust regression tests**. This prompt is optimized based on prior failed attempts—follow it closely.
+
+---
+
+## Bug report (must reproduce and fix)
+
+**Title:** `colors.LinearSegmentedColormap.from_list` fails when using a `("<color>", alpha)` tuple
+
+### Summary
+`matplotlib.colors.LinearSegmentedColormap.from_list()` accepts either:
+1) a list of colors, or  
+2) a list of `(value, color)` pairs mapping scalar positions to colors.
+
+But when the **first element** is a 2-tuple like `("green", 0.0)` (a valid Matplotlib *color-with-alpha* spec), the current implementation **misclassifies** it as a `(value, color)` pair and raises:
+
+`ValueError: Invalid RGBA argument: 0.0`.
+
+### Reproducer
+```py
+import matplotlib
+matplotlib.colors.LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])
+```
+
+### Expected
+This should **not** raise.
+
+---
+
+## Critical constraints (based on previous failures)
+
+1) **Do not assert anything exact at `cmap(1.0)`**.  
+   Endpoint behavior can be quantized/implementation-dependent. Use `0.0`, `0.5`, and especially something like `0.999` instead.
+
+2) **Avoid overly strict floating comparisons for colormap output.**  
+   Colormaps use an LUT (typically 256 entries), so expect quantization. When comparing RGBA, use `np.testing.assert_allclose(..., atol=1/255)` or similar. Prefer comparing against `matplotlib.colors.to_rgba("green")` rather than hard-coded channel values.
+
+3) **Put the regression test in the right place.**  
+   Add the test to **`lib/matplotlib/tests/test_colors.py`** near other `LinearSegmentedColormap.from_list` tests. Do *not* create a brand new test module unless you absolutely must.
+
+4) **Keep the regression test focused on the reported bug.**  
+   Don’t add extra unrelated cases (e.g. grayscale) unless necessary. If you *do* add grayscale coverage, remember grayscale must be a **string** (e.g. `"0.42"`), not a float (`0.42`). But prefer skipping grayscale altogether here.
+
+5) The fix must focus on **classification logic**: deciding whether the input is “list of colors” vs “list of `(value, color)` pairs”.  
+   The key change: **only treat as `(value, color)` mapping if the entire sequence is uniformly of that form**, not just because the first element is a 2-tuple.
+
+6) Show the required workflow:  
+   - Add test first  
+   - Run it and confirm it fails on current code  
+   - Implement fix  
+   - Re-run and confirm it passes  
+   Use `pytest -q ... -k ...` and only run relevant tests.
+
+---
+
+## What to implement
+
+### A) Fix: robustly detect mapping mode
+Update `LinearSegmentedColormap.from_list` in `lib/matplotlib/colors.py` so that it only interprets entries as `(value, color)` pairs when the input sequence is **uniformly** of that form.
+
+**Desired behavior:**
+- Treat as mapping form only if **every** element in `colors` is a 2-sequence (e.g. tuple/list) and:
+  - `element[0]` is a **real number** position (use `numbers.Real`, and explicitly exclude `bool`), and
+  - `element[1]` is a color spec.
+
+**Important implementation guidance (performance + behavior):**
+- Do a **cheap structural pass first**:
+  - ensure every element is a 2-sequence and not a string/bytes
+  - ensure every first element is numeric (`numbers.Real` and not `bool`)
+- Avoid calling `is_color_like()` (which can be expensive) on **every** entry if you can; ideally:
+  - use the cheap checks above to decide “mapping mode”
+  - then proceed with existing conversion logic and let downstream `to_rgba` conversions validate colors as needed
+- Short-circuit quickly for non-uniform inputs.
+- Mixed lists: It’s OK if mixed lists still raise, but your change must at least prevent the specific misclassification of `("green", 0.0)` as `(value, color)`.
+
+**Key target:**  
+`from_list("test", [("green", 0.0), "green"])` must be treated as a **list of colors**, not a `(value, color)` mapping.
+
+---
+
+### B) Regression test (must be correct and robust)
+In `lib/matplotlib/tests/test_colors.py`, add a test that:
+
+1) **Fails on current main** (before your fix): it should reproduce the exception.
+2) **Passes after the fix**: it should confirm no exception and validate basic output.
+
+**Test requirements:**
+- Must assert that `LinearSegmentedColormap.from_list("test", [("green", 0.0), "green"])` does **not** raise.
+- Avoid exact equality of RGB channels due to LUT quantization.
+- Avoid `cmap(1.0)`. Use `0.0` and `0.999`.
+
+**Suggested robust assertions:**
+- `cmap = ...`
+- `rgba0 = cmap(0.0)`:
+  - Assert `rgba0[3] == 0.0` (alpha at start should be 0; this is generally stable)
+  - Compare `rgba0[:3]` to `to_rgba("green")[:3]` with `atol=1/255`
+- `rgba_hi = cmap(0.999)`:
+  - Assert `rgba_hi[3] > 0` (alpha should increase away from start)
+  - Optionally also check RGB close to green with `atol=1/255`
+
+Keep the test minimal and directly tied to the reported bug.
+
+---
+
+## Required execution steps (do these in order)
+
+1) **Add the regression test first** in `test_colors.py`.
+2) Run only that test and show it fails on unmodified code, e.g.:
+   ```bash
+   pytest -q lib/matplotlib/tests/test_colors.py -k from_list_tuple_alpha
+   ```
+3) Implement the fix in `lib/matplotlib/colors.py`.
+4) Re-run the same test command and confirm it passes.
+5) Ensure no stray temp files are left behind.
+
+Do **not** commit changes.
+
+---
+
+## Deliverable
+After your changes:
+- The reproducer no longer raises.
+- The newly added regression test passes.
+- Only the relevant tests were run during iteration.
+
+Proceed to implement in this repo now.

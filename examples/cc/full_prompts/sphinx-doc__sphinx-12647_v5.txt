@@ -1,0 +1,96 @@
+You are an expert Sphinx contributor working in the current directory (this is the Sphinx repository). Your goal is to fix a regression:
+
+Regression: CSS file added by an extension cannot be overridden by users anymore.
+
+Context: An extension (e.g., nbsphinx) uses Sphinx’s `add_css_file()` to add a CSS file such as `nbsphinx-gallery.css`. Users want to override that CSS by placing a file with the same name in their own `html_static_path` (e.g. `my-static-path/nbsphinx-gallery.css`). This used to work before commit `ae206694e68bea074aca633ea0d32e9ed882a95f` (first released in Sphinx 7.1.0). After that commit, the extension-provided CSS ends up “winning” and user overrides no longer take effect.
+
+You must implement a fix in Sphinx so that user-provided static files can override extension-provided CSS files again, while preserving correct behavior for non-conflicting assets.
+
+Non-negotiable: Do not commit changes.
+
+Operational constraints (follow strictly):
+1) If you cannot access remote model infrastructure (e.g., Azure auth errors), stop immediately and report that you cannot proceed due to missing credentials. Do not pretend to have run commands.
+2) Start by running tests to get concrete failures. Do not do broad exploratory reading first.
+3) Work in a tight loop: reproduce → failing test → minimal code inspection → patch → rerun tests.
+4) Keep changes minimal and add/adjust tests to lock in the intended behavior.
+5) Your added tests must run successfully under Sphinx’s pytest harness (testroot naming, extension imports, etc.). Do not add tests that fail at setup.
+
+What “fixed” means (expected behavior):
+- If a user places `nbsphinx-gallery.css` (or any CSS filename referenced via `add_css_file()`) in a directory listed in `html_static_path`, the built output must allow the user’s version to take effect.
+- Prefer the strongest, most direct behavior: the final built `_static/<name>.css` file content should be the user’s version when there is a name collision.
+- The fix must be generic: it must apply to any extension that uses `add_css_file()` and any user file in `html_static_path`.
+- The solution must not require changes in third-party extensions.
+
+Key guidance based on prior failures (must follow):
+- Do not mis-name test roots. In Sphinx tests, `@pytest.mark.sphinx(testroot='foo')` expects a directory at `tests/roots/test-foo/`. Do not include `test-` in the marker value.
+- If you add a local extension module in a test root (e.g., `myext.py` next to `conf.py`), you must make it importable by adding in `conf.py`:
+  - `import os, sys`
+  - `sys.path.insert(0, os.path.abspath('.'))`
+- Verify your new test runs in isolation before changing product code: `pytest -q path/to/test.py -k <testname>`.
+- The previous agent added a broken test and did not implement any product code change. You must do both: add a correct failing test, then patch Sphinx.
+
+Required approach:
+
+A. Reproduce with an automated test (correctly wired)
+1) Add a new pytest in the appropriate HTML builder test area (look under `tests/test_builders/` for HTML-related tests and mimic patterns there).
+2) Create a new test root directory under `tests/roots/` with the correct naming convention:
+   - If marker is `testroot='html-user-static-overrides-extension-css'` then directory must be:
+     - `tests/roots/test-html-user-static-overrides-extension-css/`
+3) In that test root, create:
+   - `conf.py`
+   - `index.rst`
+   - a user static directory (e.g., `_static_user/`) containing `example.css` with distinctive content, for example: `body { color: rgb(1, 2, 3); }`
+   - a tiny local extension module `myext.py` that simulates an extension providing a conflicting `example.css`
+4) The test must simulate the real failure mode:
+   - The extension registers the CSS via `app.add_css_file('example.css')`
+   - The extension also provides an `example.css` static asset in its own “static” directory and ensures it gets copied to `_static/` during build.
+   - Do not rely on undocumented behavior; follow established Sphinx patterns used by built-in extensions. Two acceptable simulation strategies:
+     - Preferred: in `myext.setup(app)`, call `app.add_css_file('example.css')` and `app.config.html_static_path.append(<extension_static_dir>)` during `config-inited` (mirrors what graphviz-like extensions have historically done).
+     - Alternatively, if there is a more direct API for extension static assets in this Sphinx version, use it, but keep it minimal and test-focused.
+5) Configure the user project such that:
+   - `html_static_path` initially includes the user static directory first (e.g., `['_static_user']`).
+   - The extension then adds its own static path after, which in the regression causes overwrite.
+6) Assertions (prefer file-content-based):
+   - Build HTML and assert that `outdir / '_static' / 'example.css'` exists and its content equals the user’s file content, not the extension’s.
+   - Also optionally assert that the HTML contains a link to `_static/example.css` (sanity check), but the key is output file content.
+
+B. Identify and implement the fix in product code (must actually change Sphinx)
+1) After you have a test that fails on current code, inspect the minimal relevant code path only:
+   - Where HTML builder copies static files from `html_static_path`
+   - Where conflicts are handled (overwrite vs skip)
+   - Likely functions include `copy_html_static_files`, `copy_static_files`, and/or `sphinx/util/fileutil.py` functions such as `copy_asset` and friends.
+2) Determine why extension-provided assets are overwriting user assets:
+   - It is likely due to copy order or new “overwrite” behavior introduced around the referenced regression commit.
+3) Implement minimal, safe behavior:
+   - When multiple static sources copy to the same destination path under `_static/`, user-provided assets (those coming from the original `conf.py` `html_static_path`, not those appended by extensions later) must win.
+   - There are two viable implementation options; pick the least invasive:
+     - Option 1 (often safest): When copying assets, if the destination file already exists, do not overwrite it when the incoming source is from an extension-provided static dir; this preserves the earlier “user wins” behavior even if copy order changed.
+     - Option 2: Ensure user static paths are copied last regardless of extension modifications, but be careful: `html_static_path` may already contain a mix of user and extension paths, and Sphinx may not track origin. If you cannot reliably separate them, prefer Option 1.
+4) Logging policy:
+   - Avoid noisy warnings in normal builds.
+   - If there is currently an overwrite warning, adjust only if needed for tests. Acceptable: skip overwrite silently or at debug/info level when skipping an extension file because a user file already exists.
+5) Keep behavior unchanged when there is no conflict.
+
+C. Validate in a tight loop
+1) Run your new test alone until it passes:
+   - `pytest -q tests/test_builders/<your_test_file>.py -k <your_test_name>`
+2) Run the relevant HTML builder tests subset (directory-level).
+3) Finally run `pytest -q` if feasible.
+
+Implementation hints you may use (but still rely on the test):
+- Use `git show ae206694e68bea074aca633ea0d32e9ed882a95f` to understand what changed, but do not “fix by guess”. Let the failing test guide you.
+- There are existing tests around static copying and overwrite behavior; locate and mimic them. Look for test roots and tests mentioning `copyasset`, `static`, or `overwrite`.
+- Ensure your new test root and extension import follow established patterns:
+  - Test root directory must be `tests/roots/test-.../`
+  - `conf.py` must add current directory to `sys.path` to import `myext`
+
+Deliverables:
+- A new pytest (and corresponding test root files) that fails before the fix and passes after.
+- A minimal production code change in Sphinx restoring user override behavior for extension-added CSS/static assets with the same relative name.
+- Evidence via test runs (commands you ran and summarized output) that the fix works.
+
+Now proceed exactly in this order:
+1) Run a focused subset of tests to orient yourself (at least `pytest -q` for HTML builder tests or a small subset).
+2) Add the reproduction test + correctly named test root + importable local extension; run it to confirm it fails for the right reason (not test setup failures).
+3) Implement the minimal Sphinx code change that makes the test pass.
+4) Rerun tests and iterate until green.

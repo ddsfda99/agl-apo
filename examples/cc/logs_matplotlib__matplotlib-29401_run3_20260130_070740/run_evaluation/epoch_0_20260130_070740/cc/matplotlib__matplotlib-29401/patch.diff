@@ -1,0 +1,41 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index 768e39e912..f1f550ed54 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -3853,7 +3853,7 @@ class Axes(_AxesBase):
+             (data_line, tuple(caplines), tuple(barcols)),
+             has_xerr=(xerr is not None), has_yerr=(yerr is not None),
+             label=label)
+-        self.containers.append(errorbar_container)
++        self.add_container(errorbar_container)
+ 
+         return errorbar_container  # (l0, caplines, barcols)
+ 
+diff --git a/lib/matplotlib/tests/test_container.py b/lib/matplotlib/tests/test_container.py
+index 1e4577c518..f2aded0c5a 100644
+--- a/lib/matplotlib/tests/test_container.py
++++ b/lib/matplotlib/tests/test_container.py
+@@ -35,3 +35,23 @@ def test_nonstring_label():
+     # Test for #26824
+     plt.bar(np.arange(10), np.random.rand(10), label=1)
+     plt.legend()
++
++
++def test_errorbar_remove_updates_legend():
++    # Regression test for issue where removing ErrorbarContainer didn't
++    # update Axes.containers, leaving stale legend entries.
++    fig, ax = plt.subplots()
++    eb1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
++    # Initial legend labels should include 'foo'.
++    handles, labels = ax.get_legend_handles_labels()
++    assert labels == ["foo"]
++
++    # Remove the first errorbar; this should remove its container from ax.containers.
++    eb1.remove()
++
++    # Add a second errorbar with a different label.
++    ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
++
++    # Legend labels should only include 'bar', not the removed 'foo'.
++    handles, labels = ax.get_legend_handles_labels()
++    assert labels == ["bar"]

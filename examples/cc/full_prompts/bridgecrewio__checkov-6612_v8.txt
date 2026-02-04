@@ -1,0 +1,170 @@
+You are given a code repository in the current directory.
+
+## Task
+Fix a crash in Checkov when scanning Terraform `aws_wafv2_web_acl` resources that contain **multiple** `dynamic "rule"` blocks.
+
+### Reported issue
+When **2 dynamic WAF `rule` blocks** are defined, Checkov crashes with:
+
+`AttributeError: 'int' object has no attribute 'get'`
+
+Debug output shows the parsed entity configuration includes placeholder integers inside `rule` / `statement` lists, e.g.:
+
+- `conf["rule"]` contains entries like `{'action': [1], 'name': [1], 'priority': [1], 'statement': [1], ...}`
+- and then also real dict rules coming from the dynamic blocks.
+
+This causes checks such as:
+- `CKV_AWS_192` (`WAFACLCVE202144228`)
+- `CKV_AWS_342` (`WAFRuleHasAnyActions`)
+to do `statement.get(...)` on an `int`.
+
+---
+
+## Critical constraints (must satisfy)
+1. **You must run tests in this environment and show they pass.**
+   - `pytest` is NOT available.
+   - Do NOT run the full repo test suite if it can’t run here (prior attempts hit massive import errors).
+   - You must first inspect the repo to find a runnable `unittest` discovery scope. If needed, run only a narrow subset (e.g., under `tests/terraform/...`) so it executes in this environment.
+
+2. **Do not “fix” by skipping invalid items in a way that changes PASS/FAIL semantics.**
+   - Placeholder-only / partially-placeholder configs must not incorrectly return `PASSED`.
+   - The correct behavior for “not reliably scannable due to placeholders” is **UNKNOWN**.
+
+3. **Preserve known behavior:**
+   - With **one** dynamic `rule`, CKV_AWS_192 previously returned **UNKNOWN** (and did not crash).
+   - With **two** dynamic `rule`s, it crashed.
+   - Your fix must stop the crash and keep ambiguous/dynamic cases as **UNKNOWN** (not silently PASS/FAIL).
+
+4. **Reproduction test must be deterministic and not rely on Terraform parser output.**
+   - Do **not** generate `.tf` and hope the parser produces placeholders.
+   - Instead, craft a `conf` dict with placeholder `int`s exactly like the debug output and call `scan_resource_conf(conf)` directly.
+
+5. **No brittle stubbing / import hacks.**
+   - Do NOT stub `yaml`, `dpath`, or Checkov packages in the test.
+   - Do NOT use `importlib.util.spec_from_file_location` to bypass package imports.
+   - Fix underlying import-time optional dependency issues in the codebase if they prevent importing the real check classes.
+
+6. **Python version compatibility**
+   - Assume Python 3.8. Do not use `X | Y` union syntax, pattern matching, etc.
+
+7. **No temporary files left behind.**
+   - New unit tests are fine and should remain.
+   - No scratch `.tf` or debug artifacts.
+
+---
+
+## Required workflow (follow in order)
+
+### (1) Find a runnable unittest scope FIRST
+Before writing code, inspect `tests/` to identify how tests are organized.
+
+Then determine a discovery command that works in this environment. Try progressively narrower discovery commands until one runs:
+
+Examples (choose what fits repo structure):
+- `python -m unittest discover -s tests -p "test*.py" -q`
+- If that fails due to missing optional deps, narrow:
+  - `python -m unittest discover -s tests/terraform -p "test*.py" -q`
+  - `python -m unittest discover -s tests/terraform/checks -p "test*.py" -q`
+  - `python -m unittest discover -s tests/terraform/checks/resource -p "test*.py" -q`
+  - `python -m unittest discover -s tests/terraform/checks/resource/aws -p "test*.py" -q`
+
+**You must end up with a command that runs successfully in this environment.**  
+If there are currently zero runnable tests, you may create a new isolated test package/folder under `tests/` and run discovery against only that folder (still using `unittest discover`), but it must import real Checkov code normally (no stubs).
+
+### (2) Fix import-time dependency failures properly (if they block tests)
+Prior attempts failed because importing Checkov modules triggered missing deps like `yaml` and `dpath`. You must not stub these in tests.
+
+Instead:
+- Identify the import chain that fails when importing the target check modules.
+- Apply a minimal, correct code change so Checkov can be imported without those optional deps **at import time**.
+
+Strong hint from prior failures:
+- `checkov.common.util.type_forcers` imports `yaml` unconditionally; this breaks environments without PyYAML.
+- Make this safe by using a **lazy import** inside only the function(s) that truly need YAML (or otherwise guard the import so the module import does not fail).
+- Ensure behavior is preserved when PyYAML is installed (no regression).
+- Do not add new dependencies.
+
+Only do this if required to import the checks and run your new unit tests.
+
+### (3) Understand the failing code paths (the actual crash)
+Locate and review these files:
+- `checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py` (CKV_AWS_192)
+- `checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py` (CKV_AWS_342)
+
+Identify exactly where they assume list entries are dicts and call `.get()`.
+
+Also check if they use helpers like `force_list()` that might drag in problematic imports (and/or behave poorly with placeholders).
+
+### (4) Add deterministic unit tests (unittest) that reproduce the previous crash
+Add new `unittest` test module(s) under the runnable tests scope you found in step (1).
+
+The tests must:
+- Craft a `conf` dict for an `aws_wafv2_web_acl` with:
+  - `conf["rule"]` being a list containing:
+    - at least one **placeholder** rule dict like `{"name":[1], "priority":[1], "statement":[1], "action":[1]}` (mimics parser placeholders)
+    - at least one **real** rule dict with `statement` structured as a list, containing at least one placeholder `int` item inside the list (e.g. `statement: [1, {"managed_rule_group_statement":[...]}]`) to trigger the exact former `.get()` on int path
+- Call `scan_resource_conf(conf)` directly on:
+  - CKV_AWS_192 class instance
+  - CKV_AWS_342 class instance
+- Assert:
+  - no exception is raised
+  - result is **CheckResult.UNKNOWN** when placeholders prevent reliable evaluation
+
+Also add an additional edge test for each check:
+- `conf["rule"]` exists but **all** entries are placeholders / unparseable → must be **UNKNOWN** (not PASSED)
+
+Make assertions explicit and strong:
+- `self.assertEqual(result, CheckResult.UNKNOWN)`
+
+### (5) Implement the fix with semantic preservation
+Implement minimal defensive logic in the checks (or shared helper if safe) to prevent `.get()` on non-dicts, while preserving results.
+
+#### Required logic pattern (both checks)
+- `rules = conf.get("rule")`
+- Normalize to list safely **without** pulling in problematic imports if that’s an issue (avoid `force_list` if it causes import failures; implement local normalization).
+- `real_rules = [r for r in rules if isinstance(r, dict)]`
+- `has_placeholders = any(not isinstance(r, dict) for r in rules) or any(isinstance(r, dict) and any(isinstance(x, int) for x in ...) ...` (as appropriate)
+- If `rules` exists but `real_rules` is empty → return `UNKNOWN`
+- While iterating nested structures:
+  - never call `.get()` unless `isinstance(obj, dict)`
+  - if required fields are lists that contain non-dicts (ints/placeholders), treat as “cannot fully evaluate” and ensure final result becomes `UNKNOWN` unless you can **definitively** fail based on real data.
+
+#### CKV_AWS_342 semantic rules (must follow)
+This check validates that WAF rules have an action (or override_action). You must not “pass by default” when placeholders exist.
+
+Implement evaluation as:
+- If any real rule definitively violates policy based on real data → `FAILED`
+- Else if placeholders/unparseable parts exist that prevent confirming compliance → `UNKNOWN`
+- Else (all evaluated real rules are definitively compliant and no ambiguity) → `PASSED`
+
+#### CKV_AWS_192 semantic rules (must follow)
+This check looks for Log4j mitigation managed rule group (or similar). For ambiguous/dynamic placeholders:
+- If placeholders prevent determining presence/absence → `UNKNOWN` (matches historical “one dynamic rule → UNKNOWN”)
+- Only return `FAILED` if you can confidently determine noncompliance from well-formed, fully-parsed statements (no placeholder ambiguity blocking the conclusion)
+- Do not change behavior for clearly well-formed configs.
+
+### (6) Run tests (must be executed) and confirm
+Run the exact runnable discovery command you identified in step (1), including your new tests.
+
+Example (if you made an isolated folder):
+- `python -m unittest discover -s tests/<your_folder> -p "test*.py" -q`
+
+All executed tests must pass.
+
+### (7) Keep changes minimal and clean
+- No unrelated refactors.
+- No new dependencies.
+- No temporary files.
+- Do not commit edits.
+
+---
+
+## Deliverable
+Implement the fix and add deterministic `unittest` coverage so that:
+- Checkov no longer crashes scanning `aws_wafv2_web_acl` with multiple dynamic `rule` blocks producing placeholder `int`s
+- CKV_AWS_192 and CKV_AWS_342 return **UNKNOWN** (not crash, not incorrect PASS/FAIL) when placeholder data prevents reliable evaluation
+- Your tests run and pass in this environment via `python -m unittest discover ...` using a runnable scope you determined
+
+Include in your final response:
+- The exact unittest command you ran successfully
+- A brief note of which files you changed and why (1-2 lines each)

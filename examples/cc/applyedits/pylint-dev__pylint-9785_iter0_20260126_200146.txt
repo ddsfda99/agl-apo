@@ -1,0 +1,119 @@
+Objective
+Fix Pylint’s false-positive E1123: unexpected-keyword-arg when calling typing_extensions.TypeVar with PEP 696/695 keywords default and infer_variance introduced in typing_extensions 4.12.0, and ensure the checker also correctly handles import styles and Python 3.12’s stdlib typing.TypeVar. Add focused tests that reproduce the issue without triggering unrelated messages. Do not commit any changes.
+
+Background and constraints from prior attempts
+- The previous attempt added a special-case in TypeChecker.visit_call but initially used brittle logic that assumed TypeVar was a class method. The correct approach is to inspect the call site node.func and its expression.
+- The test initially failed due to missing-module-docstring. Functional tests must include a module docstring or disable unrelated messages.
+- The logic only handled te.TypeVar(...). It must also handle from typing_extensions import TypeVar and calls written as TypeVar(...).
+- In Python 3.12+, typing.TypeVar natively accepts default and infer_variance. The checker should accept these keywords when the target Python version is 3.12+.
+- Avoid broad exception handling. Use safe_infer and handle astroid’s expected None returns instead of catching Exception.
+- Compute inference once per call and reuse it.
+
+Steps
+1) Understand the failure and intended behavior
+- With typing_extensions==4.12.0, users can write:
+  - import typing_extensions as te; T = te.TypeVar("T", default=int, infer_variance=True)
+  - from typing_extensions import TypeVar; U = TypeVar("U", default=str)
+- Pylint 3.2.1 currently raises E1123 for default and infer_variance.
+- Expected: No E1123 for these recognized keywords for typing_extensions.TypeVar 4.12+.
+- Additionally: For Python 3.12+, typing.TypeVar should also permit these keywords. For lower Python versions, stdlib typing.TypeVar should still error for these keywords.
+
+2) Write minimal reproduction tests
+Add functional tests that:
+- Do not trigger unrelated messages: include a module-level docstring at the top of each test file, or explicitly disable unrelated messages if needed.
+- Cover both import forms for typing_extensions.TypeVar:
+  - Attribute call: import typing_extensions as te; te.TypeVar(...)
+  - Name call: from typing_extensions import TypeVar; TypeVar(...)
+- Verify that default and infer_variance are accepted and produce no E1123.
+- Add a negative test to ensure we still emit E1123 for unknown keywords to avoid over-suppression.
+- Optionally: Add a stdlib typing.TypeVar test gated by Python version to verify we accept those keywords when running under Python 3.12+, but avoid making tests fail under 3.11. If the functional test harness doesn’t support version-gating, omit this and rely on code coverage.
+
+Example test contents:
+- test_typing_extensions_typevar_ok_attr.py
+  - Module docstring.
+  - import typing_extensions as te
+  - T1 = te.TypeVar("T1", default=int)
+  - T2 = te.TypeVar("T2", default=str, infer_variance=True)
+  - Expected: no messages
+- test_typing_extensions_typevar_ok_name.py
+  - Module docstring.
+  - from typing_extensions import TypeVar
+  - U1 = TypeVar("U1", default=int)
+  - U2 = TypeVar("U2", default=str, infer_variance=True)
+  - Expected: no messages
+- test_typing_extensions_typevar_bad_kw.py
+  - Module docstring.
+  - from typing_extensions import TypeVar
+  - V = TypeVar("V", foo=42)
+  - Expected: E1123 on foo
+
+Place these under the repository’s functional tests directory consistent with existing structure, and specify expected outputs as needed by the test harness. If the functional testing framework expects expected.txt or inline pragmas, follow existing patterns. Ensure no missing-module-docstring or other unrelated messages appear.
+
+3) Locate the checker that emits E1123
+- The message E1123: unexpected-keyword-arg is emitted by the type-checker in pylint/checkers/typecheck.py, likely in TypeChecker.visit_call or helper methods that validate call signatures.
+
+4) Implement the fix carefully and narrowly
+- Goal: Suppress E1123 only for the extra keywords default and infer_variance when the call target is typing_extensions.TypeVar, and for typing.TypeVar only when the target Python version is >= 3.12.
+- Handle both import forms:
+  - Attribute call: node.func is an astroid.nodes.Attribute with attrname == "TypeVar". safe_infer(node.func.expr) should yield a Module with qname "typing_extensions" or "typing".
+  - Name call: node.func is an astroid.nodes.Name referring to a function or object whose qname resolves to "typing_extensions.TypeVar" or "typing.TypeVar".
+    - Use helpers.safe_infer(node.func). The result may be None. If present, check qname() or module name and attribute name. If the inferred object lacks qname, fall back to checking the frame’s module and the name.
+- Determine target Python version:
+  - Use the linter’s configured target version (e.g., self.linter.config.py_version or similar) if available in the checker instance to decide whether typing.TypeVar should accept default and infer_variance. If the linter-configured version is >= (3, 12), allow the stdlib typing.TypeVar keywords; otherwise, do not.
+- Allowed extra keywords set: {"default", "infer_variance"}.
+- Integration point in visit_call:
+  - Compute the set/list of unexpected keyword arguments as currently done.
+  - If the call target matches typing_extensions.TypeVar, filter out any entries among the allowed set from the unexpected list. Do not suppress unrelated unknown keywords.
+  - If the call target matches typing.TypeVar and configured py_version >= (3, 12), similarly filter out allowed keywords.
+  - Only emit E1123 for whatever unexpected keywords remain after filtering.
+- Do not use broad exceptions; prefer safe_infer and simple attribute checks. If inference returns None, treat it as “not a special TypeVar call” and proceed with default behavior.
+- Compute inference once per call and reuse:
+  - Cache inference of node.func and node.func.expr (for Attribute) so you don’t recompute inside loops.
+
+Pseudocode sketch for detection logic inside visit_call:
+- def _is_typevar_from_module(node.func, module_name):
+    - If isinstance(func, Attribute) and func.attrname == "TypeVar":
+        - mod = safe_infer(func.expr)
+        - return isinstance(mod, nodes.Module) and mod.qname() == module_name
+    - If isinstance(func, Name):
+        - target = safe_infer(func)
+        - If target is not None:
+            - If hasattr(target, "qname"): return target.qname() == f"{module_name}.TypeVar"
+            - Else if hasattr(target, "root") and hasattr(target.root(), "qname"): return target.root().qname() == module_name and func.name == "TypeVar"
+    - return False
+- Determine:
+    - is_te_typevar = _is_typevar_from_module(node.func, "typing_extensions")
+    - is_stdlib_typevar = _is_typevar_from_module(node.func, "typing")
+    - allow_keywords = set()
+    - if is_te_typevar: allow_keywords |= {"default", "infer_variance"}
+    - if is_stdlib_typevar and py_version >= (3, 12): allow_keywords |= {"default", "infer_variance"}
+- When computing unexpected keyword args, filter out names that are in allow_keywords before reporting.
+
+Notes:
+- Keep the logic narrowly scoped to only those two keywords for TypeVar.
+- Do not blanket ignore E1123 for TypeVar; still report for unknown keywords like foo.
+
+Optional future-proofing (only if quick and safe):
+- typing_extensions may support similar PEP 696 behavior for other type parameter constructs (ParamSpec, TypeVarTuple). If you can confirm in typing_extensions 4.12.0 that these accept default or infer_variance, you can extend the same logic for those names. Otherwise, keep the change limited to TypeVar for safety.
+
+5) Run tests
+- Run the new functional tests individually to confirm the reproduction and the fix.
+- Run the whole test suite to ensure no regressions.
+- If the test harness reports missing-module-docstring or other unrelated messages in your new tests, add a module docstring at the top of the test files or disable those messages locally within the test file to keep the expected outputs clean.
+
+6) Debug if needed
+- If inference fails to recognize from typing_extensions import TypeVar calls, refine the Name handling branch: inspect target.qname() when available, or verify that the inferred node’s root module is typing_extensions and the name is TypeVar.
+- Ensure the logic only filters allowed keywords and does not suppress other E1123 cases.
+
+7) Clean up
+- Keep the functional tests you added if they are stable and useful. Remove any ad-hoc scratch files or temporary test scripts used during development.
+- Do not commit your edits.
+
+Acceptance criteria
+- For typing_extensions==4.12.0:
+  - No E1123 is emitted for default and infer_variance in calls to typing_extensions.TypeVar, regardless of whether it’s called via te.TypeVar(...) or via a direct import TypeVar(...).
+  - E1123 is still emitted for unknown keyword arguments to TypeVar, e.g., foo=42.
+- For Python 3.12+ target version:
+  - No E1123 for default and infer_variance in calls to typing.TypeVar.
+- All existing tests pass, and the new tests pass.
+- The implementation uses narrow, explicit inference checks, avoids broad exception handling, and computes inference at most once per call.

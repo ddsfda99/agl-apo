@@ -1,0 +1,72 @@
+## What the agent did vs. why it “failed”
+
+From the trace, the agent implemented a plausible fix (register the `ErrorbarContainer` via `Axes.add_container()` so `.remove()` also removes it from `ax.containers`, which legend discovery uses). That change is likely correct.
+
+The *failure* is almost certainly **test integration / repo hygiene**, not the core fix:
+
+### 1) The new test file is not part of the test suite
+They created:
+
+- `lib/matplotlib/tests/test_errorbar_legend_remove.py`
+
+But Matplotlib’s test packaging in this repo is controlled by `lib/matplotlib/tests/meson.build`, which explicitly lists every python test file to install/run. The trace shows `meson.build` has a hardcoded `python_sources = [...]` list and **does not include** the new file.
+
+So in CI (or in the harness that runs “all tests”), one of these will happen:
+
+- The new test **won’t run at all**, meaning the bug could still be detected by some existing test elsewhere (or by hidden tests) without the safety net you intended.
+- Or the harness expects tests to be discoverable/installed and may flag unexpected/uninstalled files depending on how it runs.
+
+**How to improve:**
+- Add `test_errorbar_legend_remove.py` to `lib/matplotlib/tests/meson.build`’s `python_sources` list **or**
+- Prefer adding the regression to an existing file already listed (e.g. `test_container.py`), which avoids build-system bookkeeping.
+
+### 2) The regression test is fragile / possibly incorrect in some scenarios
+The added test asserts:
+
+```py
+handles, labels = ax.get_legend_handles_labels()
+assert labels == ["bar"]
+```
+
+This can be brittle because legend auto-detection can include other labeled artists depending on defaults, style changes, or future behavior. Also the test creates a `fig` but never uses it; that’s fine but not necessary.
+
+**Safer assertions:**
+- Assert `"foo" not in labels` and `"bar" in labels`, rather than exact equality.
+- Or explicitly call `ax.legend()` and inspect legend texts if that’s the true user-facing behavior.
+
+### 3) The agent introduced an untracked file and initially an extra directory
+They created an accidental `.claude/` directory (they later removed it) and left an untracked test file. In many evaluation harnesses, untracked files are expected (because you add tests), but accidental directories often are not. They cleaned `.claude`, so that part is OK, but it demonstrates a process issue: always check `git status` earlier.
+
+### 4) Missed using `add_container` consistently across the codebase (potential hidden test)
+They fixed only 2D `Axes.errorbar`. Hidden tests might check parity with 3D (`mpl_toolkits/mplot3d/axes3d.py`) or pyplot wrappers. If 3D errorbar constructs an `ErrorbarContainer` and appends directly, the same `.remove()`/legend issue could exist there too.
+
+The agent explicitly said “no 3D changes per request” — but the original task (not shown in the trace) likely did *not* restrict scope. If hidden tests cover 3D, this would fail.
+
+**How to improve:**
+- Search for other `containers.append(ErrorbarContainer(...))` patterns and standardize to `add_container`.
+- At least audit `axes3d.Axes3D.errorbar`.
+
+### 5) Minor API consistency issue: bypassing `add_container` also bypasses label normalization
+`Axes.add_container` ensures default labels and sets `_remove_method`. The agent fixed that for errorbar. But their earlier analysis should have noticed that `errorbar` previously did:
+
+```py
+self.containers.append(errorbar_container)
+```
+
+instead of `self.add_container`.
+That’s correct to fix, but they should also ensure there aren’t side effects: `errorbar` already sets `label=label` on the container and uses `_nolegend_` on child lines. That’s fine; however, hidden tests may validate container labeling behavior similar to other plotting calls.
+
+## Concrete changes needed to “pass all tests”
+
+1) **Integrate the new test into the suite**
+   - Either add the file to `lib/matplotlib/tests/meson.build` `python_sources`, or move the test into `test_container.py` (which is already listed).
+2) **Make the test less brittle**
+   - Replace `assert labels == ["bar"]` with membership checks.
+3) **Audit 3D errorbar (likely hidden test coverage)**
+   - Ensure `mpl_toolkits/mplot3d/axes3d.py` uses `add_container` (or equivalent) when creating `ErrorbarContainer`.
+
+## Process improvements for the agent
+
+- After adding any new test file, immediately check whether the repo uses an explicit test manifest (here: `meson.build`), and update it.
+- Prefer adding small regression tests to existing test modules when the build system enumerates files.
+- Anticipate hidden tests by scanning for other call sites with the same anti-pattern (direct `.containers.append`), especially in sibling implementations (2D vs 3D).

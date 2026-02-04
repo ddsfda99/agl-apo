@@ -262,6 +262,9 @@ class CodingAgent(LitAgent):
         # empty patch
         if prediction["model_patch"] in ["", None]:
             return reward
+        if os.getenv("CC_SKIP_EVAL", "").lower() in {"1", "true", "yes"}:
+            _logging.info("CC_SKIP_EVAL enabled; skipping evaluation.")
+            return reward
 
         instance_id = prediction["instance_id"]
         instance = self.dataset.get(instance_id)

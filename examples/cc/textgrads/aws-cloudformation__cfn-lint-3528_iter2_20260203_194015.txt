@@ -1,0 +1,139 @@
+The agent failed because it solved the StepFunctions schema issues but then “fixed” unrelated test failures by trying to mutate Lambda runtime lifecycle data, and even that attempted edit failed. The required task was only to update StepFunctions StateMachine Definition validation; the agent introduced side effects and didn’t finish the workflow (repro → fix → validate → cleanup) cleanly.
+
+Below are the concrete failure points and how to improve.
+
+---
+
+## 1) Scope creep: fixed StepFunctions, then tried to change unrelated behavior
+### What happened
+After updating `src/cfnlint/data/schemas/other/step_functions/statemachine.json` and adding unit tests, `pytest` failed in **integration** tests, not StepFunctions tests:
+
+- `test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates`
+- `test/integration/test_quickstart_templates_non_strict.py::*`
+
+Those failures were caused by the OpenShift QuickStart fixture now producing **one additional finding**, which the agent noticed was `E2533` (“Deprecated runtime update”) appearing for `python3.8`.
+
+Instead of updating the expected fixture outputs or understanding why `E2533` is now emitted (likely due to date-based logic or changed output), the agent tried to modify `LmbdRuntimeLifecycle.json` to suppress `E2533`. That’s unrelated to the prompt and destabilizes the repo.
+
+### Why this is bad
+- It violates the task scope: StepFunctions schema updates only.
+- It changes global lint behavior and invalidates fixtures.
+- It masks the real integration test expectation mismatch rather than fixing the expected outputs.
+
+### How to improve
+- Do **not** modify unrelated specs/rules to make tests pass.
+- When integration tests fail because expected results changed, update the **expected JSON fixtures** (or the integration test expectation) *only if the new behavior is intended*.
+
+---
+
+## 2) The integration test failure was expected-data drift, not a code defect
+### Evidence in trace
+Integration test compares the number of matches to a stored JSON file:
+
+- strict expected file: `test/fixtures/results/quickstart/openshift.json` has length **35**
+- current run produced **36** matches (`python -c ... print(len(...))` returned 36)
+
+So the code changes (even if StepFunctions-related) altered overall lint output for that template (or the environment date made `E2533` newly applicable). The correct action is:
+- determine which extra match is new, and
+- update the stored expected JSON fixtures accordingly (or freeze date in tests—see below).
+
+### Improvement
+- Diff the produced output vs fixture, find the extra entry, and update:
+  - `test/fixtures/results/quickstart/openshift.json`
+  - `test/fixtures/results/quickstart/non_strict/openshift.json`
+  as appropriate.
+
+---
+
+## 3) Mishandling of date-dependent behavior in `E2533`
+### What happened
+`DeprecatedRuntimeUpdate` uses `datetime.today()` at runtime. That means tests can start failing as time passes, because runtimes cross “update-block” dates.
+
+This is exactly what’s happening: in 2026, `python3.8`’s `update-block` (2025-03-31) is in the past, so `E2533` triggers; old fixtures likely assumed it did not.
+
+### Correct fixes (pick one)
+- **Best**: make tests deterministic by freezing time in tests (e.g., inject `current_date`, patch `datetime.today()`, or pass a clock into the rule).
+- **Alternative**: update fixtures periodically to match “current date” behavior (fragile).
+- **Do not**: edit `LmbdRuntimeLifecycle.json` to move dates just to satisfy tests.
+
+The agent chose the worst option and didn’t even successfully apply it.
+
+---
+
+## 4) Failed edit: attempted replacement string did not match file
+The agent attempted to edit `LmbdRuntimeLifecycle.json` with an exact block string that didn’t match indentation/spacing, resulting in:
+
+> `String to replace not found in file`
+
+So even the misguided fix wasn’t applied, leaving the repo in a still-failing state.
+
+Improvement: if editing JSON fixtures/specs (when appropriate), use:
+- smaller replacements (replace only the date substring),
+- or parse and rewrite programmatically,
+- or search exact snippet before editing.
+
+---
+
+## 5) Didn’t create reproduction templates for the original StepFunctions bugs
+The prompt explicitly asked to:
+1) write reproduction test case(s),
+2) run them,
+3) validate fix,
+4) cleanup.
+
+Instead, the agent:
+- added unit tests directly (fine), but
+- never created/runs the provided YAML repro templates via CLI (`cfn-lint a.yaml` etc.),
+- never verified the original error messages disappeared using those templates.
+
+Improvement:
+- Add targeted regression tests that mimic the user repro (either as unit tests or CLI/integration tests).
+- Run `cfn-lint` against minimal templates to confirm no E3601.
+
+---
+
+## 6) Risky schema modeling choices (may cause future correctness issues)
+The agent modified Map state requirements as:
+
+- removed `"Iterator"` from `"required"`
+- added `ItemProcessor` definition
+- added `allOf` with two `requiredXor` constraints:
+  - one-of Next/End
+  - one-of Iterator/ItemProcessor
+
+Potential problems:
+- In ASL, **Iterator vs ItemProcessor** are alternatives, but Next/End is independent. Using `requiredXor` for Next/End is OK, but Iterator/ItemProcessor should likely be `requiredXor` (exactly one) or `anyOf` (at least one) depending on spec. If AWS allows both (unlikely), requiredXor would be too strict.
+- They also temporarily put Next/End/Iterator/ItemProcessor in one requiredXor list (wrong), then patched it—good recovery, but indicates lack of careful schema reasoning upfront.
+
+Improvement:
+- Validate schema behavior against known valid Map variants (distributed map etc., if supported).
+- Prefer `anyOf`+`required` for “one of these groups must exist” if needed.
+
+---
+
+## 7) Choice operator schema extension was incomplete/too permissive
+They added:
+- `IsBoolean/IsNumeric/IsPresent/IsString/IsTimestamp`
+- a number of `*EqualsPath` / `*GreaterThanPath` / etc.
+
+But AWS Choice rules include additional operators not addressed (depending on spec version), such as `StringMatches`, and others; also Path variants should probably be validated as JSONPath strings (not just any string). This is not what broke tests, but it’s a quality issue.
+
+Improvement:
+- Confirm full operator list from ASL spec version targeted.
+- Add tests specifically for the new operators to ensure requiredXor list is correct and comprehensive.
+
+---
+
+## What the agent should do now to pass all tests
+1) **Revert / avoid** any changes outside StepFunctions schema/tests (especially AdditionalSpecs).
+2) Fix the integration failures properly:
+   - identify the extra match in `openshift.yaml` (likely `E2533`),
+   - update `test/fixtures/results/quickstart/openshift.json` and `.../non_strict/openshift.json` to include it **OR**
+   - make `E2533` deterministic by freezing `current_date` in tests (preferred).
+3) Re-run `pytest -q` until green.
+4) Ensure StepFunctions regression is actually tested (unit tests added are good; optionally also add a minimal CLI fixture).
+
+---
+
+## Key takeaway
+The agent didn’t fail on the StepFunctions implementation; it failed on *engineering process and test discipline*: it chased unrelated failing tests by changing product behavior/data, didn’t keep tests deterministic, and didn’t apply the edit successfully.

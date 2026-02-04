@@ -1,0 +1,168 @@
+diff --git a/shapely/wkt.py b/shapely/wkt.py
+index 7bc19c9..a60120d 100644
+--- a/shapely/wkt.py
++++ b/shapely/wkt.py
+@@ -4,31 +4,149 @@ Also provides pickle-like convenience functions.
+ """
+ 
+ import shapely
+-
+-
+-def loads(data):
++import re
++
++
++def _close_ring_if_needed(ring_str):
++    # ring_str like "0 0, 1 0, 1 1, 0 1" possibly with extra spaces
++    points = [p.strip() for p in ring_str.strip().split(",") if p.strip()]
++    if len(points) < 2:
++        return ring_str  # nothing to do
++
++    def _parse_point(pt):
++        # supports XY, XYZ, XYM, XYZM
++        parts = [x for x in pt.strip().split() if x]
++        try:
++            return tuple(float(x) for x in parts)
++        except ValueError:
++            # if parsing fails, keep original (don't change structure)
++            return None
++
++    first = _parse_point(points[0])
++    last = _parse_point(points[-1])
++    if first is None or last is None:
++        return ring_str
++
++    if first == last:
++        return ring_str  # already closed
++
++    # Append the first point to close the ring
++    return ", ".join(points + [points[0]])
++
++
++def _fix_wkt_structure(data):
++    # Only attempt to fix POLYGON rings; leave other types unchanged
++    s = data
++    out = []
++    i = 0
++    pattern = re.compile(r"POLYGON", re.IGNORECASE)
++    while True:
++        m = pattern.search(s, i)
++        if not m:
++            out.append(s[i:])
++            break
++        # append text before POLYGON
++        out.append(s[i:m.start()])
++        out.append(s[m.start():m.end()])  # 'POLYGON'
++        # move index after 'POLYGON'
++        j = m.end()
++        # copy any dimension tokens (e.g., ' Z', ' M', ' ZM') and whitespace until '('
++        while j < len(s) and s[j] != "(":
++            out.append(s[j])
++            j += 1
++        if j >= len(s) or s[j] != "(":
++            # not a valid POLYGON structure, continue
++            i = j
++            continue
++        # append opening parenthesis and capture the content within matching paren
++        out.append("(")
++        j += 1
++        # capture content until matching closing ')'
++        depth = 1
++        content_start = j
++        while j < len(s) and depth > 0:
++            if s[j] == "(":
++                depth += 1
++            elif s[j] == ")":
++                depth -= 1
++            j += 1
++        content = s[content_start : j - 1] if depth == 0 else s[content_start:]
++        # Now content should be like '((ring1), (ring2), ...)' without the outer closing
++        # We need to iterate rings between parentheses at depth 1 inside content
++        rings = []
++        k = 0
++        while k < len(content):
++            # skip whitespace and commas
++            while k < len(content) and content[k] in " \t\n,":
++                rings.append(content[k]) if False else None  # no-op to keep style
++                k += 1
++            if k < len(content) and content[k] == "(":
++                # find ring content
++                k += 1
++                ring_start = k
++                nest = 1
++                while k < len(content) and nest > 0:
++                    if content[k] == "(":
++                        nest += 1
++                    elif content[k] == ")":
++                        nest -= 1
++                    k += 1
++                ring_content = content[ring_start : k - 1]
++                fixed_ring = _close_ring_if_needed(ring_content)
++                rings.append("(")
++                rings.append(fixed_ring)
++                rings.append(")")
++            else:
++                # copy other characters (commas/spaces)
++                if k < len(content):
++                    rings.append(content[k])
++                    k += 1
++        fixed_content = "".join(rings)
++        out.append(fixed_content)
++        out.append(")")
++        i = j
++    return "".join(out)
++
++
++def loads(data, fix_structure=None, on_invalid="raise"):
+     """Load a geometry from a WKT string.
+ 
+     Parameters
+     ----------
+     data : str
+         A WKT string
++    fix_structure : bool, optional
++        If True, attempts to fix structural issues such as unclosed rings
++        when reading WKT. Defaults to None (no override).
++    on_invalid : {"raise", "warn", "ignore"}, default "raise"
++        How to handle invalid WKT input.
+ 
+     Returns
+     -------
+     Shapely geometry object
+ 
+     """
+-    return shapely.from_wkt(data)
++    if fix_structure:
++        try:
++            data = _fix_wkt_structure(data)
++        except Exception:
++            # if repairing fails, fall back to original data
++            pass
++    return shapely.from_wkt(data, on_invalid=on_invalid)
+ 
+ 
+-def load(fp):
++def load(fp, fix_structure=None, on_invalid="raise"):
+     """Load a geometry from an open file.
+ 
+     Parameters
+     ----------
+     fp :
+         A file-like object which implements a `read` method.
++    fix_structure : bool, optional
++        If True, attempts to fix structural issues such as unclosed rings
++        when reading WKT. Defaults to None (no override).
++    on_invalid : {"raise", "warn", "ignore"}, default "raise"
++        How to handle invalid WKT input.
+ 
+     Returns
+     -------
+@@ -36,7 +154,7 @@ def load(fp):
+ 
+     """
+     data = fp.read()
+-    return loads(data)
++    return loads(data, fix_structure=fix_structure, on_invalid=on_invalid)
+ 
+ 
+ def dumps(ob, trim=False, rounding_precision=-1, **kw):

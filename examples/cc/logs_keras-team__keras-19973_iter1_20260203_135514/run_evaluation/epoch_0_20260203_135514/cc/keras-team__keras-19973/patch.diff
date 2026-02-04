@@ -1,0 +1,20 @@
+diff --git a/keras/src/layers/attention/multi_head_attention.py b/keras/src/layers/attention/multi_head_attention.py
+index 5fae13023..ef8946375 100644
+--- a/keras/src/layers/attention/multi_head_attention.py
++++ b/keras/src/layers/attention/multi_head_attention.py
+@@ -452,6 +452,15 @@ class MultiHeadAttention(Layer):
+     ):
+         if key is None:
+             key = value
++        # Runtime validation to align eager behavior with symbolic shape checks.
++        d_query = query.shape[-1]
++        d_value = value.shape[-1]
++        if d_query is not None and d_value is not None and d_query != d_value:
++            raise ValueError(
++                "The last dimension of `query_shape` and `value_shape` "
++                f"must be equal, but are {d_query}, {d_value}. "
++                "Received: query_shape={query_shape}, value_shape={value_shape}"
++            )
+ 
+         attention_mask = self._compute_attention_mask(
+             query,

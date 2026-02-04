@@ -1,0 +1,82 @@
+You are given a code repository in the current directory.
+
+## Goal
+Fix a crash in Checkov when scanning Terraform WAFv2 Web ACL resources that contain **two dynamic "rule" blocks**. The crash is:
+
+`AttributeError: 'int' object has no attribute 'get'`
+
+It occurs in these AWS checks:
+- `CKV_AWS_192` (WAFACLCVE202144228)
+- `CKV_AWS_342` (WAFRuleHasAnyActions)
+
+The crash happens because the Terraform parser can represent dynamic blocks in a way that inserts **non-dict sentinel values (often ints)** into places the checks currently assume are dicts (e.g., `conf["rule"]` entries, or `statement[0]`).
+
+## Non-negotiable constraints (important)
+1. **Do not change the security semantics** of the checks beyond what is required to prevent the crash.
+   - Specifically, do NOT implement “skip malformed entries and then PASS”.
+   - If a rule (or statement) is present but in an unexpected shape, return `UNKNOWN` rather than silently skipping or passing.
+2. **Preserve existing PASS/FAIL/UNKNOWN behavior** as much as possible.
+   - Minimal, defensive guards only.
+3. **Do not add speculative tests** that you cannot run and validate in this environment.
+   - If you add tests, they must be minimal, deterministic, and must not assume provider resolution; they must use the repo’s existing test harness patterns.
+4. Don’t commit edits.
+
+## What to build
+A minimal fix that:
+- Prevents the AttributeError for both checks when Terraform parsing produces ints/non-dicts from dynamic blocks.
+- Maintains prior evaluation logic and expected results (especially UNKNOWN cases).
+
+## Expected behavior guidance
+- For `CKV_AWS_342` (Ensure WAF rule has any actions):
+  - The original intent is “every rule must have actions (action/override_action) unless it’s a managed rule group statement”.
+  - If `conf["rule"]` is not a list: keep behavior consistent with current implementation (likely UNKNOWN).
+  - If any entry in `conf["rule"]` is not a dict (e.g., int): treat that as **UNKNOWN**, not PASS, not silent continue.
+  - If you cannot confidently evaluate at least one rule due to shape issues: return UNKNOWN.
+
+- For `CKV_AWS_192` (Log4j2 protection / CVE-2021-44228):
+  - Keep existing logic for determining PASS/FAIL/UNKNOWN.
+  - Add guards so `.get()` is only called on dicts.
+  - If `statement` exists but isn’t a list, keep returning UNKNOWN (as original behavior).
+  - If `statement[0]` exists but is not a dict (e.g., int), return UNKNOWN (do not continue).
+  - Ensure any access to `override_action_none[0]` is protected by type/length checks so it can’t crash.
+
+## Work plan you must follow
+1. **Reproduce**
+   - Search the repository for existing Terraform WAF fixtures or tests around CKV_AWS_192 / CKV_AWS_342.
+   - Create a minimal reproduction inside the repo only if needed (prefer reusing existing testing utilities/fixtures).
+   - Your reproducer must demonstrate the crash (or at least exercise the same parsing shape) without requiring real AWS credentials.
+   - If there is an existing unit/integration test framework, use it.
+
+2. **Locate the failing code**
+   - Find the implementations of:
+     - `checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py`
+     - `checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py`
+   - Identify exactly where `.get()` is being called on a non-dict and where non-dict rule entries can surface.
+
+3. **Implement the minimal fix**
+   - Add strict type checks before calling `.get()`.
+   - When encountering unexpected shapes where evaluation is ambiguous, return `CheckResult.UNKNOWN`.
+   - Do not change the logic for valid dict-shaped configurations.
+
+4. **Validate**
+   - Run the smallest available test command(s) that cover these checks.
+   - If a full test run is too heavy, run targeted tests consistent with the repo’s standard tooling.
+   - Confirm:
+     - No crash
+     - No obvious behavior regressions for normal inputs
+
+5. **Cleanup**
+   - Remove any temporary files not needed.
+
+## Implementation hints (use these principles)
+- Prefer helper-style local checks like:
+  - `if not isinstance(rule, dict): return CheckResult.UNKNOWN`
+  - `if not isinstance(statement, list): return CheckResult.UNKNOWN`
+  - `if not statement or not isinstance(statement[0], dict): return CheckResult.UNKNOWN`
+- Avoid “continue” when the structure is malformed in a way that indicates the parser produced placeholders; that situation should be UNKNOWN, not ignored.
+- Be careful with nested structures that might be dict vs list. Guard every index operation with `isinstance(x, list)` and `len(x) > 0`.
+
+## Deliverable
+Provide the code changes that fix the crash in both checks, with minimal semantic impact, and demonstrate via tests or a reproducible scan that the crash is gone.
+
+Do not add broad refactors. Do not add new dependencies.

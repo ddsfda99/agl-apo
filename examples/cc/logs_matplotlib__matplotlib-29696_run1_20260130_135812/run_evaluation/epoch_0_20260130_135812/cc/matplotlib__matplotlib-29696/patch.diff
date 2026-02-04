@@ -1,0 +1,87 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index 8310c57ceb..f423fadafe 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -2884,8 +2884,11 @@ class Axes(_AxesBase):
+               (useful for stacked bars, i.e.,
+               :doc:`/gallery/lines_bars_and_markers/bar_label_demo`)
+ 
+-        padding : float, default: 0
++        padding : float or array-like of floats, default: 0
+             Distance of label from the end of the bar, in points.
++            If an iterable is provided, it specifies the padding for each
++            label individually. If the length differs from the number of
++            bars, the values are cycled or truncated as needed.
+ 
+         **kwargs
+             Any remaining keyword arguments are passed through to
+@@ -2974,12 +2977,41 @@ class Axes(_AxesBase):
+                 else:  # horizontal
+                     xy = endpt, yc
+ 
++            # Support per-label padding if an iterable of paddings is provided.
++            pad_val = padding
++            try:
++                # Strings are iterable but not desired here; also filter out numpy
++                # arrays which are fine. We only treat as sequence if not a scalar string.
++                import numpy as _np
++                is_seq = (not isinstance(padding, str)
++                          and _np.iterable(padding))
++            except Exception:
++                is_seq = False
++            if is_seq:
++                # Determine index for current bar by position in container.
++                # zip_longest already syncs order; we can index via bars list.
++                try:
++                    idx = bars.index(bar)
++                except Exception:
++                    idx = 0
++                # Cycle or truncate paddings to length of bars.
++                from itertools import cycle, islice
++                try:
++                    pad_seq = list(padding)
++                except Exception:
++                    # Fallback: use scalar 0 if cannot listify
++                    pad_seq = [0]
++                if len(pad_seq) == 0:
++                    pad_val = 0
++                else:
++                    pad_val = list(islice(cycle(pad_seq), len(bars)))[idx]
++
+             if orientation == "vertical":
+                 y_direction = -1 if y_inverted else 1
+-                xytext = 0, y_direction * sign(dat) * padding
++                xytext = 0, y_direction * sign(dat) * pad_val
+             else:  # horizontal
+                 x_direction = -1 if x_inverted else 1
+-                xytext = x_direction * sign(dat) * padding, 0
++                xytext = x_direction * sign(dat) * pad_val, 0
+ 
+             if label_type == "center":
+                 ha, va = "center", "center"
+diff --git a/lib/matplotlib/axes/_axes.pyi b/lib/matplotlib/axes/_axes.pyi
+index c780fe012f..64eb66921f 100644
+--- a/lib/matplotlib/axes/_axes.pyi
++++ b/lib/matplotlib/axes/_axes.pyi
+@@ -268,7 +268,7 @@ class Axes(_AxesBase):
+         *,
+         fmt: str | Callable[[float], str] = ...,
+         label_type: Literal["center", "edge"] = ...,
+-        padding: float = ...,
++        padding: float | ArrayLike = ...,
+         **kwargs
+     ) -> list[Annotation]: ...
+     def broken_barh(
+diff --git a/lib/matplotlib/pyplot.py b/lib/matplotlib/pyplot.py
+index 45d46238bc..eba08339e8 100644
+--- a/lib/matplotlib/pyplot.py
++++ b/lib/matplotlib/pyplot.py
+@@ -3025,7 +3025,7 @@ def bar_label(
+     *,
+     fmt: str | Callable[[float], str] = "%g",
+     label_type: Literal["center", "edge"] = "edge",
+-    padding: float = 0,
++    padding: float | ArrayLike = 0,
+     **kwargs,
+ ) -> list[Annotation]:
+     return gca().bar_label(

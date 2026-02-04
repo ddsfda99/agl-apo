@@ -1,0 +1,83 @@
+You are an expert software engineer working on the **cfn-lint** repository in the current directory.
+
+## Goal (resolve ambiguity first)
+There is a contradiction between:
+- The task header: **“don't honor the condition when checking the type availabilitiy”**
+- The issue narrative: “Expected: cfn-lint honors the condition…”
+
+For this task, treat the **task header as authoritative**:
+
+### Required behavior change
+**Do NOT honor (do not use) a resource’s `Condition` to suppress/skip regional resource type availability checks (E3006).**
+
+Concretely: if a resource type is not available in the selected region(s), **E3006 must be reported even if the resource has a `Condition` that might evaluate to false in those regions.**
+
+This means existing tests that encode the “honor condition” behavior must be updated accordingly.
+
+---
+
+## Non-goals / constraints
+- Do not add a new CLI option unless you find strong evidence in repo history/tests that such an option already exists or is required. Default behavior should become “do not honor condition for E3006”.
+- Avoid performance regressions: do not eagerly materialize large scenario lists in hot loops (avoid `list(generator)`); prefer direct checks without enumerating everything.
+- Keep the change scoped to **E3006/type availability** behavior; don’t change how conditions work for other rules unless tests indicate it’s coupled.
+
+---
+
+## Required workflow
+Follow these steps precisely:
+
+### 1) Establish baseline & find current intent
+- Run a small, relevant unit-test subset first (not the entire suite) to confirm current behavior around E3006 and conditions.
+- Locate the rule implementation for E3006 (search for `E3006` and the error message `Resource type ... does not exist in`).
+
+### 2) Add a correct reproduction test (must match the reported scenario)
+Create a new unit test (or adjust/extend an existing one) that minimally reproduces:
+
+- Region set to **`cn-north-1`**
+- A resource of type **`AWS::GlobalAccelerator::Listener`** (or another type known to be unavailable in cn partitions based on the repo’s region/type data)
+- The resource has a **Condition** that excludes China regions using `AWS::Region` equals checks (like the issue snippet).
+- Expected result **after the change**: **E3006 is emitted** for that resource in `cn-north-1`, despite the Condition.
+
+Important: Use the repo’s Python test harness (whatever existing tests use: `Runner`, `TemplateRunner`, etc.). Do not rely on downloading the external artifact. Keep the template minimal and embedded in the test.
+
+### 3) Update existing tests that currently expect condition-based suppression
+Search for unit tests that assert E3006 is skipped when condition could be false, e.g.:
+- `test_type_true_false.py`
+- `test_type.py::test_types_with_conditions_false`
+(or any similar ones you find)
+
+Update them so that under the new intended behavior **E3006 is still raised** even when the resource has a condition (whether always false, sometimes false, etc.).  
+If a test is no longer meaningful, rewrite it to assert the new semantics rather than deleting it, unless deletion is clearly justified.
+
+### 4) Implement the fix with minimal, targeted code changes
+In the E3006/type-availability validation path:
+- Remove/disable any logic that inspects a resource’s `Condition` to decide whether to skip the type availability check.
+- Ensure the rule checks regional availability purely based on the resource type and the selected regions.
+- Do **not** add expensive condition-scenario enumeration; ideally, the E3006 path should not evaluate conditions at all.
+
+### 5) Validate
+- Run the new reproduction test.
+- Run the previously failing/modified unit tests around E3006.
+- If the repo has pre-existing failing integration tests unrelated to your change, **do not attempt to fix unrelated failures**; instead, keep your validation focused on the affected test modules and explain what you ran and why.
+
+### 6) Cleanup
+- Remove any temporary files.
+- Do not commit changes.
+
+---
+
+## Deliverables
+When finished, provide:
+1) A brief summary of the code change (where and what you changed).
+2) The list of tests you added/modified.
+3) The exact test commands you ran and their results.
+
+---
+
+## Additional guidance (to avoid the prior failures)
+- Do not implement the “honor condition” behavior; this task requires the opposite.
+- Do not change behavior accidentally for other rules—keep the change limited to E3006/type availability validation.
+- Do not implement `list(build_scenarios...)` or any full enumeration of condition outcomes; the fix should ideally avoid conditions entirely for E3006.
+- Make sure the new test asserts the **presence** of E3006 in `cn-north-1` even with the Condition excluding that region.
+
+Proceed now.

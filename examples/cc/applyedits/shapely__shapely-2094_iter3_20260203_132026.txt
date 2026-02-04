@@ -1,0 +1,157 @@
+You are an expert Shapely Python/C-extension contributor working in the repository in the current directory. Your job is to implement a **GEOS-backed** enhancement and land it with correct tests.
+
+# Goal
+Expose a `fix_structure` keyword in the WKT reader so that WKT parsing can automatically fix certain structural issues (e.g., **unclosed LinearRings in POLYGON**) using **GEOS WKTReader capabilities**, not Python string rewriting.
+
+Target behavior:
+
+- `shapely.wkt.loads(wkt)` remains strict by default (unchanged behavior).
+- `shapely.wkt.loads(wkt, fix_structure=True)` uses GEOS’s “fix structure” capability (if available) so that an unclosed polygon ring is automatically closed instead of raising:
+  `IllegalArgumentException: Points of LinearRing do not form a closed linestring`
+
+# Required API surface (must implement)
+- `shapely.wkt.loads(..., fix_structure=False)`
+- `shapely.wkt.load(fp, ..., fix_structure=False)`
+- Ensure it is **plumbed all the way down to the compiled layer**: `lib.from_wkt` (the NumPy ufunc / C-extension) must accept and forward `fix_structure` to the **GEOS WKTReader**, not via any Python repair.
+- Do not add unsupported kwargs at Python level unless the compiled layer accepts them.
+
+# Critical pitfalls to avoid (based on previous failures)
+1. **Do NOT “add an extra positional input” to the ufunc** by only changing loop code and dtype arrays. This previously broke the ufunc ABI / registration.  
+   - You must understand how this repo registers ufuncs (`DEFINE_CUSTOM`, `PyUFunc_FromFuncAndData`, `nin/nout`, types arrays, loop lists).
+   - Changing `nin` requires updating *all* related registration pieces consistently.
+2. **Do NOT implement a Python WKT rewriter**.
+3. **Do NOT add `fix_structure` only to `wkt.loads`** while compiled `lib.from_wkt` doesn’t accept it (this caused `TypeError` before).
+4. **Do NOT silently ignore `fix_structure=True` on older GEOS**. If unsupported, raise a clear, repo-consistent exception (typically `UnsupportedGEOSVersionError`) when `fix_structure=True`.
+5. **Do implement `wkt.load` too** (previous attempt missed it).
+6. Add tests. No feature without tests.
+
+# First: confirm GEOS support and existing gating patterns
+Before coding, locate whether the GEOS C API provides fix-structure support for WKTReader.
+
+## What to look for
+- `GEOSWKTReader_setFixStructure_r(...)` (or similar)
+- Check `geos_c.h` in the build include paths used by this repo (search in repo, build config, vendored headers).
+- Search Shapely C sources for WKT reader usage:
+  - `GEOSWKTReader_create_r`
+  - existing `_set*` calls (like `GEOSWKTReader_set...`)
+
+## Determine minimum GEOS version
+Find how this repo checks GEOS version and gates features:
+- Look for macros like `GEOS_SINCE_3_11_0` or similar.
+- Find the canonical Python exception used when a feature isn’t supported (often `UnsupportedGEOSVersionError`).
+- Find existing tests that skip based on GEOS version (e.g., `pytest.mark.skipif(shapely.geos_version < (...))` or helper markers).
+
+**Expectation:** GEOS fix-structure is available starting GEOS 3.11 (verify). Implement conditional behavior accordingly.
+
+# Implementation strategy (follow this order)
+
+## 1) Add tests first (but design them to match GEOS capability)
+Add tests in the existing WKT/IO test module (search for where WKT tests live; likely `shapely/tests/test_io.py` or `shapely/tests/test_wkt.py`).
+
+### Required tests
+1. **Default strict behavior unchanged**
+   - For an unclosed polygon ring WKT:
+     `POLYGON ((0 0, 1 0, 1 1, 0 1))`  (missing closing `0 0`)
+   - `shapely.wkt.loads(...)` should raise `shapely.errors.GEOSException` (or repo-appropriate exception). Don’t overfit message text unless existing tests do; if checking message, check a stable substring like `"LinearRing"` or `"closed linestring"`.
+
+2. **With fix_structure=True**
+   - If GEOS supports it: parsing succeeds and polygon exterior ring is closed.
+     - Validate by checking `geom.exterior.coords[0] == geom.exterior.coords[-1]` and geometry type is Polygon.
+   - If GEOS does **not** support it: calling with `fix_structure=True` must raise `UnsupportedGEOSVersionError` (or the repo’s standard “unsupported geos” exception).
+   - Use a consistent skip/xfail only if the repo convention is to skip instead of asserting the exception; prefer asserting the exception on old GEOS unless existing patterns skip.
+
+3. **Vectorized / array input sanity (optional but valuable)**
+   - Ensure `shapely.from_wkt([bad_wkt], fix_structure=True)` works when supported (or raises Unsupported on old GEOS). This catches ufunc integration issues.
+
+**Important:** These tests should fail on current main before your code changes, and pass after.
+
+## 2) Locate the Python-to-compiled call path
+Trace how `wkt.loads` flows to compiled code in this repo. Likely:
+- `shapely/wkt.py` (`loads`, `load`)
+- `shapely/io.py` or `shapely/_io.py` (`from_wkt`)
+- compiled layer `shapely/lib.*` providing `from_wkt` (NumPy ufunc)
+
+Confirm exactly which function signatures exist today and where kwargs are accepted.
+
+## 3) Implement compiled-layer support correctly (most important)
+You must extend the compiled WKT reading path so that `lib.from_wkt(..., fix_structure=...)` is accepted and reaches GEOSWKTReader configuration.
+
+### Key requirement: do NOT break the ufunc ABI
+You have two acceptable design routes—choose the one that matches repo conventions after inspection:
+
+#### Route A (preferred if repo already supports “custom ufunc kwargs”):
+Keep ufunc `nin` unchanged (likely 2 inputs + 1 output: `geometry, on_invalid -> geom`) and implement `fix_structure` as a **keyword-only ufunc option** parsed in the C-extension wrapper that dispatches the ufunc loop.
+
+- Search in C sources for patterns where ufuncs accept extra keywords beyond NumPy’s standard (`out`, `where`, etc.).  
+  Examples to look for: parsing kwargs for `axis`, `include_z`, `normalize`, `precision`, `dimensions`, etc.
+- Implement `fix_structure` parsing in the same place and ensure it can be passed down to the inner loop (likely through a `data` struct / context pointer passed to the loop).
+
+This avoids increasing `nin` and avoids dtype/registration churn.
+
+#### Route B (only if Route A is impossible in this codebase):
+Add an extra input to the ufunc (e.g., `fix_structure` as scalar broadcast input), but then you must update **every piece** of ufunc creation consistently:
+- `nin` and `nout`
+- the `types` signature arrays length and content
+- the loop function `args[]` and `steps[]` indexing
+- the macro invocation (e.g., `DEFINE_CUSTOM(from_wkt, <nin>)`) and any related registration arrays
+
+If you choose Route B, you MUST:
+- find the macro definitions and understand how they compute `nin/nout`, `ntypes`, and register loops.
+- update the `from_wkt` ufunc registration so NumPy knows it takes 3 inputs + 1 output.
+- add dtype signatures for the new scalar input (likely `NPY_BOOL`) in the correct slot.
+- ensure scalar-ness checks for the scalar params match existing patterns (usually `steps[i] == 0` means scalar broadcast).
+
+**Do not do partial updates** (this was the prior failure).
+
+### GEOS call wiring
+In the C code where the GEOS WKTReader is created and used:
+- Create reader with `GEOSWKTReader_create_r(ctx)`.
+- When `fix_structure` is requested:
+  - If compiled against GEOS >= required version, call:
+    `GEOSWKTReader_setFixStructure_r(ctx, reader, (char)fix_structure);`
+  - If compiled against older GEOS, you must raise a clear exception at runtime *when fix_structure=True* (not silently ignore).
+
+### Capability gating behavior
+- Compile-time: guard the symbol usage with the repo’s GEOS-version macro (e.g., `#if GEOS_SINCE_3_11_0`).
+- Runtime behavior:
+  - If `fix_structure` is False: proceed normally regardless of GEOS version.
+  - If `fix_structure` is True and GEOS too old: raise `UnsupportedGEOSVersionError` (or repo’s standard) with a message like “fix_structure requires GEOS >= 3.11”.
+
+Make sure exception raising is done in the correct way for this C-extension (find other examples of unsupported-feature errors).
+
+## 4) Plumb the Python API (after compiled layer accepts it)
+Only after `lib.from_wkt` accepts `fix_structure`:
+
+- Update `shapely.io.from_wkt` (or the appropriate wrapper) to accept `fix_structure=False` and forward it to `lib.from_wkt` in the correct manner (keyword if supported; otherwise positional/broadcast input per your compiled design).
+- Update `shapely.wkt.loads` to accept `fix_structure=False` and pass it through.
+- Update `shapely.wkt.load(fp, fix_structure=False, ...)` to pass it through as well.
+  - Ensure `load()` doesn’t drop the kwarg (previous failure).
+
+Also ensure docstrings/signatures match and that no unexpected kwargs are passed to the ufunc (NumPy ufuncs reject unknown kwargs unless explicitly handled).
+
+## 5) Sanity checks (do these locally as you iterate)
+After edits, at minimum run:
+- `python -c "import shapely.wkt; import shapely; print(shapely.from_wkt('POINT (0 0)'))"`
+- A strict failure check:
+  - `python - <<'PY'\nimport shapely.wkt\nw='POLYGON ((0 0, 1 0, 1 1, 0 1))'\ntry:\n    shapely.wkt.loads(w)\n    print('unexpected success')\nexcept Exception as e:\n    print('expected failure', type(e), e)\nPY`
+- A fix_structure check (if GEOS supports it):
+  - `python - <<'PY'\nimport shapely.wkt\nw='POLYGON ((0 0, 1 0, 1 1, 0 1))'\ntry:\n    g=shapely.wkt.loads(w, fix_structure=True)\n    print(g.wkt)\nexcept Exception as e:\n    print('error', type(e), e)\nPY`
+
+## 6) Run tests
+- Run the new tests and the relevant existing IO/WKT tests.
+
+# Deliverables
+- Compiled-layer support for `fix_structure` in `lib.from_wkt` without breaking ufunc conventions.
+- Python API changes: `wkt.loads`, `wkt.load`, and `io.from_wkt` plumb `fix_structure`.
+- Tests covering:
+  - strict default failure
+  - success with fix_structure (GEOS >= required)
+  - unsupported behavior on old GEOS (raise correct exception or skip per repo pattern)
+
+# Hard rules
+- No Python-level WKT rewriting.
+- No partial ufunc signature edits—ufunc registration and loops must agree.
+- No silent no-ops on old GEOS when `fix_structure=True`.
+- Don’t forget `wkt.load`.
+
+Now implement end-to-end, starting by inspecting the repo’s ufunc creation machinery and GEOS capability macros, then write tests, then implement compiled support, then plumb Python APIs, then run the tests.

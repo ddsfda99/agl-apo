@@ -1,0 +1,181 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+ENH: expose fix_structure keyword in WKT reader (close linestrings automatically)
+## Details of feature
+
+With a polygon like so: `"POLYGON ((0 0, 1 0, 1 1, 0 1))"` (Not closed, missing the last `0 0` point)
+
+Your geometry class will load the above shape just fine
+
+```python
+from shapely.geometry import Polygon
+poly = Polygon([(0,0), (1,0), (1,1), (0,1)])
+print(poly.wkt)
+'POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))' # adds the 0 0 to close the linestring automatically
+```
+
+But when loading the wkt, you get: `IllegalArgumentException: Points of LinearRing do not form a closed linestring`.
+
+```python
+from shapely import wkt
+wkt.loads("POLYGON ((0 0, 1 0, 1 1, 0 1))")
+# Throws with the above message.
+```
+
+## Proposal
+
+Add a `strict=True` val (or something) to `wkt.loads`, that either just repairs this automatically, or at least loads the coords as-is and lets the user go in and make it valid.
+
+```python
+from shapely import wkt
+poly = wkt.loads("POLYGON ((0 0, 1 0, 1 1, 0 1))", strict=False) # override strict to False, True by default
+print(poly.wkt)
+# If you repair automatically
+'POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))'
+# If you load as-is, letting the user decide how to repair it
+'POLYGON ((0 0, 0 1, 1 1, 1 0))'
+```
+
+It's possible to have nested GeometryCollections, and if a polygon deep inside your wkt has this error, you're forced to use other WKT libraries to recurse down and repair it before shapely will be able to load it. This means you can't use any of the shapely library to separate out the WKT into individual shapes and fix the problem.
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## Why the agent failed
+
+### 1) Assumed `fix_structure` exists in `shapely.from_wkt` / `lib.from_wkt` (it doesn’t in this repo/GEOS)
+The task says “expose `fix_structure` keyword in WKT reader”, which strongly implies the underlying GEOS-backed WKT reader already supports a “fix structure” mode and Shapely just isn’t exposing it in `wkt.loads`.
+
+But in this repository + runtime (GEOS 3.11.1), `shapely.io.from_wkt()` ultimately calls `lib.from_wkt(geometry, invalid_handler, **kwargs)`, and that ufunc does **not** accept a `fix_structure` keyword. The agent changed `shapely/wkt.py` to call:
+
+```py
+shapely.from_wkt(data, fix_structure=fix_structure)
+```
+
+This immediately caused test collection to fail with:
+
+```
+TypeError: from_wkt() got an unexpected keyword argument 'fix_structure'
+```
+
+So the agent implemented an API surface that the C-extension doesn’t support, without first verifying the backend signature.
+
+**How to improve**
+- Before changing Python-level wrappers, inspect the C-extension signature or existing wrappers:
+  - Search for `fix_structure` in the C sources / pybind/ufunc definitions.
+  - Grep for `from_wkt(` in `src/` (not just python) or inspect `shapely/lib.*` help/signature at runtime.
+- Add feature only if backend supports it; otherwise, implement backend support (likely required here).
+
+---
+
+### 2) “Fix” pivoted to a fragile Python WKT rewriter (wrong layer, wrong scope)
+After discovering `fix_structure` isn’t accepted, the agent tried to “repair” WKT strings in pure Python by parsing parentheses and appending the first point to rings.
+
+This is the wrong approach for Shapely:
+- Shapely delegates parsing to GEOS; adding a partial WKT parser in Python is brittle and incomplete.
+- It won’t cover:
+  - SRID prefixes (`SRID=...;POLYGON ...`)
+  - Z/M/ZM dimensional tags
+  - `MULTIPOLYGON`, nested collections robustly
+  - whitespace/comments, scientific notation edge cases
+  - malformed but still parseable variants
+- It also changes semantics: you can’t safely “repair” all cases by string manipulation (and “repair automatically” should match GEOS’s `fix_structure`, not a homebrew variant).
+
+**How to improve**
+- Implement the feature at the correct layer:
+  - Add `fix_structure` support inside the GEOS WKT reader binding (`lib.from_wkt`), then expose it in `shapely.io.from_wkt` and `shapely.wkt.loads`.
+  - If GEOS 3.11 provides a reader flag (e.g., `GEOSWKTReader_setFixStructure_r` or similar), bind it properly.
+  - If GEOS doesn’t provide it, decide: either (a) require a newer GEOS, or (b) implement robust geometry fixing after parse (but you can’t parse invalid rings to begin with, so post-fix won’t help for this specific error).
+
+---
+
+### 3) Introduced syntax errors by accidentally committing patch markers into source
+The edit inserted literal `+` characters at the start of many lines (`+def ...`, `+    ...`), which caused:
+
+```
+SyntaxError: invalid syntax
+```
+
+Later they removed some `+` but not all, leaving the file still corrupted until they overwrote it. The overwrite mostly fixed the pluses, but this was a major process failure.
+
+**How to improve**
+- Never paste diff hunks with leading `+` into `Edit` “new_string”.
+- After large edits, immediately run `python -m py_compile shapely/wkt.py` (or just `python -c "import shapely.wkt"`), *before* running the full test suite, to catch syntax errors early.
+
+---
+
+### 4) Broke `load()` by double-repairing and/or discarding arguments (logic bug)
+At one point the agent changed `load()` to:
+
+```py
+if fix_structure:
+    data = _repair_wkt(data)
+return loads(data)
+```
+
+This discards the `strict`/`fix_structure` values and can apply repairs twice (because `loads()` also repairs).
+
+Even in the final overwrite, `load()` calls `loads(data)` but relies on `loads` defaulting to `strict=True`. It should forward the parameters.
+
+**How to improve**
+- Keep wrappers consistent: `load(fp, ...)` should call `loads(data, strict=strict, fix_structure=fix_structure)`.
+
+---
+
+### 5) Tests they wrote assume behavior that may not be supported by GEOS 3.11
+They wrote tests expecting `strict=False` to auto-close rings. But unless the backend is updated to do this, the tests will fail. In this repo, the backend clearly doesn’t support it yet.
+
+Also, the proposal in the prompt was ambiguous: either “repair automatically” OR “load as-is and let user fix.” The agent chose “repair automatically” without confirming intended semantics in this codebase.
+
+**How to improve**
+- Add tests only after confirming intended API and backend capability.
+- If the real requested keyword is explicitly `fix_structure` (per title), tests should validate that keyword is passed through to the backend and works.
+- Gate tests by GEOS version if the feature is only in newer GEOS (or skip with `pytest.mark.skipif`).
+
+---
+
+## What the correct implementation direction likely is
+
+Based on Shapely 2.x architecture here:
+- `shapely.wkt.loads` is a thin wrapper around `shapely.from_wkt`
+- `shapely.from_wkt` is `shapely.io.from_wkt`
+- `shapely.io.from_wkt` calls `lib.from_wkt(...)` (a compiled ufunc)
+- Therefore, to “expose fix_structure keyword”, you must:
+  1. Extend the C-extension `lib.from_wkt` to accept a `fix_structure` boolean (or similar).
+  2. In the GEOS reader creation, set the corresponding GEOS WKTReader option (if it exists in the linked GEOS).
+  3. Plumb it through `shapely.io.from_wkt(..., fix_structure=False/True)` and then `shapely.wkt.loads(..., fix_structure=...)`.
+  4. Potentially add a `strict` alias at the Python wrapper layer, but ensure naming aligns with project conventions (Shapely already uses `on_invalid` for decode behavior).
+
+If GEOS 3.11 doesn’t support a fix-structure flag for WKTReader:
+- You can’t implement this feature for invalid rings without either:
+  - bundling a WKT parser (undesirable), or
+  - upgrading minimum GEOS, or
+  - adding a different workflow (e.g., `on_invalid="ignore"` returning `None`, but that doesn’t “load as-is”).
+
+---
+
+## Summary of key failures
+1. Didn’t verify backend (`lib.from_wkt`) supports the new keyword → immediate TypeError.
+2. Implemented a fragile Python WKT rewriter instead of fixing backend bindings.
+3. Introduced syntax errors by leaving `+` diff markers in the file.
+4. Wrapper parameter forwarding bugs (`load()` calling `loads()` incorrectly).
+5. Tests assumed unsupported behavior and didn’t account for GEOS feature availability.
+
+These issues prevented the suite from even collecting, so the agent never reached a passing state.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

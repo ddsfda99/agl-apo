@@ -1,0 +1,125 @@
+diff --git a/src/cfnlint/rules/resources/ResourceType.py b/src/cfnlint/rules/resources/ResourceType.py
+index 869620247..a914a34fa 100644
+--- a/src/cfnlint/rules/resources/ResourceType.py
++++ b/src/cfnlint/rules/resources/ResourceType.py
+@@ -38,10 +38,30 @@ class ResourceType(CfnLintKeyword):
+             if validator.is_type(resource_condition, "string"):
+                 if validator.cfn is None:
+                     continue
+-                if False in validator.cfn.conditions.build_scenerios_on_region(
+-                    resource_condition, region
+-                ):
+-                    continue
++                scenarios = list(
++                    validator.cfn.conditions.build_scenerios_on_region(
++                        resource_condition, region
++                    )
++                )
++                # Determine if the condition is region-based
++                is_region_condition = False
++                try:
++                    cond_named = validator.cfn.conditions.get(resource_condition)
++                    for eq in cond_named.equals:
++                        if eq.is_region[0]:
++                            is_region_condition = True
++                            break
++                except Exception:
++                    # If we cannot determine, fallback to previous behavior
++                    pass
++                if is_region_condition:
++                    # Skip validation only if the condition cannot be true in this region
++                    if True not in scenarios:
++                        continue
++                else:
++                    # Preserve previous behavior for non-region conditions
++                    if False in scenarios:
++                        continue
+             if resource_type in PROVIDER_SCHEMA_MANAGER.get_resource_types(
+                 region=region
+             ):
+diff --git a/test/unit/rules/resources/test_type.py b/test/unit/rules/resources/test_type.py
+index 1415d244a..a48e00678 100644
+--- a/test/unit/rules/resources/test_type.py
++++ b/test/unit/rules/resources/test_type.py
+@@ -76,3 +76,81 @@ class TestType(BaseRuleTestCase):
+         )
+ 
+         self.assertListEqual(errors, [], errors)
++
++    @patch("cfnlint.template.Template", autospec=True)
++    def test_types_with_region_condition_excludes_region(self, cfn):
++        # Simulate a region-based condition that excludes a given region
++        cfn = Mock()
++        cfn.conditions = Mock()
++        # Condition cannot be true in this region
++        cfn.conditions.build_scenerios_on_region.return_value = [False]
++        # Provide a real region-based equals for detection
++        from cfnlint.conditions._condition import ConditionNamed
++        conds = {
++            "ExcludeCn": {
++                "Fn::Not": [
++                    {
++                        "Fn::Or": [
++                            {"Fn::Equals": [{"Ref": "AWS::Region"}, "cn-north-1"]},
++                            {"Fn::Equals": [{"Ref": "AWS::Region"}, "cn-northwest-1"]},
++                        ]
++                    }
++                ]
++            }
++        }
++        cfn.conditions.get.return_value = ConditionNamed("ExcludeCn", conds)
++        validator = (
++            CfnTemplateValidator({})
++            .evolve(cfn=cfn)
++            .evolve(context=CfnTemplateValidator({}).context.evolve(regions=["cn-north-1"]))
++        )
++        errors = list(
++            self.rule.validate(
++                validator,
++                "cfnResources",
++                {"Type": "Foo::Bar::Type", "Condition": "ExcludeCn"},
++                {},
++            )
++        )
++        # The resource is excluded in this region, so no E3006 error
++        self.assertListEqual(errors, [], errors)
++
++    @patch("cfnlint.template.Template", autospec=True)
++    def test_types_with_region_condition_mixed(self, cfn):
++        # Simulate a region-based condition that could be true or false
++        cfn = Mock()
++        cfn.conditions = Mock()
++        cfn.conditions.build_scenerios_on_region.return_value = [True, False]
++        from cfnlint.conditions._condition import ConditionNamed
++        conds = {
++            "RegionIsUsEast1": {
++                "Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-1"]
++            }
++        }
++        cfn.conditions.get.return_value = ConditionNamed("RegionIsUsEast1", conds)
++        validator = (
++            CfnTemplateValidator({})
++            .evolve(cfn=cfn)
++            .evolve(context=CfnTemplateValidator({}).context.evolve(regions=["us-east-1"]))
++        )
++        errors = list(
++            self.rule.validate(
++                validator,
++                "cfnResources",
++                {"Type": "Foo::Bar::Type", "Condition": "RegionIsUsEast1"},
++                {},
++            )
++        )
++
++        self.assertListEqual(
++            errors,
++            [
++                ValidationError(
++                    "Resource type 'Foo::Bar::Type' does not exist in 'us-east-1'",
++                    path=deque(["Type"]),
++                    schema_path=deque([]),
++                    rule=ResourceType(),
++                ),
++            ],
++            errors,
++        )

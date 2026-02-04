@@ -1,0 +1,106 @@
+diff --git a/src/cfnlint/template/template.py b/src/cfnlint/template/template.py
+index 65767f350..5b4e0faf1 100644
+--- a/src/cfnlint/template/template.py
++++ b/src/cfnlint/template/template.py
+@@ -10,6 +10,7 @@ import logging
+ from copy import deepcopy
+ from typing import TYPE_CHECKING, Any, Iterator
+ 
++import os
+ import regex as re
+ 
+ import cfnlint.conditions
+@@ -21,6 +22,7 @@ from cfnlint.graph import Graph
+ from cfnlint.match import Match
+ from cfnlint.template.getatts import GetAtts
+ from cfnlint.template.transforms import Transform
++from cfnlint.decode.decode import decode as decode_file
+ 
+ if TYPE_CHECKING:
+     from cfnlint.rules import RuleMatch
+@@ -69,6 +71,8 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
+         self.transform_pre["Globals"] = {}
+         self.transform_pre["Ref"] = self.search_deep_keys("Ref")
+         self.transform_pre["Fn::Sub"] = self.search_deep_keys("Fn::Sub")
++        # Used parameters from included OpenAPI under RestApi Body
++        self.transform_pre["IncludeUsedParameters"] = self._get_restapi_include_used_parameters()
+         self.transform_pre["Fn::FindInMap"] = self.search_deep_keys("Fn::FindInMap")
+         self.transform_pre["Transform"] = self.template.get("Transform", [])
+         self.transform_pre["Fn::ForEach"] = self.search_deep_keys(
+@@ -614,6 +618,76 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
+ 
+         return results
+ 
++    def _get_restapi_include_used_parameters(self) -> list[str]:
++        """
++        Discover parameter names referenced within an AWS::Include used under
++        AWS::ApiGateway::RestApi Properties.Body.
++
++        This is narrowly scoped to resolve local include files and extract
++        parameters referenced via explicit CFN intrinsics (Ref, Fn::Sub)
++        in the included OpenAPI/Swagger document.
++        """
++        used: set[str] = set()
++        try:
++            resources = self.get_resources("AWS::ApiGateway::RestApi")
++            for logical_id, res in resources.items():
++                props = res.get("Properties", {})
++                if not isinstance(props, dict):
++                    continue
++                body = props.get("Body")
++                if not isinstance(body, dict):
++                    continue
++                # Expect explicit Fn::Transform -> AWS::Include
++                if set(body.keys()) != {"Fn::Transform"}:
++                    continue
++                tx = body.get("Fn::Transform")
++                if not isinstance(tx, dict):
++                    continue
++                if tx.get("Name") != "AWS::Include":
++                    continue
++                params = tx.get("Parameters", {})
++                if not isinstance(params, dict):
++                    continue
++                location = params.get("Location")
++                if not isinstance(location, str):
++                    continue
++                # Only support local relative paths; resolve relative to template file directory
++                if location.startswith("s3://") or location.startswith("https://") or location.startswith("http://"):
++                    continue
++                base_dir = os.path.dirname(self.filename or "")
++                include_path = os.path.normpath(os.path.join(base_dir, location))
++                # Load and parse included file (YAML/JSON)
++                try:
++                    included_doc, _matches = decode_file(include_path)
++                except Exception:
++                    included_doc = None
++                if not isinstance(included_doc, (dict, list)):
++                    continue
++                # Walk included structure for explicit CFN intrinsics
++                def walk(node):
++                    if isinstance(node, dict):
++                        if set(node.keys()) == {"Ref"} and isinstance(node.get("Ref"), str):
++                            used.add(node.get("Ref"))
++                        elif set(node.keys()) == {"Fn::Sub"}:
++                            sub_val = node.get("Fn::Sub")
++                            if isinstance(sub_val, str):
++                                for p in self.get_sub_parameters(sub_val):
++                                    used.add(p)
++                            elif isinstance(sub_val, list) and sub_val and isinstance(sub_val[0], str):
++                                for p in self.get_sub_parameters(sub_val[0]):
++                                    used.add(p)
++                        else:
++                            for v in node.values():
++                                walk(v)
++                    elif isinstance(node, list):
++                        for item in node:
++                            walk(item)
++                walk(included_doc)
++        except Exception:
++            # Fail gracefully: return empty list
++            return []
++        return sorted(list(used))
++
+     def get_location_yaml(self, text: Any, path: Path):
+         """
+         Get the location information for the given YAML text and path.

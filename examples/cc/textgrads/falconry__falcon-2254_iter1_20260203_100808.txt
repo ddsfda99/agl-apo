@@ -1,0 +1,167 @@
+### What the agent was trying to do
+From the trace, the agent appears to be implementing a deprecation of Falcon’s asyncio helper aliases:
+
+- `falcon.create_task` → alias of `asyncio.create_task`
+- `falcon.get_running_loop` → alias of `asyncio.get_running_loop`
+
+It then tried to “dogfood” the change by updating Falcon internals to call `asyncio.*` directly instead of `falcon.*`.
+
+That direction is plausible. The failure comes from *how* it implemented the deprecation and *what it changed/forgot to change*.
+
+---
+
+## Primary reasons it failed
+
+### 1) Deprecating the internal alias functions **breaks the test suite’s warnings configuration**
+Falcon’s `pyproject.toml` sets a number of warnings filters, and many tests also use `pytest.warns(...)` selectively. The agent changed `falcon.util.sync.create_task` and `falcon.util.sync.get_running_loop` from simple assignments to decorated functions:
+
+```py
+@deprecated(...)
+def create_task(...):
+    return asyncio.create_task(...)
+```
+
+Same for `get_running_loop`.
+
+This means **every internal call** to `falcon.create_task()` / `falcon.get_running_loop()` / `falcon.util.create_task()` / `falcon.util.get_running_loop()` will now emit `falcon.util.deprecation.DeprecatedWarning`.
+
+But the codebase and tests contain many such internal uses (as seen in `falcon/testing/client.py`, `falcon/asgi/ws.py` originally, and `tests/asgi/test_ws.py` uses `falcon.create_task` directly). Unless *all those call sites* are updated (including tests), the test run will start failing due to unexpected warnings (or warnings turned into errors).
+
+**Core issue:** deprecating a widely-used internal alias without ensuring *internal usage is migrated first* (or without suppressing warnings for internal uses).
+
+How to improve:
+- Ensure the framework itself never calls the deprecated alias.
+- Update tests accordingly, or adjust warning expectations.
+- Or implement deprecation in a way that doesn’t warn for internal call sites (e.g., only warn when called from outside Falcon’s package, based on stack inspection). The agent didn’t do this.
+
+---
+
+### 2) `falcon/testing/client.py` still imports and uses the deprecated aliases
+Even after replacing some call sites with `asyncio.create_task`, the file still has:
+
+```py
+from falcon.util import create_task
+from falcon.util import get_running_loop
+```
+
+and still uses them at least here:
+
+- line ~1022: `self._lifespan_task = get_running_loop().create_task(...)`
+- line ~1111: `task_req = create_task(self.app(...))`
+- line ~2115: `ready_waiter = create_task(self._ws.wait_ready())`
+
+The agent even discovered this via grep:
+
+- `get_running_loop(` remained at line 1022
+- `create_task(` remained at lines 1111 and 2115
+
+But it stopped before fixing those remaining references.
+
+**Net effect:** those uses will now emit deprecation warnings, likely failing tests.
+
+How to improve:
+- Finish the migration in that file: replace those remaining uses and remove the imports.
+- Run a repo-wide grep for `from falcon.util import create_task|get_running_loop` and `falcon.create_task|get_running_loop`.
+
+---
+
+### 3) The agent modified library code but did not update tests that explicitly call `falcon.create_task`
+The test suite itself calls the alias directly, e.g. in `tests/asgi/test_ws.py`:
+
+```py
+sink_task = falcon.create_task(...)
+recv_task = falcon.create_task(...)
+```
+
+If `falcon.create_task` is now deprecated, those tests will now emit warnings. These tests are not written to expect those warnings, so they will fail in typical “warnings as errors” configurations.
+
+How to improve:
+- Either update tests to call `asyncio.create_task` directly, or add `pytest.warns(DeprecatedWarning)` around those uses. The agent did neither.
+
+---
+
+### 4) It introduced new API surface subtly: `create_task`/`get_running_loop` changed from “simple alias object” to a Python function
+Previously:
+```py
+create_task = asyncio.create_task
+get_running_loop = asyncio.get_running_loop
+```
+
+Now they are wrappers. That can break:
+- introspection (signature, qualname)
+- identity comparisons
+- pickling
+- documentation autogen expectations
+- and, importantly for Falcon, some “is python func / is coroutine func” checks (Falcon has special handling for Cythonized funcs and inspection-based logic).
+
+Even if tests don’t explicitly check identity, Falcon’s internals sometimes rely on `is_python_func()` logic and signature inspection. Wrapping with a Python function changes those characteristics.
+
+How to improve:
+- Keep aliases as direct assignments for runtime behavior and implement deprecation elsewhere (docs, or `__getattr__`-style lazy warning, or stack-sensitive warning).
+- Or accept that it’s a wrapper but ensure no internal logic depends on the old nature (agent didn’t validate this).
+
+---
+
+### 5) Unfinished refactor left the repo in an inconsistent state
+The trace shows a partial migration:
+- `falcon/asgi/app.py` updated to use `asyncio.create_task` and `asyncio.get_running_loop`
+- `falcon/asgi/ws.py` updated similarly
+- `falcon/testing/client.py` only partially updated, and still imports deprecated items
+
+The agent also hit an edit error (“File has not been read yet…”) and then proceeded, but didn’t complete the necessary final edits even after reading the file.
+
+How to improve:
+- Don’t stop after first wave of replacements; enforce a “no remaining uses” rule with grep gates.
+- Treat tool errors as a signal to re-run and finish edits.
+
+---
+
+## Additional problems / correctness concerns
+
+### 6) `sync_to_async` return type annotation is wrong (pre-existing, but agent didn’t notice it got worse)
+In `falcon/util/sync.py`, `sync_to_async` is declared as:
+
+```py
+async def sync_to_async(...) -> Callable[..., Awaitable[Any]]:
+```
+
+but it actually returns `Any` (the function result) after awaiting `run_in_executor`. This is wrong, and Falcon even had comments elsewhere about typing issues. The agent did not fix this, but by touching the file heavily it increased the chance mypy/typing-related tests or lint checks could fail (depending on CI).
+
+### 7) The new `create_task` signature is too narrow vs asyncio’s real API
+They implemented:
+
+```py
+def create_task(coro: Awaitable[Any]) -> asyncio.Task:
+```
+
+But `asyncio.create_task` returns `Task[T]` and accepts `context` kwarg in 3.11+ (`create_task(coro, *, name=None, context=None)` depending on version). A too-narrow wrapper can break callers passing `name=` or `context=`. Falcon itself may not pass these today, but external users might; tests might as well.
+
+### 8) Circular import / import layering risk
+`falcon.util.sync` now imports `falcon.util.deprecation.deprecated`. That’s inside `falcon.util.*` itself; it *might* still be safe, but Falcon’s util modules are used early during package initialization. The old design (simple alias assignments) avoided extra imports and side effects.
+
+This can introduce import-order problems or warnings at import-time.
+
+---
+
+## Summary of “why it failed”
+- The agent created deprecation warnings for frequently-used helpers *before fully migrating all internal and test usage away from them*, causing unexpected warnings (likely treated as errors).
+- It left `falcon/testing/client.py` still using the deprecated helpers, guaranteeing warnings.
+- It didn’t update tests that call `falcon.create_task`, also guaranteeing warnings.
+- It replaced alias assignments with wrapper functions, potentially impacting introspection and behavior.
+
+---
+
+## Concrete improvement plan (what should be done to pass tests)
+1. **Do not emit deprecation warnings from internal framework calls.**
+   - Ensure Falcon codebase no longer calls `falcon.create_task` / `falcon.get_running_loop`.
+2. **Complete repo-wide migration:**
+   - Replace remaining `create_task(...)` and `get_running_loop(...)` imports/uses in `falcon/testing/client.py`.
+   - Remove the now-unused imports from `falcon.util` in that module.
+3. **Update tests:**
+   - Replace `falcon.create_task` usage in `tests/asgi/test_ws.py` with `asyncio.create_task` (or explicitly expect the warning).
+4. **Prefer keeping aliases as direct assignments** (safer), and implement deprecation via:
+   - docs + deprecation notes, or
+   - a wrapper only in the public `falcon` namespace (not in `falcon.util.sync`), or
+   - stack-sensitive warning logic that only warns external callers.
+
+If the goal is simply “Falcon internals should use asyncio.* directly”, the easiest path to green tests is: **revert the deprecation wrapper change** (go back to assignments) and just update internal call sites. The agent attempted the opposite (wrap + partial migration), which is the worst combination for test stability.

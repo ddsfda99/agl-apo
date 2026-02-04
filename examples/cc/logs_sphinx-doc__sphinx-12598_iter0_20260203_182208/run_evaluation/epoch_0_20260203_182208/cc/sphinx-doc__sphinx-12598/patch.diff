@@ -1,0 +1,178 @@
+diff --git a/sphinx/texinputs/make.bat.jinja b/sphinx/texinputs/make.bat.jinja
+index da2805afd..275fd1232 100644
+--- a/sphinx/texinputs/make.bat.jinja
++++ b/sphinx/texinputs/make.bat.jinja
+@@ -1,50 +1,50 @@
+-@ECHO OFF
+-
+-REM Command file for Sphinx documentation
+-
+-pushd %~dp0
+-
+-{% if latex_engine in ('platex', 'uplatex') -%}
+-REM latexmkrc is read then overridden by latexmkjarc
+-set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
+-{% else -%}
+-set PDFLATEX=latexmk -pdf -dvi- -ps-
+-{% endif %}
+-set "LATEXOPTS= "
+-
+-{% if xindy_use -%}
+-set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
+-{% if latex_engine == 'pdflatex' -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
+-{% endif -%}
+-{% endif -%}
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
+-{% endif -%}
+-set XINDYOPTS=%XINDYOPTS% -I xelatex
+-{% endif -%}
+-
+-
+-if "%1" == "" goto all-pdf
+-
+-if "%1" == "all-pdf" (
+-	:all-pdf
+-	for %%i in (*.tex) do (
+-		%PDFLATEX% %LATEXMKOPTS% %%i
+-	)
+-	goto end
+-)
+-
+-if "%1" == "all-pdf-ja" (
+-	goto all-pdf
+-)
+-
+-if "%1" == "clean" (
+-	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
+-	goto end
+-)
+-
+-:end
+-popd
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++pushd %~dp0
++
++{% if latex_engine in ('platex', 'uplatex') -%}
++REM latexmkrc is read then overridden by latexmkjarc
++set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
++{% else -%}
++set PDFLATEX=latexmk -pdf -dvi- -ps-
++{% endif %}
++set "LATEXOPTS= "
++
++{% if xindy_use -%}
++set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
++{% if latex_engine == 'pdflatex' -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
++{% endif -%}
++{% endif -%}
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
++{% endif -%}
++set XINDYOPTS=%XINDYOPTS% -I xelatex
++{% endif -%}
++
++
++if "%1" == "" goto all-pdf
++
++if "%1" == "all-pdf" (
++	:all-pdf
++	for %%i in (*.tex) do (
++		%PDFLATEX% %LATEXMKOPTS% %%i
++	)
++	goto end
++)
++
++if "%1" == "all-pdf-ja" (
++	goto all-pdf
++)
++
++if "%1" == "clean" (
++	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
++	goto end
++)
++
++:end
++popd
+diff --git a/sphinx/writers/latex.py b/sphinx/writers/latex.py
+index 1b2f193ba..53a35864c 100644
+--- a/sphinx/writers/latex.py
++++ b/sphinx/writers/latex.py
+@@ -966,11 +966,17 @@ class LaTeXTranslator(SphinxTranslator):
+     def visit_seealso(self, node: Element) -> None:
+         self.body.append(BLANKLINE)
+         self.body.append(r'\begin{sphinxseealso}{%s:}' % admonitionlabels['seealso'] + CR)
++        # Prevent LaTeX floats (e.g. figure) inside admonitions (seealso is a special one)
++        # and mark parent table as problematic to avoid tabulary when nested in tables.
++        self.no_latex_floats += 1
++        if self.table:
++            self.table.has_problematic = True
+ 
+     def depart_seealso(self, node: Element) -> None:
+         self.body.append(BLANKLINE)
+         self.body.append(r'\end{sphinxseealso}')
+         self.body.append(BLANKLINE)
++        self.no_latex_floats -= 1
+ 
+     def visit_rubric(self, node: nodes.rubric) -> None:
+         if len(node) == 1 and node.astext() in ('Footnotes', _('Footnotes')):
+@@ -1580,6 +1586,9 @@ class LaTeXTranslator(SphinxTranslator):
+     def visit_admonition(self, node: Element) -> None:
+         self.body.append(CR + r'\begin{sphinxadmonition}{note}')
+         self.no_latex_floats += 1
++        # If inside a table, mark the table as problematic to avoid tabulary environment
++        if self.table:
++            self.table.has_problematic = True
+ 
+     def depart_admonition(self, node: Element) -> None:
+         self.body.append(r'\end{sphinxadmonition}' + CR)
+@@ -1590,6 +1599,9 @@ class LaTeXTranslator(SphinxTranslator):
+         self.body.append(CR + r'\begin{sphinxadmonition}{%s}{%s:}' %
+                          (node.tagname, label))
+         self.no_latex_floats += 1
++        # If inside a table, mark the table as problematic to avoid tabulary environment
++        if self.table:
++            self.table.has_problematic = True
+ 
+     def _depart_named_admonition(self, node: Element) -> None:
+         self.body.append(r'\end{sphinxadmonition}' + CR)
+diff --git a/tests/roots/test-latex-figure-in-admonition/index.rst b/tests/roots/test-latex-figure-in-admonition/index.rst
+index e3d39d3ee..974e1d089 100644
+--- a/tests/roots/test-latex-figure-in-admonition/index.rst
++++ b/tests/roots/test-latex-figure-in-admonition/index.rst
+@@ -1,9 +1,11 @@
+-Test Figure in Admonition
+-=========================
++Figures in admonitions
++=======================
+ 
+-.. caution::
++.. note::
+ 
+-   This uses a figure in an admonition.
++   .. figure:: img.png
++
++.. seealso::
+ 
+    .. figure:: img.png
+ 
+diff --git a/tests/roots/test-root/markup.txt b/tests/roots/test-root/markup.txt
+index ff677eb54..21bb17594 100644
+--- a/tests/roots/test-root/markup.txt
++++ b/tests/roots/test-root/markup.txt
+@@ -314,6 +314,7 @@ Reference lookup underscore: [Ref_1]_
+    `Google <https://www.google.com>`_
+        For everything.
+ 
++
+ .. hlist::
+    :columns: 4

@@ -1,0 +1,100 @@
+You are an expert coding agent. Your goal is to add support for the Partitioned cookie attribute (CHIPS) to Falcon’s cookie handling without breaking existing APIs or tests, and to verify the behavior with temporary reproduction tests that you will remove before finishing. Make minimal, localized changes focused on the cookie generation layer. Do not commit any edits.
+
+Key requirements and constraints
+- Users must be able to set the flag manually via response._cookies['name']['partitioned'] = True.
+- The flag must be auto-added when Response.set_cookie() is called with same_site='None' and secure=True.
+- Do not change public APIs or function signatures, especially Response.set_cookie.
+- Do not edit the compiled extension implementation (falcon/response extension); changes there will not take effect.
+- Keep changes minimal and localized by backporting the flag into the stdlib http.cookies.Morsel that Falcon uses.
+- Write small temporary tests to verify both the auto-add and manual flag behaviors by checking the raw Set-Cookie header. Remove these tests before finishing.
+
+Important guidance based on previous failures
+- The stdlib http.cookies.Morsel in older Python versions rejects unknown attributes (raising CookieError). To support “Partitioned,” you must teach Morsel to recognize it and render it as a valueless flag, while keeping the patch safe and idempotent.
+- Avoid invasive monkey-patching where possible. Do not monkey-patch Morsel.__setitem__ on Python versions that already natively support the flag.
+- If you do patch Morsel.__setitem__ to implement auto-add, make it conservative and robust:
+  - Only apply if the flag is not natively supported.
+  - Ensure the patch is idempotent and does not raise exceptions.
+  - Check for presence of flags using membership (e.g., 'secure' in self) rather than relying on truthiness of values, which can vary across Python versions for valueless flags.
+
+High-level approach
+- Do not modify falcon/response.py; it’s not used at runtime (Response is provided by a compiled extension).
+- Do not add a new partitioned kwarg to set_cookie.
+- Patch stdlib http.cookies.Morsel at Falcon import time to:
+  - Add 'partitioned': 'Partitioned' to Morsel._reserved if missing.
+  - Add 'partitioned' to Morsel._flags if missing so it renders as a valueless flag.
+  - Optionally, auto-add the Partitioned flag when SameSite=None and Secure=True by wrapping Morsel.__setitem__, but only on Python versions that do not natively support Partitioned.
+- Ensure the patch runs early enough in Falcon import so it applies everywhere Falcon constructs cookies, both WSGI and ASGI paths.
+
+Detailed steps
+
+1) Prepare temporary reproduction tests
+- Create tests/tmp_test_partitioned_cookie.py with two tests:
+  - A WSGI test using falcon.testing.TestClient:
+    - An endpoint calls resp.set_cookie('ck', 'v', path='/', same_site='None', secure=True).
+    - Assert the raw Set-Cookie header contains “ck=v”, “SameSite=None”, “Secure”, and “Partitioned”.
+  - A manual flag test using falcon.testing.TestClient:
+    - An endpoint calls resp.set_cookie('ck', 'v', path='/', same_site='Lax', secure=True).
+    - Then sets resp._cookies['ck']['partitioned'] = True.
+    - Assert the raw Set-Cookie header contains “Partitioned” along with the other attributes.
+- Optionally add an ASGI variant using falcon.asgi.App and falcon.testing.create_asgi_client to confirm the patch applies across both code paths.
+- Run only the temporary tests first to see them fail initially:
+  - pytest -q tests/tmp_test_partitioned_cookie.py
+
+2) Implement the backport patch in Falcon
+- Choose a module that is imported very early in Falcon, on both WSGI and ASGI paths. Preferred options:
+  - falcon/util/__init__.py, or
+  - a small dedicated util module that is imported by falcon/__init__.py.
+- In that module, at import time:
+  - Import http.cookies and get Morsel.
+  - If Morsel._reserved is a dict and does not contain 'partitioned', add 'partitioned': 'Partitioned'.
+  - If Morsel._flags is a set and does not contain 'partitioned', add 'partitioned'.
+  - Gate any monkey-patch of Morsel.__setitem__ behind a check:
+    - Only wrap __setitem__ if 'partitioned' support is not already native and if you have not patched before (e.g., by setting a sentinel attribute).
+  - The wrapped __setitem__ must:
+    - Call the original __setitem__ first.
+    - Then compute whether SameSite=None and Secure are present:
+      - Determine SameSite via value normalization: check if 'samesite' in self and self['samesite'] is a string equal to 'None' case-insensitively.
+      - Determine Secure via presence: 'secure' in self.
+      - Determine if Partitioned is already present via presence: 'partitioned' in self.
+    - If SameSite=None and Secure are present, and Partitioned is not present, set 'partitioned' to True using the original __setitem__ to ensure consistent internal state.
+    - Wrap in try/except and never raise from the patch.
+  - Mark the class as patched with a sentinel attribute to avoid multiple wrapping.
+- Ensure the patch is idempotent and skips completely on Python versions where 'partitioned' is already in Morsel._reserved and Morsel._flags.
+- Ensure the patch module is imported early. If falcon/__init__.py does not currently import util, add a minimal, harmless import to trigger the patch at Falcon import time:
+  - from . import util as _util
+
+3) Validate behavior
+- Re-run the temporary tests:
+  - pytest -q tests/tmp_test_partitioned_cookie.py
+- Both tests should now pass, confirming:
+  - Auto-add of Partitioned for SameSite=None and Secure=True.
+  - Manual setting of the Partitioned flag via response._cookies does not raise CookieError and renders correctly.
+- Run the full test suite to ensure no regressions:
+  - pytest -q
+
+4) Clean up
+- Remove tests/tmp_test_partitioned_cookie.py and any other temporary artifacts.
+- Do not leave temporary tests or debugging code in the repository.
+
+Safety, compatibility, and hygiene checklist
+- Do not modify falcon/response.py or any compiled modules.
+- Do not add or change public API, including Response.set_cookie() signature.
+- Keep the patch localized to the cookie handling layer and ensure it executes at import.
+- Gate the __setitem__ monkey-patch:
+  - Only apply if the stdlib does not support Partitioned natively.
+  - Ensure a sentinel prevents double-patching.
+- Use presence checks for valueless flags:
+  - For Secure and Partitioned, use membership tests (e.g., 'secure' in self) rather than truthiness.
+  - Normalize SameSite value and compare case-insensitively to 'none'.
+- The patch must be conservative:
+  - Never raise exceptions.
+  - Be idempotent across repeated imports.
+  - Avoid side effects in environments where the stdlib already supports Partitioned.
+- Verify the patch applies in both WSGI and ASGI code paths.
+- Remove all temporary tests before finishing.
+
+Acceptance criteria
+- With response.set_cookie('ck', 'v', same_site='None', secure=True), the emitted Set-Cookie header includes the token “Partitioned” alongside “SameSite=None” and “Secure”.
+- Manually setting response._cookies['ck']['partitioned'] = True results in the “Partitioned” token being present in the Set-Cookie header without raising CookieError.
+- No changes to public APIs; no edits to compiled modules.
+- All existing tests continue to pass after you remove the temporary test file.

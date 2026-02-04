@@ -1,0 +1,34 @@
+diff --git a/src/cfnlint/rules/parameters/Used.py b/src/cfnlint/rules/parameters/Used.py
+index b0f6a0033..1d742da41 100644
+--- a/src/cfnlint/rules/parameters/Used.py
++++ b/src/cfnlint/rules/parameters/Used.py
+@@ -22,6 +22,29 @@ class Used(CloudFormationLintRule):
+     def match(self, cfn: Template) -> RuleMatches:
+         matches: RuleMatches = []
+ 
++        # If the template uses AWS::Include via Fn::Transform anywhere,
++        # parameters may be referenced inside external content and are
++        # not detectable by cfn-lint. Avoid false positives in this case.
++        try:
++            transform_trees = cfn.search_deep_keys("Fn::Transform")
++            for tree in transform_trees:
++                value = tree[-1]
++                if isinstance(value, dict):
++                    name = value.get("Name")
++                    if isinstance(name, str) and name == "AWS::Include":
++                        self.logger.debug(
++                            (
++                                "Template uses Fn::Transform with AWS::Include. "
++                                "Disabling check %s to avoid false positives"
++                            ),
++                            self.id,
++                        )
++                        return matches
++        except Exception:  # pylint: disable=broad-except
++            # If anything goes wrong while checking transforms, fall through
++            # to existing behavior
++            pass
++
+         le_refs = None
+         if cfn.has_language_extensions_transform():
+             le_refs = cfn.search_deep_keys("Ref")

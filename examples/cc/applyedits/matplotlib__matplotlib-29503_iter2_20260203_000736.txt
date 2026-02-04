@@ -1,0 +1,68 @@
+You are given a code repository in the current directory (Matplotlib-style layout).
+Your goal is to implement an enhancement and include permanent regression tests.
+
+[ENH]: Show parameter names in error message for mismatched array sizes in bar()/barh()
+
+## Problem
+When calling `plt.bar()` / `plt.barh()` with inputs that cannot be broadcast to a common shape, Matplotlib currently surfaces NumPy’s broadcast error like:
+
+`ValueError: shape mismatch: objects cannot be broadcast to a single shape. Mismatch is between arg 2 ... and arg 3 ...`
+
+This is confusing because it doesn’t mention *which Matplotlib parameters* (`x`, `height`, `y`, `width`, etc.) correspond to those “arg N” positions.
+
+A common real-world trigger is a missing comma in the categorical labels list, e.g.:
+
+```python
+from matplotlib import pyplot as plt
+arg_k = ["foo", "bar" "baz"]   # missing comma => ["foo", "barbaz"] (len 2)
+arg_n = [1, 2, 3]              # len 3
+plt.barh(arg_k, arg_n)
+plt.show()
+```
+
+## Desired behavior
+When a broadcast/shape mismatch happens inside `Axes.bar()` / `Axes.barh()`, Matplotlib should raise a `ValueError` that clearly mentions the relevant parameter names (at least for the common mismatch of label positions vs bar lengths), rather than NumPy’s “arg 2/arg 3” wording.
+
+### Requirements / constraints
+1. Add a **permanent** regression test to the repo (do not delete it). The evaluation harness expects tests to be present.
+2. Keep the error-message assertions **robust**: prefer matching stable substrings via regex (pytest `match=`) rather than asserting an entire exact message.
+3. Cover the “missing comma” scenario explicitly in a test (so the intent is captured).
+4. The implementation should improve the message for both:
+   - vertical bars: mismatch between `x` and `height`
+   - horizontal bars: mismatch between `y` and `width`
+5. Don’t overfit to only one mismatch source; implement a safe improvement that:
+   - ideally detects the common 1D length mismatch early (before NumPy broadcast) and raises a friendly error mentioning parameter names, and/or
+   - catches the broadcast `ValueError` and re-raises with a clearer message that includes parameter names.
+6. Run **targeted tests** relevant to your change (do not run the full suite unless you want to after targeted tests pass).
+
+## Step-by-step instructions you must follow
+1. Read and understand `Axes.bar()` / `Axes.barh()` behavior and how it broadcasts inputs.
+2. Write a regression test that reproduces the confusing error and asserts the improved message.
+   - Include a test that literally uses `["foo", "bar" "baz"]` for the categorical input.
+   - Use `pytest.raises(ValueError, match=...)` and match only stable parts like: `x` and `height` or `y` and `width` and something like `same length` / `broadcast` / `shape mismatch`.
+3. Locate the relevant code in `lib/matplotlib/axes/_axes.py` (likely `Axes.bar` which handles both `bar` and `barh` via an `orientation` switch).
+4. Implement the enhancement:
+   - Prefer Matplotlib-consistent wording (search existing messages like “must have the same length” in the codebase).
+   - If you do a pre-check, be careful about non-sequence scalars; only compare lengths when both inputs are clearly 1D sequences.
+   - If you catch NumPy’s broadcast error, re-raise a `ValueError` whose message includes the Matplotlib parameter names (`x`/`height` or `y`/`width`) and preserves context (optionally include the original exception text, but tests should not rely on it).
+5. Run the targeted tests (examples):
+   - `python -m pytest -q lib/matplotlib/tests/test_axes.py -k bar`
+   - or a dedicated new test module under `lib/matplotlib/tests/` (recommended if it keeps tests focused).
+6. Ensure the new test file remains in the repo and passes.
+7. Do not commit changes.
+
+## Notes on what to avoid (based on prior failed attempts)
+- Do NOT delete the regression test file after creating it.
+- Don’t assert a fully exact error message; hidden tests may check only that parameter names appear.
+- Don’t produce a message that only mentions generic “shape mismatch” without parameter names.
+- Don’t run the full suite first; start with targeted tests.
+
+## Deliverables
+- Code change(s) in the appropriate Matplotlib source file(s) so that broadcast/shape mismatch errors in `bar()` / `barh()` mention parameter names.
+- A permanent regression test that:
+  - fails on the old behavior,
+  - passes with your change,
+  - includes the missing-comma example for `barh()`,
+  - and also covers `bar()` (vertical) mismatch.
+
+Proceed to implement this enhancement now.

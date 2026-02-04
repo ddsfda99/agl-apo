@@ -1,0 +1,212 @@
+You are given a code repository in the current directory.
+
+## Goal
+Fix cfn-lint so it validates AWS::StepFunctions::StateMachine `Definition` against the newer Amazon States Language schema features without emitting incorrect E3601 errors for:
+
+1) Map state inline `ItemProcessor` (replacing deprecated `Iterator`)
+2) Fail state `CausePath` and `ErrorPath`
+3) Choice state operators: `IsBoolean`, `IsNumeric`, `IsPresent`, `IsString`, `IsTimestamp`, and the `*EqualsPath` / `*GreaterThanPath` / etc path variants
+4) Task state `TimeoutSecondsPath` and `HeartbeatSecondsPath`
+
+CloudFormation Lint version: 1.8.1 (repo version)
+Environment: python:3.12-alpine
+
+## Critical constraints from previous failures (must follow)
+Previous attempts broke integration expectations by rewriting the entire StepFunctions schema file, causing an extra lint finding in QuickStart template `quickstart/openshift.yaml` (expected 35 findings became 36; exit code changed).
+
+To avoid repeating that:
+- Do NOT rewrite or replace `src/cfnlint/data/schemas/other/step_functions/statemachine.json` wholesale.
+- Make minimal, surgical edits only to add the missing properties / alternatives while preserving all existing validation behavior as much as possible.
+- Do NOT overwrite entire test files. Only append/extend targeted tests.
+- You must identify any integration regression by diffing the actual lint JSON output vs the pinned expected results, and fix the regression (not the expectation files).
+
+## Reproduction templates (these should lint cleanly after fix)
+
+### Map state inline ItemProcessor should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: Validate_All
+        States:
+          Validate_All:
+            Type: Map
+            InputPath: $.detail
+            ItemProcessor:
+              ProcessorConfig:
+                Mode: INLINE
+              StartAt: Validate
+              States:
+                Validate:
+                  Type: Pass
+                  End: true
+            End: true
+            ResultPath: $.detail.shipped
+            ItemsPath: $.shipped
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Fail state CausePath and ErrorPath should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: FailState
+        States:
+          FailState:
+            Type: Fail
+            CausePath: $.Cause
+            ErrorPath: $.Error
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Choice operators and Path comparators should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: ChoiceState
+        States:
+          ChoiceState:
+            Type: Choice
+            Choices:
+              - Variable: $.v
+                NumericEquals: 0
+                Next: SucceedState
+              - Variable: $.v
+                IsPresent: true
+                Next: SucceedState
+            Default: SucceedState
+          SucceedState:
+            Type: Succeed
+          FailState:
+            Type: Fail
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+### Task TimeoutSecondsPath and HeartbeatSecondsPath should be accepted
+```yaml
+Resources:
+  MyStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: MyStateMachineRole
+      Definition:
+        StartAt: TaskState
+        States:
+          TaskState:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            TimeoutSecondsPath: $.TimeoutSeconds
+            HeartbeatSecondsPath: $.HeartbeatSeconds
+            End: true
+
+  MyStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ states.amazonaws.com ]
+            Action: [ sts:AssumeRole ]
+```
+
+## What to implement (minimal schema extension, not redesign)
+You need to update the StepFunctions ASL JSON Schema used by cfn-lint so these properties are recognized. Likely file:
+- `src/cfnlint/data/schemas/other/step_functions/statemachine.json`
+
+Make only the smallest changes required:
+- Map state: allow `ItemProcessor` as an alternative to `Iterator` (Iterator deprecated but still valid). Preserve current behavior for all other Map fields. Avoid changing unrelated required lists or additionalProperties constraints beyond what’s needed to accept ItemProcessor.
+- Fail state: allow `CausePath` and `ErrorPath` in addition to existing `Cause` and `Error` without loosening other validation.
+- Task state: allow `TimeoutSecondsPath` and `HeartbeatSecondsPath` with correct type (string JSONPath), without changing how `TimeoutSeconds` and `HeartbeatSeconds` validate.
+- Choice state: extend operator schema to include the five `Is*` operators and the comparator `*Path` variants. Keep the “exactly one operator” logic consistent with existing schema patterns (do not refactor the whole choice schema; only extend lists/oneOf sets in-place).
+
+## Required debugging step to prevent integration regressions
+After your changes, you MUST ensure that QuickStart template outputs are unchanged except for the intended bugfixes.
+
+Do this explicitly:
+1) Run the integration failing scenario locally and capture output in JSON.
+   - Run cfn-lint on `test/fixtures/templates/quickstart/openshift.yaml` in both strict and non-strict modes as the tests do.
+   - Use `--format json`.
+2) Compare your produced JSON array against the existing expected results in:
+   - `test/fixtures/results/quickstart/strict/openshift.json` (if present)
+   - `test/fixtures/results/quickstart/non_strict/openshift.json`
+3) If there is any difference in number of findings (for example 36 vs 35) or any new/changed finding, identify the exact extra/changed entry by comparing tuples of:
+   - Rule Id
+   - Message
+   - Location (path + line/col)
+4) Fix the schema to avoid the regression. Do NOT change the expected JSON fixtures.
+
+Do not proceed by guessing. Always locate the exact extra finding first if regression happens.
+
+## Tests to add (small and targeted)
+Add/extend unit tests for StepFunctions state machine definition validation to cover:
+- Map state with ItemProcessor (INLINE)
+- Fail state with CausePath/ErrorPath
+- Task state with TimeoutSecondsPath/HeartbeatSecondsPath
+- Choice state with IsPresent (and optionally one more Is*), plus at least one `*EqualsPath` comparator
+
+Rules for tests:
+- Do NOT overwrite any existing test module.
+- Add minimal new test cases to the existing StepFunctions rule/unit test file(s).
+- Ensure tests fail before schema fix and pass after.
+
+## Process checklist (follow exactly)
+1) Create valid reproduction YAML files in a temporary location (or use inline strings in tests). Ensure YAML is valid before running cfn-lint.
+2) Run cfn-lint to reproduce current errors (E3601).
+3) Locate schema definitions for Map/Fail/Task/Choice in the StepFunctions schema file(s).
+4) Apply minimal edits only where needed.
+5) Run unit tests relevant to StepFunctions.
+6) Run the QuickStart integration tests (or at minimum, reproduce the openshift JSON outputs and confirm they match the pinned results exactly).
+7) Run full test suite if feasible.
+8) Remove any temporary reproduction files you created.
+
+## Output requirement
+Do not commit changes.
+
+Focus on correctness and minimizing unintended schema behavior changes.

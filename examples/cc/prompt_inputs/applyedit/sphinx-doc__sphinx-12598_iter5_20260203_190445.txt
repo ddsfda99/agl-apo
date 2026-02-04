@@ -1,0 +1,322 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are an expert Sphinx/LaTeX builder developer working in an existing code repository in the **current directory**.
+
+## Goal
+Fix a regression in the LaTeX builder:
+
+1) Nesting a `figure` directive inside a `.. seealso::` admonition now makes LaTeX compilation fail with:
+
+```
+! LaTeX Error: Not in outer par mode.
+l.... \begin{figure}[htbp]
+```
+
+2) Emitting a `sphinxadmonition` inside a `tabulary` table now fails compilation with:
+
+```
+! Missing \endgroup inserted.
+l.... \end{tabulary}
+```
+
+The issue likely came from changes around float handling / grouping (mention: “Presumably due to #12508”).
+
+## Non‑negotiable requirements (learn from previous failures)
+- **You must actually reproduce both failures** before changing production code:
+  - Build the LaTeX `.tex`.
+  - And, when LaTeX is available, compile it using the existing test helper (e.g. `compile_latex_document()`), or otherwise add strong `.tex` assertions that would have produced the exact error (e.g. float placement `[htbp]` inside the seealso environment).
+- **Do not edit shared fixtures** like `tests/roots/test-root/markup.txt`. Create a **dedicated minimal testroot** for these regressions.
+- **Do not create duplicate/incorrect root names**. Verify paths with `ls` before creating anything.
+- If you need to edit a file, **read it first** (this environment requires read-before-write).
+- Run the relevant pytest tests at least for the new regression tests you add.
+
+## What to deliver
+1) A new regression testroot and tests that fail before the fix and pass after.
+2) A minimal, correct code fix in the LaTeX writer/builder.
+3) Tests passing (or appropriately skipped when LaTeX isn’t installed).
+
+Do **not** commit changes.
+
+---
+
+## Step-by-step workflow to follow
+
+### 1) Explore existing LaTeX tests/utilities first
+- Locate existing LaTeX build tests and helpers:
+  - `tests/test_builders/test_build_latex.py`
+  - Search for `compile_latex_document`, `pdflatex`, and how other tests conditionally skip when LaTeX isn’t present.
+- Identify how testroots are structured under `tests/roots/` and how tests reference them.
+
+### 2) Add a dedicated testroot (do NOT touch existing ones)
+Create a new root directory, for example:
+
+`tests/roots/test-latex-regression-admonitions/`
+
+Include:
+- `conf.py` (minimal, similar to other latex testroots; set `master_doc = "index"` if needed; keep it tiny)
+- `index.rst` containing **two minimal reproductions**:
+
+#### 2a) Repro for seealso -> figure
+Use a `seealso` containing a `figure`. Provide an image asset in the root so Sphinx can copy it; use a small existing image from another root if allowed, or create a tiny placeholder image file in the root (prefer reusing an existing test image if available).
+Example:
+
+```rst
+Seealso with figure
+===================
+
+.. seealso::
+
+   .. figure:: img.png
+      :alt: alt text
+
+      caption
+```
+
+#### 2b) Repro for admonition inside a table that would be tabulary
+Construct an RST table likely to produce `tabulary` (long text columns / automatic widths). Put an admonition in a cell. Keep it minimal but effective, e.g. a list-table with wide text, and inside one cell:
+
+```rst
+Admonition in table
+===================
+
+.. list-table::
+   :widths: 50 50
+   :header-rows: 0
+
+   * - left cell with long long long text to trigger tabulary behavior
+     - .. admonition:: Title
+
+          body
+```
+
+If list-table doesn’t produce tabulary in this project, switch to a grid table that triggers tabulary; inspect generated `.tex` to confirm it uses `tabulary` pre-fix.
+
+### 3) Write tests that prove the failures (not speculative)
+Add tests in `tests/test_builders/test_build_latex.py` (or a new adjacent test module if that’s the local convention).
+
+You must add **two tests**:
+
+#### Test A: seealso with figure
+- Build LaTeX for the new root.
+- Assert something that would have caused the failure pre-fix and shows the fix post-change. Prefer:
+  - Assert that the generated `.tex` for that figure uses a non-floating placement or otherwise avoids starting a float in that context.
+  - If the codebase uses a “no floats” counter (e.g. `no_latex_floats`) and uses `[H]` instead of `[htbp]`, assert `[H]` is used for the nested figure.
+- Additionally, **compile the LaTeX** using the existing helper when LaTeX is available, and assert compilation succeeds. If LaTeX is not available, ensure the test is skipped (copy the established pattern from other tests).
+
+#### Test B: admonition inside tabulary
+- Build LaTeX for the new root.
+- Inspect the `.tex` to confirm it would have emitted `tabulary` pre-fix (or still emits it if the real fix is proper grouping).
+- Then:
+  - Either assert the table type is changed (e.g. `tabular` instead of `tabulary`) **and** compile succeeds, or
+  - Keep `tabulary` and assert compilation succeeds (preferred if feasible).
+- Again, compile when available; otherwise assert `.tex` structure that demonstrates the bug is addressed.
+
+**Important:** The tests must fail on current main without your fix (either by compilation failure or by `.tex` assertions) and pass with your fix.
+
+### 4) Locate the actual bug in LaTeX writer
+Based on the symptoms:
+- “Not in outer par mode” typically happens when LaTeX tries to start a float (`figure` with `[htbp]`) inside a restricted context (like a box/minipage/table cell/admonition environment).
+- “Missing \endgroup inserted” near `\end{tabulary}` suggests grouping/unbalanced environments triggered by the admonition macro or paragraph handling inside tabulary.
+
+Search for:
+- `visit_seealso`, `depart_seealso`
+- `visit_figure`
+- `no_latex_floats` or float placement logic
+- `sphinxadmonition` latex environment/macro usage
+- `tabulary` table writer logic; how it decides between `tabulary` vs `tabular` and any “problematic content” flags
+
+### 5) Implement the minimal, correct fix
+Constraints:
+- Don’t apply a broad workaround unless tests demonstrate it’s required.
+- Prefer centralized logic rather than sprinkling flags in many visitors.
+
+Possible correct directions (you decide after inspecting current code/tests):
+- Treat `seealso` like other admonition contexts for float suppression (so figures inside seealso are non-floating or handled safely).
+- Ensure admonitions inside tables are handled safely:
+  - either by proper grouping/paragraph mode management within table cells,
+  - or by forcing fallback from `tabulary` to `tabular` only when necessary (and prove via tests).
+- Ensure your fix covers both cases and does not regress other LaTeX outputs.
+
+### 6) Validate
+Run the exact new tests you added.
+Also run the closest existing LaTeX test subset to ensure no regressions, e.g.:
+- `pytest tests/test_builders/test_build_latex.py -k latex`
+(or a more targeted selection if the suite is large).
+
+### 7) Clean up
+- Ensure only the new testroot and your intended code/test changes remain.
+- No temporary debug files.
+
+---
+
+## Output format
+As you work, show:
+- The exact files you modify and why.
+- The key `.tex` snippets before/after relevant to the fixes.
+- The pytest commands you ran and their results.
+
+Remember: reproduce first, then fix, then re-run tests.
+
+the evaluations of previous failures:
+The agent failed primarily because it never reached the “reproduce both failures → add failing regression tests → implement minimal fix → rerun tests” loop. It got stuck in environment/path confusion, created only a partial testroot, and made **no production code changes** and **no regression tests** validating the two reported LaTeX compilation errors.
+
+Below are the concrete failure points and what to improve.
+
+---
+
+## 1) Broke the “reproduce first” requirement (never reproduced either failure)
+
+### What happened
+- The prompt requires **building the LaTeX `.tex`** for a dedicated testroot and **compiling it** via `compile_latex_document()` (or strong `.tex` assertions if LaTeX absent).
+- The trace shows the agent:
+  - Looked up `compile_latex_document()` and read the giant latex test file.
+  - Read `sphinx/writers/latex.py` and identified relevant code.
+  - Created a new testroot directory and only wrote a one-line `conf.py`.
+  - **Never created `index.rst`** with the two repro cases.
+  - **Never ran `app.build()` / pytest** for new tests.
+  - **Never invoked `compile_latex_document()`**.
+
+### Why this is fatal
+Without reproduction, the agent cannot:
+- Prove the failures exist on current main
+- Prove the fix addresses them
+- Prevent regressions
+
+### How to improve
+- Immediately create the minimal testroot with **both reproductions** and run a focused pytest that:
+  - Builds LaTeX output, inspects the `.tex`
+  - Compiles using `compile_latex_document()` with the established skip markers (stylefiles installed + SKIP_LATEX_BUILD)
+- The repo already has patterns for compilation and skip logic in `tests/test_builders/test_build_latex.py`.
+
+---
+
+## 2) Path confusion wasted time and caused incorrect reads
+
+### What happened
+The agent repeatedly attempted to read files using `/workspace/...` paths:
+- `Read("/workspace/tests/test_builders/test_build_latex.py")` failed: file does not exist.
+- Later it discovered actual CWD is `/testbed`.
+
+### Why this is bad
+- It violates “verify paths with ls before creating anything” in spirit and slows progress.
+- Early failures could have been avoided by `pwd` + `ls` before first `Read`.
+
+### How to improve
+- Start with:
+  - `pwd`
+  - `ls`
+  - `ls tests/test_builders`
+- Use relative paths consistently once CWD is known (e.g. `tests/test_builders/test_build_latex.py`).
+
+---
+
+## 3) Created a new testroot but left it incomplete (only `conf.py`)
+
+### What happened
+- The agent created: `tests/roots/test-latex-regression-admonitions/`
+- It only wrote: `conf.py` with `exclude_patterns = ['_build']`
+- No `index.rst`, no image asset, no table/admonition content, no toctree, etc.
+
+### Why this fails the prompt
+The prompt explicitly requires:
+- New dedicated testroot
+- `index.rst` containing **both minimal reproductions**
+- image file so Sphinx copies it
+
+### How to improve
+- Add:
+  - `index.rst` with two sections:
+    1) `.. seealso::` containing nested `.. figure::`
+    2) a table (likely `list-table`) with an admonition inside a cell (to trigger `tabulary`)
+  - image asset (copy from an existing testroot image is fine; e.g. reuse `img.png` like other roots do)
+
+---
+
+## 4) No regression tests were added at all
+
+### What happened
+- The agent checked whether `tests/test_builders/test_build_latex_regressions.py` existed, but never created it.
+- It also didn’t modify `tests/test_builders/test_build_latex.py` to add the two required tests.
+
+### Why this is fatal
+Even if a fix existed, there would be nothing to validate it.
+
+### How to improve
+Add two tests (either in existing module or a new one):
+- `test_latex_seealso_with_nested_figure_compiles()`
+- `test_latex_admonition_in_tabulary_compiles()`
+
+Each should:
+- `@pytest.mark.sphinx('latex', testroot='latex-regression-admonitions')`
+- Build and read `projectnamenotset.tex`
+- Assert the specific problematic patterns are resolved **and** compile (skipping appropriately if LaTeX missing)
+
+---
+
+## 5) Agent noticed the likely root cause but didn’t act on it
+
+### Important observation from the trace (correct)
+In `LaTeXTranslator`:
+- `visit_seealso()` **does not** increment `no_latex_floats`
+- `visit_figure()` uses float `[htbp]` unless `no_latex_floats` is non-zero (then uses `H`)
+
+This matches failure (1): a figure inside `seealso` currently becomes `\begin{figure}[htbp]` inside an admonition-like environment → “Not in outer par mode”.
+
+Also relevant to failure (2):
+- `visit_admonition()` increments `no_latex_floats` but does **not** set `self.table.has_problematic = True`
+- Many other block constructs inside tables *do* set `self.table.has_problematic = True` to force `tabular` (not `tabulary`) or otherwise avoid fragile content in `tabulary`.
+- So an admonition inside a `tabulary` cell is very plausible to trigger grouping errors (“Missing \endgroup inserted … \end{tabulary}”).
+
+### What the agent did wrong
+It stopped after reading code and did not:
+- implement the minimal fix in `sphinx/writers/latex.py`
+- validate via `.tex` assertions/compilation
+
+### How to improve
+After reproducing:
+- Fix (1): treat `seealso` like other admonition contexts for float suppression (likely increment/decrement `no_latex_floats` in `visit_seealso/depart_seealso`)
+- Fix (2): ensure admonition nodes inside tables cause `table.has_problematic = True` (or alternative: ensure proper grouping/boxing inside table cells)
+
+But again: tests must drive the exact fix.
+
+---
+
+## 6) Didn’t run pytest at all
+
+### What happened
+No `pytest ...` command appears.
+
+### Why this is fatal
+Prompt requires:
+- run relevant pytest tests at least for new regressions
+
+### How to improve
+At minimum:
+- `pytest tests/test_builders/test_build_latex.py -k 'seealso or admonition or regression'`
+or for new module:
+- `pytest tests/test_builders/test_build_latex_regressions.py -q`
+
+---
+
+## 7) Minor: “read-before-write” was followed for new file, but not for existing files (OK); still, creation happened before full plan
+
+The environment rule is “read before edit”. They created a new `conf.py` (creation is OK). But they should have first planned the full testroot content and tests, rather than writing only one file and stopping.
+
+---
+
+# Summary of why the agent failed
+1. **Never reproduced either LaTeX compilation failure**.
+2. **Never added regression tests** (required two tests).
+3. **Never implemented any fix** in production code.
+4. Lost time to **incorrect path assumptions**.
+5. Created an **incomplete** testroot (only `conf.py`).
+6. **Did not run pytest**.
+
+To pass, the agent must complete the workflow: build minimal testroot with both cases, add two tests that fail pre-fix (via compilation or deterministic `.tex` assertions) and pass post-fix, implement the minimal LaTeX translator fix, and run pytest on the new tests.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

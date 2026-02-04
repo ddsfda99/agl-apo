@@ -1,0 +1,74 @@
+You are an expert Python developer working on the **cfn-lint** repository in the current directory.
+
+## Goal
+Fix the bug described below: **when checking resource type availability per region (E3006), cfn-lint should not report an error for resources that can never be created in that region because their CloudFormation Condition evaluates to `False` for that region**.
+
+In other words: when linting with `-r cn-north-1`, a resource that is guarded by a condition excluding `cn-north-1` should not trigger:
+
+> E3006 Resource type 'AWS::GlobalAccelerator::Listener' does not exist in 'cn-north-1'
+
+The repository currently has logic around “building scenarios” for conditions; previous attempts changed semantics too broadly and likely caused regressions. Your fix must be precise and backed by tests that reflect the real reported scenario.
+
+## Important behavioral requirements (read carefully)
+1. **Only skip E3006 availability checks when the resource’s Condition is provably always `False` for that specific region.**
+   - If the condition is indeterminate (could be true or false) for that region, do **not** skip; keep the existing behavior.
+   - If the condition is missing/unknown or cannot be evaluated, treat it as indeterminate and do **not** skip.
+2. Do not implement a broad “honor conditions always” change. The intent is narrow: **avoid false positives when region-excluding conditions make the resource impossible in the lint region.**
+3. Add tests that represent the real user report: a resource with `Condition` based on `AWS::Region` excluding `cn-north-1` should not raise E3006 when linting that region.
+4. Ensure you don’t break multi-region linting: if linting multiple regions, apply the rule per region: skip only where the condition is always false for that region.
+5. Run a sufficiently broad test suite after the change (not just one test file). At minimum run `pytest -q test/unit/rules` and if reasonable `pytest -q`.
+
+## Context (user report)
+- cfn-lint version: 1.6.0
+- Command example:
+  `cfn-lint -i W3005 W2001 W3045 W8003 E1010 E1022 -e -r cn-north-1 --ignore-templates .. -t $TEMPLATE_ROOT/*.template.json`
+- A resource type unavailable in cn partitions is conditionally excluded when region is cn-north-1 / cn-northwest-1. CloudFormation deploy is valid, but lint errors.
+
+Template snippet concept:
+- Resource has `"Condition": "SomeCondition"`
+- Condition uses `Fn::Not` + `Fn::Or` + `Fn::Equals` checks against `Ref: AWS::Region` to exclude cn regions.
+
+## Step-by-step tasks
+1. **Understand the bug and locate the rule**
+   - Find where E3006 is defined and where “type availability by region” is checked.
+   - Identify where resource `Condition` is consulted (if at all) when validating availability.
+   - Find helper logic for evaluating/building region-based condition scenarios (likely a function similar to `build_scenerios_on_region`).
+
+2. **Create a reproduction test (must be realistic)**
+   - Add a unit test that builds a minimal template containing:
+     - A `Conditions` section with a condition excluding `cn-north-1` using `AWS::Region`.
+     - A `Resources` section with a resource of a type not available in `cn-north-1` (use the same type from the report if present in the provider schema in this repo).
+   - Configure the validator/context to lint for region `cn-north-1`.
+   - Assert: **no E3006 reported for that resource in cn-north-1** because condition is always false there.
+   - Add at least one negative/contrast assertion:
+     - If lint region is `us-east-1` (or another region where the condition could be true), then E3006 should behave normally (either error or no error depending on type availability in that region).
+     - Or, if the condition is indeterminate (does not reference `AWS::Region`), ensure E3006 is not skipped.
+
+   The key is: tests must enforce the narrow rule: **skip only when scenarios are exactly `{False}` for the current region**.
+
+3. **Implement the fix**
+   - Update the E3006/type-availability rule logic so that for each target region:
+     - If the resource has no Condition: proceed with availability check as before.
+     - If it has a Condition:
+       - Evaluate scenarios for that condition *in that region*.
+       - **Skip availability check only when the set of scenarios is exactly `{False}`.**
+       - For `{True}`, `{True, False}`, empty, errors, missing condition: do not skip.
+   - Avoid changing behavior for cases that are not provably excluded.
+
+4. **Run tests broadly**
+   - Run `pytest -q test/unit/rules` (minimum).
+   - If time permits, run `pytest -q` to catch regressions.
+   - If failures occur, adjust implementation carefully to preserve existing semantics except for the targeted bug.
+
+5. **Clean up**
+   - Remove any temporary debug code/files.
+   - Keep changes limited to the rule implementation and tests.
+
+## Guidance on avoiding previous failure modes
+- Do not change the logic to “skip if False is possible” and do not change it to “validate if True is possible” globally without the `{False}`-only guard. The desired behavior is:
+  - **Skip only when it cannot possibly be created in that region.**
+- Treat unknown/missing/unevaluable conditions as indeterminate, not as a reason to skip.
+- Ensure tests do not merely reflect your implementation; they must reflect the reported cn-region exclusion scenario and enforce the `{False}`-only skip rule.
+
+## Deliverable
+Implement the code change and unit tests in this repository. Do not commit. Run tests and ensure they pass.

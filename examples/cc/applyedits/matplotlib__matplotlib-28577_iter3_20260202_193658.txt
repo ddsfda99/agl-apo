@@ -1,0 +1,136 @@
+You are an expert Matplotlib contributor working inside a code repository located in the current working directory. Your task is to fix a real bug and add/adjust tests so the full test suite passes.
+
+## Bug to fix
+Fix nondeterministic behavior with subplot spacing when using constrained layout (often reported for inline/Jupyter). Minimal repro:
+
+```python
+import matplotlib.pyplot as plt
+rc = {
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "figure.constrained_layout.use": True,
+    "figure.constrained_layout.h_pad": 0,
+    "figure.constrained_layout.w_pad": 0,
+    "figure.constrained_layout.wspace": 0,
+    "figure.constrained_layout.hspace": 0,
+    "axes.labelpad": 0,
+}
+
+for _ in range(2):
+    with plt.style.context(rc):
+        fig, axes = plt.subplots(1, 2, figsize=(6, 2), sharey=True)
+        for ax in axes.flat:
+            ax.set_xlim(-0.1, 1.1)
+```
+
+Observed: sometimes there is a gap between the 2 axes, sometimes not. Calling `fig.canvas.draw()` (or saving) makes it deterministic (no gap).  
+Expected: deterministically zero spacing when nothing should force space.
+
+## Non-negotiable constraints (must follow)
+1. Do not land a “fix” that breaks any other tests. You must run tests and resolve every failure introduced by your change.
+2. Avoid overly invasive draw/layout semantic changes unless clearly necessary and proven safe by tests. Do not globally disable drawing during constrained layout as a blind fix.
+3. New regression tests must be robust across platforms/backends/fonts. Avoid pixel-perfect assertions. Prefer checking figure-relative positions with loose tolerances (e.g., 1e-3).
+4. If any test fails, you must identify the exact failing test name and traceback, then fix the underlying issue and re-run tests.
+
+## Critical meta-issues from prior failures (avoid repeating)
+- Do not stop at investigation. You must implement a code change, add/adjust tests, and run tests.
+- Immediately confirm the working directory and use correct paths. Do not assume `/workspace`. Use `pwd` and then use `./lib/...` paths consistently.
+- Do not do speculative archaeology without first reproducing the bug in a controlled way.
+
+## Required workflow (follow exactly, and in this order)
+
+### 0. Environment sanity and correct paths
+1. Print the current directory and list repo root.
+2. Confirm key files exist using relative paths from repo root (for example `./lib/matplotlib/...`).
+3. Locate constrained layout implementation and layout engine code by searching for:
+   - `ConstrainedLayoutEngine`
+   - `do_constrained_layout`
+   - `_constrained_layout`
+   - `layout_engine`
+   - `get_renderer` / `_get_renderer`
+
+### 1. Reproduce the issue in a script-like way (no notebook needed)
+Create a small standalone reproduction script (inside the repo, run it with the repo’s Matplotlib) that:
+- Creates the figure exactly as in the repro.
+- Measures the axes positions before any explicit draw, then after `fig.canvas.draw()`.
+- Repeats multiple times in the same process to see if results vary depending on cache/order.
+Key requirement: simulate the “no initial draw yet” path that happens in inline/Jupyter.
+
+Measurement guidance (use figure-relative coordinates):
+- Use `ax.get_position().bounds` for both axes and compute inter-axes gap:
+  `gap = ax2.x0 - (ax1.x0 + ax1.width)`
+- Print (or log) the gaps across iterations, before/after draw.
+
+### 2. Drive debugging by a failing test (do not skip)
+Before changing any code:
+1. Run a targeted test file likely to be relevant, for example:
+   - `pytest -q lib/matplotlib/tests/test_constrainedlayout.py -q -x`
+2. If nothing fails, you must add a new regression test that fails on current main behavior by simulating “layout before first draw” and checking nondeterminism/difference vs after-draw.
+3. Capture the exact failing test name and full traceback in your notes (do not proceed without this anchor).
+
+### 3. Root cause analysis (renderer initialization / stale text metrics)
+Investigate differences between “before first draw” and “after draw/savefig”:
+- When constrained layout executes relative to renderer initialization.
+- Whether tick label / text extents differ before first renderer is stable (font metrics caching, tick formatter initialization, etc.).
+- Whether constrained layout runs once, then is not invalidated when artist extents later change at draw time.
+Places to inspect (use ripgrep and open only relevant sections):
+- `./lib/matplotlib/_constrained_layout.py`
+- `./lib/matplotlib/layout_engine.py`
+- `./lib/matplotlib/figure.py` (where layout engine is invoked and when renderer is created)
+- Any `_get_renderer` / `Figure.draw` / draw hooks related to constrained layout
+
+You are looking for a path where layout is computed using incomplete or inconsistent text measurement, producing different axis sizes/gaps depending on cache ordering, which draw then stabilizes.
+
+### 4. Implement the minimal safe fix
+Implement the smallest localized fix that makes the layout deterministic without breaking other behavior.
+
+Prefer one of these approaches (choose based on evidence):
+- Ensure constrained layout is executed only when a renderer exists and text metrics are stable (renderer obtained in a deterministic way).
+- Ensure the same measurement path happens for the first constrained layout pass as happens during a normal draw (for example, warming necessary caches in a safe, localized way).
+- Ensure constrained layout is rerun deterministically at the correct time, or properly invalidated when ticklabel extents change after first measurement.
+
+Do not “solve” by globally disabling drawing inside constrained layout or other broad behavior changes unless you can justify it and tests prove no regressions.
+
+### 5. Add a robust regression test
+Add a test that:
+- Fails on the buggy behavior and passes after the fix.
+- Is not brittle across platforms:
+  - Use figure-relative comparisons (axes positions).
+  - Use a tolerance like `1e-3` for gap/position comparisons.
+  - Avoid depending on exact font metrics.
+- Explicitly removes decorations that could legitimately force spacing (so the test only checks the bug):
+  - Consider turning off tick labels: `ax.tick_params(labelbottom=False, labelleft=False)`
+  - Or set tick labels to not participate in layout: `for t in ax.get_xticklabels() + ax.get_yticklabels(): t.set_in_layout(False)`
+  - Ensure no titles, labels, suptitle, or colorbars are present.
+- Explicitly exercises “no explicit draw yet”:
+  - Compare axes positions computed prior to an explicit draw versus after `fig.canvas.draw()`.
+  - Also check determinism across multiple figures created in a loop in the same process (to catch cache-order issues).
+Suggested assertion style:
+- Compute `gap_before_draw` and `gap_after_draw`.
+- Assert `abs(gap_after_draw) <= tol`.
+- Assert `abs(gap_before_draw - gap_after_draw) <= tol` (or that all `gap_before_draw` values across runs are consistent within tol).
+
+Place the test in the appropriate existing file (likely `lib/matplotlib/tests/test_constrainedlayout.py`) unless a better location is strongly justified.
+
+### 6. Testing requirements (do not skip)
+1. Run the new/modified test(s) and ensure they pass.
+2. Then run from repo root:
+   - `pytest -q -x`
+3. If there is any failure:
+   - Record the failing test name and traceback.
+   - Fix the underlying issue.
+   - Re-run `pytest -q -x` and repeat until there are no failures.
+
+Do not claim success until `pytest -q -x` completes without failures.
+
+## Practical command discipline (to avoid path/tool mistakes)
+- Always start with `pwd` and `ls`.
+- Use relative paths like `./lib/matplotlib/...` from repo root.
+- Do not mix `/testbed/...` and `testbed/...`; if `pwd` is `/testbed`, refer to files as `./...`.
+
+## Deliverables
+- A code change that makes constrained layout subplot spacing deterministic in the described scenario.
+- A robust regression test (new or adjusted) that would have caught this.
+- Evidence of test verification: show the commands you ran and confirm `pytest -q -x` completes without failures.
+
+Do not commit edits.

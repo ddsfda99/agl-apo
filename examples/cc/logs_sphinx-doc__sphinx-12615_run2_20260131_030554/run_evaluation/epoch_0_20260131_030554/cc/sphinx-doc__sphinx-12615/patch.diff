@@ -1,0 +1,190 @@
+diff --git a/sphinx/texinputs/make.bat.jinja b/sphinx/texinputs/make.bat.jinja
+index da2805afd..275fd1232 100644
+--- a/sphinx/texinputs/make.bat.jinja
++++ b/sphinx/texinputs/make.bat.jinja
+@@ -1,50 +1,50 @@
+-@ECHO OFF
+-
+-REM Command file for Sphinx documentation
+-
+-pushd %~dp0
+-
+-{% if latex_engine in ('platex', 'uplatex') -%}
+-REM latexmkrc is read then overridden by latexmkjarc
+-set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
+-{% else -%}
+-set PDFLATEX=latexmk -pdf -dvi- -ps-
+-{% endif %}
+-set "LATEXOPTS= "
+-
+-{% if xindy_use -%}
+-set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
+-{% if latex_engine == 'pdflatex' -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
+-{% endif -%}
+-{% endif -%}
+-{% if xindy_cyrillic -%}
+-set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
+-{% endif -%}
+-set XINDYOPTS=%XINDYOPTS% -I xelatex
+-{% endif -%}
+-
+-
+-if "%1" == "" goto all-pdf
+-
+-if "%1" == "all-pdf" (
+-	:all-pdf
+-	for %%i in (*.tex) do (
+-		%PDFLATEX% %LATEXMKOPTS% %%i
+-	)
+-	goto end
+-)
+-
+-if "%1" == "all-pdf-ja" (
+-	goto all-pdf
+-)
+-
+-if "%1" == "clean" (
+-	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
+-	goto end
+-)
+-
+-:end
+-popd
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++pushd %~dp0
++
++{% if latex_engine in ('platex', 'uplatex') -%}
++REM latexmkrc is read then overridden by latexmkjarc
++set PDFLATEX=latexmk -r latexmkjarc -pdfdvi -dvi- -ps-
++{% else -%}
++set PDFLATEX=latexmk -pdf -dvi- -ps-
++{% endif %}
++set "LATEXOPTS= "
++
++{% if xindy_use -%}
++set XINDYOPTS={{ xindy_lang_option }} -M sphinx.xdy
++{% if latex_engine == 'pdflatex' -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRlatin2utf8.xdy
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LICRcyr2utf8.xdy
++{% endif -%}
++{% endif -%}
++{% if xindy_cyrillic -%}
++set XINDYOPTS=%XINDYOPTS% -M LatinRules.xdy
++{% endif -%}
++set XINDYOPTS=%XINDYOPTS% -I xelatex
++{% endif -%}
++
++
++if "%1" == "" goto all-pdf
++
++if "%1" == "all-pdf" (
++	:all-pdf
++	for %%i in (*.tex) do (
++		%PDFLATEX% %LATEXMKOPTS% %%i
++	)
++	goto end
++)
++
++if "%1" == "all-pdf-ja" (
++	goto all-pdf
++)
++
++if "%1" == "clean" (
++	del /q /s *.dvi *.log *.ind *.aux *.toc *.syn *.idx *.out *.ilg *.pla *.ps *.tar *.tar.gz *.tar.bz2 *.tar.xz *.fls *.fdb_latexmk
++	goto end
++)
++
++:end
++popd
+diff --git a/sphinx/util/inventory.py b/sphinx/util/inventory.py
+index 9065d31c9..c552ae041 100644
+--- a/sphinx/util/inventory.py
++++ b/sphinx/util/inventory.py
+@@ -155,17 +155,33 @@ class InventoryFile:
+                 # Some types require case insensitive matches:
+                 # * 'term': https://github.com/sphinx-doc/sphinx/issues/9291
+                 # * 'label': https://github.com/sphinx-doc/sphinx/issues/12008
++                #
++                # For 'std:label' specifically, labels that differ only by case
++                # should not be considered ambiguous, since HTML anchors can be
++                # case-sensitive and represent different targets. Therefore,
++                # when detecting ambiguities for labels, compare locations in a
++                # case-insensitive manner.
+                 definition = f"{type}:{name}"
+                 content = prio, location, dispname
+                 lowercase_definition = definition.lower()
++
++                def _normalize_content_for_ambiguity(t: str, c: tuple[str, str, str]) -> tuple[str, str, str]:
++                    p, loc, disp = c
++                    if t == 'std:label':
++                        # Ignore case in location when assessing ambiguity for labels
++                        return p, loc.lower(), disp
++                    return c
++
++                normalized_content = _normalize_content_for_ambiguity(type, content)
++
+                 if lowercase_definition in potential_ambiguities:
+-                    if potential_ambiguities[lowercase_definition] != content:
++                    if potential_ambiguities[lowercase_definition] != normalized_content:
+                         actual_ambiguities.add(definition)
+                     else:
+                         logger.debug(__("inventory <%s> contains duplicate definitions of %s"),
+                                      uri, definition, type='intersphinx',  subtype='external')
+                 else:
+-                    potential_ambiguities[lowercase_definition] = content
++                    potential_ambiguities[lowercase_definition] = normalized_content
+             if location.endswith('$'):
+                 location = location[:-1] + name
+             location = join(uri, location)
+diff --git a/tests/test_util/intersphinx_data.py b/tests/test_util/intersphinx_data.py
+index 95cf80a9b..285088ccd 100644
+--- a/tests/test_util/intersphinx_data.py
++++ b/tests/test_util/intersphinx_data.py
+@@ -62,3 +62,13 @@ A term std:term -1 glossary.html#term-a-term -
+ b term std:term -1 document.html#id5 -
+ B term std:term -1 document.html#B -
+ ''')
++
++INVENTORY_V2_AMBIGUOUS_LABELS: Final[bytes] = b'''\
++# Sphinx inventory version 2
++# Project: foo
++# Version: 2.0
++# The remainder of this file is compressed with zlib.
++''' + zlib.compress(b'''\
++python--m-build--v std:label -1 index.html#python--m-build--v -
++python--m-build--V std:label -1 index.html#python--m-build--V -
++''')
+diff --git a/tests/test_util/test_util_inventory.py b/tests/test_util/test_util_inventory.py
+index d01785fda..64e00a99a 100644
+--- a/tests/test_util/test_util_inventory.py
++++ b/tests/test_util/test_util_inventory.py
+@@ -12,6 +12,7 @@ from tests.test_util.intersphinx_data import (
+     INVENTORY_V2,
+     INVENTORY_V2_AMBIGUOUS_TERMS,
+     INVENTORY_V2_NO_VERSION,
++    INVENTORY_V2_AMBIGUOUS_LABELS,
+ )
+ 
+ 
+@@ -57,6 +58,14 @@ def test_ambiguous_definition_warning(warning):
+     assert 'contains multiple definitions for std:term:b' in warning.getvalue().lower()
+ 
+ 
++def test_ambiguous_label_case_only_no_warning(warning):
++    # Ensure that labels differing only by case do not trigger ambiguity warning
++    # This mirrors inventory entries like python -m build -v and -V which differ only by case
++    f = BytesIO(INVENTORY_V2_AMBIGUOUS_LABELS)
++    InventoryFile.load(f, '/util', posixpath.join)
++    assert 'contains multiple definitions for std:label:python--m-build--v' not in warning.getvalue().lower()
++
++
+ def _write_appconfig(dir, language, prefix=None):
+     prefix = prefix or language
+     os.makedirs(dir / prefix, exist_ok=True)

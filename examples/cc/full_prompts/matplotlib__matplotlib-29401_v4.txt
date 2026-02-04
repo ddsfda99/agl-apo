@@ -1,0 +1,66 @@
+You are given a code repository in the current directory (Matplotlib). Fix the bug described below and leave the repo in a clean, test-covered state.
+
+Task: Fix bug — `.remove()` on `ErrorbarContainer` does not remove the corresponding item from the legend
+
+Bug summary  
+When calling `.remove()` on the `ErrorbarContainer` returned from `Axes.errorbar()`, the artists disappear from the plot, but the legend entry remains. This differs from typical behavior when removing `Line2D` returned from `Axes.plot()`.
+
+Reproduction snippet (for understanding; do not rely on PDF output for tests):
+```python
+from matplotlib import pyplot
+
+ax = pyplot.gca()
+obj1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
+pyplot.legend()
+obj1.remove()
+ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
+pyplot.legend()
+# Expected: legend contains only "bar"
+```
+
+What you must do
+1) Reproduce with an automated test (no file outputs like PDFs).  
+   - Add a regression test that fails on the current main branch and passes with your fix.  
+   - Prefer adding the test to an existing relevant test module (e.g., `lib/matplotlib/tests/test_legend.py` or `lib/matplotlib/tests/test_container.py`). A new test file is acceptable, but do NOT delete the test at the end. The final patch must include the test.
+
+2) Locate root cause and implement the fix.  
+   Guidance from prior investigation (use this, don’t redo from scratch):
+   - `ErrorbarContainer.remove()` removes contained artists and will remove the container from `ax.containers` only if a `_remove_method` hook is set.
+   - `Axes.add_container()` is responsible for setting that hook.
+   - The bug arises because `Axes.errorbar()` adds the `ErrorbarContainer` by directly appending to `self.containers` instead of calling `self.add_container(...)`, so `_remove_method` isn’t set and the container remains discoverable by legend-building logic.
+
+   Required fix:
+   - In `lib/matplotlib/axes/_axes.py`, update `Axes.errorbar()` so the created `ErrorbarContainer` is registered via `self.add_container(errorbar_container)` rather than `self.containers.append(errorbar_container)`.
+
+   Scope control:
+   - Do NOT change 3D code (`mpl_toolkits/mplot3d/...`) unless you also add a 3D regression test and run targeted 3D tests. If the 2D fix fully addresses the reported issue, keep changes limited to 2D.
+
+3) Validate properly with tests.  
+   - Run the new regression test and any nearby relevant tests.  
+   - If you touch only 2D code, at minimum run the single test file you edited/added plus one broader legend/container test module if reasonable.  
+   - If you modify any 3D code, also run targeted 3D tests (for example, `pytest -q lib/mpl_toolkits/mplot3d/tests/test_axes3d.py lib/mpl_toolkits/mplot3d/tests/test_legend3d.py`).
+
+4) Leave the working tree clean.  
+   - Do not leave untracked artifacts (for example a `.claude/` directory or similar). Remove any accidental files you created.  
+   - Do not delete the regression test you added.  
+   - Do not add temporary debug prints.
+
+Test design requirements (important)
+- The regression test must assert that after removing an `ErrorbarContainer`, it no longer contributes to legend entries.
+- Avoid image comparison; instead inspect legend labels programmatically.
+  Example approach (you can adapt):
+  - Create axes, call `ax.errorbar(..., label="foo")`
+  - Create a legend (or directly use `ax.get_legend_handles_labels()` / legend texts) to confirm “foo” is present
+  - Call `.remove()` on the returned container
+  - Add another labeled artist (e.g., another `errorbar` or a line) with label “bar”
+  - Recompute legend handles/labels and assert only “bar” remains and “foo” is gone
+
+Implementation checklist
+- Find the exact place in `Axes.errorbar()` where the `ErrorbarContainer` is created and currently appended to `self.containers`.
+- Replace that with `self.add_container(errorbar_container)`.
+- Ensure the returned value of `Axes.errorbar()` remains unchanged.
+- Add/keep the regression test.
+- Run tests.
+- Ensure `git status --porcelain` is clean (no untracked files) when done.
+
+Do not commit your edits.

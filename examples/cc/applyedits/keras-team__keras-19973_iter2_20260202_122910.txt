@@ -1,0 +1,61 @@
+You are given a code repository in the current directory.
+
+Task: Fix an inconsistency/bug in `keras.layers.MultiHeadAttention` where `query` and `value` last-dimension mismatches are sometimes allowed (eager tensors) but rejected for symbolic `keras.Input()` tensors due to an assertion during shape inference. The goal is to make behavior consistent and correct across symbolic/eager usage and across backends, without breaking the repository test suite.
+
+Context (observed behavior)
+- With torch tensors (eager), this runs without error even when `query.shape[-1] != value.shape[-1]`:
+  - `query: (batch, seq, 16)`, `value: (batch, seq, 8)`
+  - `mha = MultiHeadAttention(num_heads=8, key_dim=2)`
+- With symbolic tensors (`keras.Input`), it raises:
+  - “The last dimension of `query_shape` and `value_shape` must be equal ... 16, 8”
+
+This suggests the check is happening in symbolic shape inference (`compute_output_shape` / `compute_output_spec`) and not in the actual forward path. In Keras MHA, `query` and `value` feature dims should be allowed to differ because both are projected internally; only attention axis compatibility (batch dims and sequence dims alignment rules) should matter.
+
+Important constraints learned from previous failures
+1) Do not “fix” by simply deleting the check and stopping. You must ensure the full test suite (or at least all relevant tests) passes.
+2) If you remove/relax a validation check in `compute_output_shape()`, you MUST make the function robust to bad inputs and raise clean `ValueError`s instead of crashing.
+   - The repository has an existing test that passes `key_shape=2` (an `int`) to `compute_output_shape`. Previously it raised earlier, but after removing the first guard it started slicing `key_shape[1:-1]` and crashed with `TypeError: 'int' object is not subscriptable`.
+   - Therefore: add explicit type validation for `query_shape`, `value_shape`, `key_shape` so invalid types raise a clear `ValueError` (not a TypeError).
+3) If you change intended behavior (allowing query/value last-dim mismatch), update any tests that expected an error for that mismatch, and add/adjust tests to reflect correct behavior.
+
+What you need to deliver
+- A code change that makes Keras `MultiHeadAttention` accept `query.shape[-1] != value.shape[-1]` consistently for both eager tensors and symbolic tensors, as long as other required shape constraints are met.
+- Update/extend unit tests accordingly.
+- Ensure no regressions: run the relevant existing tests; fix any failures; do not leave temporary files behind.
+
+Step-by-step instructions you must follow
+1) Reproduce the issue in this repo with a test (preferred) or a minimal script, but final verification must be via tests.
+   - Add a focused unit test that builds a symbolic graph with `keras.Input(shape=(seq_len, query_dim))` and `value_dim != query_dim`, calls the layer, and asserts it builds successfully and output shape is correct.
+   - Also verify eager call consistency if practical (but symbolic is the key regression).
+2) Locate where the incorrect assertion is triggered.
+   - Search the repo for the exact error message substring: “The last dimension of `query_shape` and `value_shape` must be equal”
+   - Inspect `keras/src/layers/attention/multi_head_attention.py` (or equivalent) for `compute_output_shape`, `compute_output_spec`, `build`, and `call`.
+3) Implement the correct fix.
+   - Remove/relax ONLY the incorrect constraint: `query_shape[-1] == value_shape[-1]` should not be required.
+   - Keep or improve other shape validations that are truly required (e.g., rank checks; batch dims compatibility; attention axes).
+   - Add defensive type checks in `compute_output_shape()` (and anywhere else needed) so that if `query_shape`, `value_shape`, or `key_shape` are provided as invalid types (like an `int`), the method raises a clear `ValueError` with a helpful message, rather than crashing.
+     - The check should happen before any slicing/indexing like `key_shape[1:-1]`.
+     - Acceptable types should include tuple/list and Keras/TensorFlow/Torch “TensorShape-like” objects if used in this repo; if unsure, conservatively accept anything that is `collections.abc.Sequence` (but not `str`/`bytes`) and has `len()`, and otherwise raise `ValueError`.
+4) Update and/or add tests.
+   - Find the existing failing/related test: `keras/src/layers/attention/multi_head_attention_test.py::test_shape_mismatch_error_query_value_dim_mismatch` (name may be slightly different).
+   - If that test currently expects an error for query/value last-dim mismatch, update it to reflect the new correct behavior (no error).
+   - Add a test that ensures invalid `key_shape` types passed to `compute_output_shape()` raise `ValueError` (not `TypeError`).
+     - This is required to prevent the regression observed previously.
+5) Run tests to validate.
+   - Run the relevant file: `pytest keras/src/layers/attention/multi_head_attention_test.py -q`
+   - If the repo is large, at minimum ensure all tests in that file pass. If more failures appear elsewhere, fix them too.
+6) Clean up.
+   - Remove any ad-hoc reproduction scripts if you created them outside the test suite.
+
+Implementation notes / correctness expectations
+- The layer projects `query`, `key`, and `value` independently; therefore mismatched input feature dims for query vs value should be allowed.
+- Ensure shape inference returns correct output shape: typically `(batch, query_len, output_dim)` where `output_dim` depends on `num_heads`, `value_dim`, and/or `output_shape` configuration.
+- Do not introduce backend-specific behavior. The fix should live in the Keras layer code and apply regardless of backend.
+- Prefer minimal, targeted changes and high-quality error messages.
+
+Output format
+- Do not commit changes.
+- When done, briefly summarize:
+  - what code you changed (files and key functions),
+  - what tests you added/modified,
+  - and the commands you ran with their outcomes.

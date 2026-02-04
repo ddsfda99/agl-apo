@@ -1,0 +1,80 @@
+diff --git a/lib/matplotlib/tests/test_ticker.py b/lib/matplotlib/tests/test_ticker.py
+index 2136015cf1..73db119ca3 100644
+--- a/lib/matplotlib/tests/test_ticker.py
++++ b/lib/matplotlib/tests/test_ticker.py
+@@ -405,6 +405,18 @@ class TestLogLocator:
+             assert ax.get_ylim() == axes[0].get_ylim()
+ 
+ 
++def test_loglocator_stride_alignment_tick_values():
++    # Directly test tick_values stride alignment: for a range spanning
++    # slightly more than 4 decades, and a request for two ticks, the locator
++    # should include the extremes (10^0 and 10^4) rather than only a single
++    # middle tick within the range.
++    vmin, vmax = 0.5, 15000
++    loc = mticker.LogLocator(numticks=2)
++    ticks = loc.tick_values(vmin, vmax)
++    in_range = ticks[(ticks >= vmin) & (ticks <= vmax)]
++    assert_array_equal(in_range, [1, 10000])
++
++
+ class TestNullLocator:
+     def test_set_params(self):
+         """
+diff --git a/lib/matplotlib/ticker.py b/lib/matplotlib/ticker.py
+index 4c33e8c9af..889e973051 100644
+--- a/lib/matplotlib/ticker.py
++++ b/lib/matplotlib/ticker.py
+@@ -2443,23 +2443,40 @@ class LogLocator(Locator):
+             subs = self._subs
+ 
+         # Get decades between major ticks.
+-        stride = (max(math.ceil(numdec / (numticks - 1)), 1)
+-                  if mpl.rcParams['_internal.classic_mode'] else
+-                  numdec // numticks + 1)
+-
+-        # if we have decided that the stride is as big or bigger than
+-        # the range, clip the stride back to the available range - 1
+-        # with a floor of 1.  This prevents getting axis with only 1 tick
+-        # visible.
+-        if stride >= numdec:
+-            stride = max(1, numdec - 1)
++        # Choose stride to target approximately ``numticks`` major ticks,
++        # based on the number of full decades spanned by the view limits.
++        # Using ``ceil(numdec / (numticks - 1))`` ensures we can place up to
++        # ``numticks`` ticks including both ends when possible.
++        stride = max(math.ceil(numdec / max(numticks - 1, 1)), 1)
++
++        # If the computed stride is larger than the number of decades,
++        # clamp it to the number of decades. This still allows showing
++        # two ticks (at both ends) when ``stride == numdec``.
++        if stride > numdec:
++            stride = max(1, numdec)
+ 
+         # Does subs include anything other than 1?  Essentially a hack to know
+         # whether we're a major or a minor locator.
+         have_subs = len(subs) > 1 or (len(subs) == 1 and subs[0] != 1.0)
+ 
+-        decades = np.arange(math.floor(log_vmin) - stride,
+-                            math.ceil(log_vmax) + 2 * stride, stride)
++        # Align decades to maximise the number of ticks within [vmin, vmax]
++        # by choosing the residue class that includes the upper decade.
++        # Compute aligned decades: choose residue to include the upper decade,
++        # and start from one stride below the lower decade (using floor to be
++        # robust to floating-point rounding), so that we can include ticks just
++        # outside the view when appropriate.
++        start_decade = math.floor(log_vmin)
++        end_decade = math.floor(log_vmax)
++        if end_decade < math.ceil(log_vmin):
++            # No full decade between the limits; at least include the decade
++            # containing vmin.
++            decades = np.array([math.ceil(log_vmin)])
++        else:
++            r = end_decade % stride
++            lowstart = start_decade - stride
++            first = lowstart + ((r - (lowstart % stride)) % stride)
++            stop = math.ceil(log_vmax) + 2 * stride
++            decades = np.arange(first, stop, stride)
+ 
+         if have_subs:
+             if stride == 1:

@@ -1,0 +1,99 @@
+You are working in a code repository that implements cfn-lint rules. Your task is to fix cfn-lint’s handling of GetAtt on dynamic Outputs for AWS::ServiceCatalog::CloudFormationProvisionedProduct and add tests so this behavior is verified by pytest.
+
+Context and expected behavior:
+- E1010 currently flags GetAtt [Resource, Outputs.SomeKey] on AWS::ServiceCatalog::CloudFormationProvisionedProduct as invalid because the attribute dictionary only includes “Outputs” and not “Outputs.<key>”.
+- E1040 can also falsely fail when a destination property expects a specific format (e.g., AWS::EC2::VPC.Id) because ProvisionedProduct Outputs are plain string values without a “format”. Nested stacks and custom resources are already exempted; ProvisionedProduct should be as well.
+- Expected: Allow GetAtt to dynamic Outputs on ProvisionedProduct (treated as string), and do not flag E1040 format mismatches for this resource.
+
+Deliverables:
+- Implement fixes to pass both E1010 and E1040 for ProvisionedProduct Outputs.
+- Add unit tests that reproduce the failure and validate the fix.
+- Run pytest to confirm all tests pass.
+- Do not commit changes (we’ll commit later). Clean up any temporary files not wired into tests.
+
+Step-by-step plan:
+
+1) Prepare the environment and locate the repo
+- Run:
+  - pwd && ls -la
+  - git rev-parse --show-toplevel
+  - cd "$(git rev-parse --show-toplevel)" && ls -la
+- Ensure you are in the repository root. From there, explore:
+  - ls src/cfnlint/schema
+  - ls src/cfnlint/rules/functions
+  - ls test/unit/rules/functions
+
+2) Reproduce the bug to understand expected failure
+- Create a temporary YAML at /tmp/sc-product.yaml with:
+  AWSTemplateFormatVersion: '2010-09-09'
+  Description: Serverless Stack
+  Resources:
+    SimpleLambda:
+      Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+      Properties:
+        ProductName: Basic Lambda
+        ProvisioningArtifactName: '1.0'
+    SimpleApiGateway:
+      Type: AWS::ServiceCatalog::CloudFormationProvisionedProduct
+      Properties:
+        ProductName: API Gateway
+        ProvisioningArtifactName: '1.0'
+        ProvisioningParameters:
+          - Key: LambdaArn
+            Value: !GetAtt [SimpleLambda, Outputs.SCLambdaArn]
+- Run cfn-lint /tmp/sc-product.yaml and observe E1010 complaining that Outputs.SCLambdaArn is not a valid attribute. If E1040 also triggers in other scenarios, note that too. This manual reproduction is only for your understanding; the automated verification must be via pytest tests in step 5.
+
+3) Identify and fix the E1010 root cause (dynamic Outputs attributes)
+- Open src/cfnlint/schema/_getatts.py and find where attributes are computed for resources. There is already special handling for AWS::CloudFormation::Stack to add an “Outputs..*” attribute mapped to a string type pointer.
+- Implement analogous handling for AWS::ServiceCatalog::CloudFormationProvisionedProduct. Specifically:
+  - When schema.type_name == "AWS::ServiceCatalog::CloudFormationProvisionedProduct", add an attribute entry for Outputs..* that resolves to a string type. This is typically done by mapping to the synthetic pointer "/properties/CfnLintStringType" used elsewhere to represent strings.
+  - The resulting behavior should allow GetAtt [Resource, Outputs.AnyKey] and treat it as a string for type checking.
+- Notes:
+  - The current attribute builder doesn’t process patternProperties; hence, the need for this special-case.
+  - Mirror how CloudFormation::Stack is handled for “Outputs..*” to ensure consistent behavior.
+
+4) Identify and fix the E1040 false positive (format compatibility)
+- Open src/cfnlint/rules/functions/GetAttFormat.py.
+- Locate the resource type exceptions collection (e.g., self._resource_type_exceptions), which already includes "AWS::CloudFormation::CustomResource" and "AWS::CloudFormation::Stack".
+- Add "AWS::ServiceCatalog::CloudFormationProvisionedProduct" to this exception set so that Outputs from this resource are not required to match destination “format” constraints.
+- This ensures that a ProvisionedProduct Output string can be used where a specific format is expected without E1040 failing, consistent with nested stacks.
+
+5) Add unit tests to cover both rules
+- Find existing tests around GetAtt and nested stack outputs:
+  - test/unit/rules/functions/test_getatt.py
+  - test/unit/rules/functions/test_getatt_format.py
+- Add new test cases modeled on existing patterns. If there are tests that validate GetAtt [NestedStack, Outputs.SomeKey], mirror them for AWS::ServiceCatalog::CloudFormationProvisionedProduct.
+- Test case 1 (E1010 acceptance):
+  - Build a minimal template with two AWS::ServiceCatalog::CloudFormationProvisionedProduct resources, where the second references the first with Value: !GetAtt [FirstProvisionedProduct, Outputs.SomeOutputKey].
+  - Run the rule(s) and assert no E1010 is raised for this GetAtt.
+- Test case 2 (E1040 acceptance):
+  - Build a template where a resource property that expects a formatted ID consumes GetAtt [ProvisionedProduct, Outputs.VpcId] or similar. For instance, an AWS::EC2::Subnet with VpcId referencing the ProvisionedProduct’s Outputs.VpcId.
+  - Assert no E1040 GetAtt format mismatch is raised for this usage.
+- Follow the conventions in existing tests to create lint runs and assertions. If helper utilities exist to load templates and collect matches, use them. Keep tests minimal and focused on these behaviors.
+
+6) Run tests and iterate
+- Run:
+  - python -m pytest -q
+- If failures occur:
+  - Revisit src/cfnlint/schema/_getatts.py changes to ensure Outputs..* is registered only for the ProvisionedProduct type and mapped to the string pointer.
+  - Revisit GetAttFormat exceptions to ensure the resource type string matches exactly "AWS::ServiceCatalog::CloudFormationProvisionedProduct".
+  - Adjust tests to align with repository’s testing utilities and expected assertion patterns.
+
+7) Validate with the manual reproduction
+- After tests pass, re-run cfn-lint /tmp/sc-product.yaml to ensure E1010 is not emitted.
+- Optionally create a temporary template that uses a formatted destination (e.g., a property that expects VPC Id) fed by GetAtt [ProvisionedProduct, Outputs.VpcId] and confirm no E1040.
+
+8) Clean up
+- Remove any temporary files not integrated into the test suite (e.g., /tmp YAMLs).
+- Do not commit your changes.
+
+Technical guidance and hints:
+- The synthetic pointer "/properties/CfnLintStringType" should resolve via the schema resolver to a string type. This aligns with the ServiceCatalog ProvisionedProduct Outputs schema, which is an object allowing arbitrary keys mapped to strings.
+- Avoid altering general patternProperties handling broadly unless you are confident in the resolver paths. A targeted special-case for ProvisionedProduct is acceptable and mirrors existing handling for nested stacks.
+- Be precise with resource type strings to ensure exception logic matches.
+
+Acceptance criteria:
+- GetAtt [ProvisionedProduct, Outputs.SomeKey] is accepted and typed as string for E1010.
+- E1040 does not flag mismatches when using ProvisionedProduct Outputs in properties requiring a specific format.
+- New unit tests pass and provide coverage for both rules.
+- No regressions in the existing test suite.

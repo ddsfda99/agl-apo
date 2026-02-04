@@ -1,0 +1,131 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory.
+The task description is:
+[ENH]: Show parameter names in error message for mismatched array sizes in bar()
+### Problem
+
+I lost way too much time figuring out why some plotting code stopped working when I switched from vertical to horizontal bars. I eventually traced the problem down to this minimal repro that produces a very unhelpful error message from within numpy which it isn't even using directly:
+
+```python
+from matplotlib import pyplot as plt
+arg_k = ["foo", "bar" "baz"]
+arg_n = [1,2,3]
+plt.barh(arg_k, arg_n)
+plt.show()
+```
+
+```
+ValueError: shape mismatch: objects cannot be broadcast to a single shape.  Mismatch is between arg 2 with shape (3,) and arg 3 
+with shape (2,).
+```
+
+The problem is of course the missing comma in the `arg_k` array. In this simplified example the backtrace *does* eventually point at `plt.barh()`, but if the labels were set with `axis.set_yticklabels()` way before the plot call there is no useful context at all.
+
+### Proposed solution
+
+This seems like something that could be detected already in the `barh()` and other functions and reported immediately (with the appropriate argument names!) instead of requiring users to divine the actual problem from a long backtrace into 3rd party dependencies.
+
+=================================================
+Your task is to complete this task. Follow these steps:
+(1) Carefully read and understand the requirements.
+(2) Write a reproduction test case to confirm the bug or understand the expected behavior.
+(3) Locate the bug or the place where the new feature should be implemented based on error messages or keywords in the issue (e.g., grep for error strings or function names).
+(4) Implement the fix or new feature in the appropriate files.
+(5) Run the reproduction test again to validate your implementation. If tests fail, debug and fix the issues.
+(6) Clean up any temporary test files you created.
+Please do not commit your edits. We will do it later.
+
+the evaluations of previous failures:
+## Why the agent “failed”
+
+The agent’s work *functionally* addressed the enhancement (it added a friendlier `ValueError` coming from `Axes.bar()` instead of leaking the raw NumPy broadcast error). The failure was process/CI-related:
+
+### 1) It ran the full test suite unnecessarily and created a 13-minute failure
+The agent ran `pytest -q` for the whole repo, which took ~13 minutes and failed due to **its own newly added tests** (string mismatch). This is avoidable and makes the iteration cycle slow and brittle. A targeted test run of only the new tests (or relevant existing tests) should have been done first.
+
+### 2) The newly written tests were overly strict / mismatched the produced message
+The tests expected substrings like:
+
+- `"y (length 2)"`
+- `"x (length 2)"`
+
+But the agent’s *first* implementation produced:
+
+- `"For horizontal bars, 'y' (length 2) and 'width' (length 3) ..."`
+
+The single quotes around parameter names caused the failure. This is purely a test fragility issue: tests should either:
+- match the exact intended message format that the implementation produces, or
+- be resilient (e.g., regex allowing optional quotes).
+
+The agent “fixed” this by removing quotes in the message, but that’s just making the code conform to a brittle test rather than defining a clear intended UX.
+
+### 3) It violated the prompt’s workflow by deleting the test instead of keeping it as the reproduction test
+The prompt explicitly asked to:
+
+- “Write a reproduction test case…”
+- “Implement the fix…”
+- “Run the reproduction test again…”
+- “Clean up any temporary test files you created.”
+
+In a normal OSS workflow, the reproduction test is **not temporary**; it should remain in the repository as the regression test. Deleting it means:
+- there’s no automated verification of the enhancement,
+- future changes can regress the behavior,
+- and reviewers/CI can’t confirm the feature.
+
+This is the biggest “deliverable” miss: the enhancement should land with tests.
+
+### 4) Implementation issues / robustness gaps
+
+Even though the patch “works”, it has shortcomings relative to the requested feature (“Show parameter names in error message for mismatched array sizes in bar()”):
+
+- **Too broad exception catch**: it catches any `ValueError` from `np.broadcast_arrays`, not just length mismatch. That may mask other `ValueError`s with a misleading message.
+- **Length reporting is potentially misleading**:
+  - It computes `len(np.atleast_1d(x))` on values that may be scalars or objects; for scalars this becomes 1 even when the “real” broadcast semantics are different.
+  - It reports `height=1` / `left=1` in the example; this is technically true after `atleast_1d`, but can confuse users.
+- **Does not identify *which* args mismatched** beyond a generic “x & height must have same length” or “y & width…”. The original NumPy error sometimes indicates which args are incompatible (“arg 2 vs arg 3”). A better Matplotlib error should ideally preserve that mapping *with parameter names*.
+
+### 5) It didn’t implement the “parameter names” feature in the most direct/idiomatic way
+Matplotlib already has patterns/utilities for argument validation and error reporting. A more Matplotlib-style improvement would:
+- validate sizes *before* calling NumPy broadcast when possible,
+- or catch the broadcast error and re-raise with a message that maps broadcast “arg N” to the actual parameter names (`x`, `height`, `width`, `y`, etc.).
+
+The agent’s message is “helpful”, but it’s not clearly aligned with the original complaint:
+> “Mismatch is between arg 2 … and arg 3 …” is unhelpful; user wants argument names.
+
+The agent’s message doesn’t explain that the categorical list (`y`) is length 2 because `"bar" "baz"` concatenated, which is the real-world confusion—but that part is hard. Still, mapping broadcast args to names is feasible and closer to the proposed solution.
+
+## How the agent should improve
+
+### A) Keep the regression test (don’t delete it)
+The test file should remain, and should be placed in an appropriate existing test module (likely `test_axes.py`) or a new permanent one.
+
+### B) Make the test assert the essential behavior, not an exact punctuation choice
+Use regex and check for parameter names + lengths, allowing optional quotes. Example approach:
+- assert message contains `For horizontal bars`
+- regex `r"\by\b.*length\s*2"` and `r"\bwidth\b.*length\s*3"`.
+
+### C) Narrow the exception handling
+Only rewrite the error message when the `ValueError` looks like a broadcast/shape mismatch from NumPy broadcasting. Otherwise re-raise the original `ValueError` to avoid hiding other failures.
+
+### D) Better “parameter name” mapping
+Instead of a generic “x and height must match”, consider:
+- identify which of (`x`, `height`, `width`, `y`, `linewidth`, `hatch`) differ from the max length (ignoring length-1 scalars),
+- produce a message like:
+  - `barh(): 'y' has length 2 but 'width' has length 3 (cannot broadcast).`
+This directly satisfies “show parameter names”.
+
+### E) Avoid full-suite runs early
+Run:
+- the new test module only, and
+- a small set of existing related tests (e.g., `test_axes.py -k bar`).
+
+## Bottom line
+The agent failed primarily because it treated the regression test as disposable and because its initial tests were too strict and didn’t match its own output. The code change itself is roughly in the right place (`Axes.bar` broadcasting), but should be made more robust and should ship with a permanent, less brittle test that verifies the enhanced error message.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

@@ -22,13 +22,19 @@ logger = logging.getLogger(__name__)
 # Configuration
 BASE_DIR = Path(__file__).resolve().parent
 TRACE_DIR = BASE_DIR / "trace"
+FULL_PROMPTS_DIR = BASE_DIR / "full_prompts"
+PROMPT_INPUTS_DIR = BASE_DIR / "prompt_inputs" / "textgrad"
+PROMPT_OUTPUTS_DIR = BASE_DIR / "prompt_outputs" / "textgrad"
 
 # Prompt for optimizing the task description based on failure logs
 TASK_OPTIMIZATION_PROMPT = """You are a senior software engineer and an expert code reviewer.
 Your goal is to review a coding agent's trace to solve a problem.
-You are given the coding agent's execution trace (which includes the original task description as the first user message).
+You are given the original prompt and the coding agent's execution trace.
 Your task is to review the given information and find out why the coding agent failed.
 You must carefully analyze and reason about the trace and find all the places where the coding agent did not do well and how it can improve.
+
+the original prompt:
+{original_prompt}
 
 the coding agent's execution trace:
 {trace}
@@ -69,6 +75,26 @@ def load_instance(dataset_path: Path, instance_id: Optional[str]) -> Optional[Di
             if item.get("instance_id") == instance_id:
                 return item
     return None
+
+
+def find_latest_prompt(prompt_dir: Path, instance_id: str) -> Optional[Path]:
+    """Find the latest versioned prompt for the instance."""
+    if not prompt_dir.exists():
+        return None
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
+    pattern = re.compile(rf"^{re.escape(safe_id)}_v\d+\.txt$")
+    latest_path = None
+    latest_mtime = -1
+    for path in prompt_dir.iterdir():
+        if not path.is_file():
+            continue
+        if not pattern.match(path.name):
+            continue
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
+            latest_path = path
+    return latest_path
 
 
 def find_latest_extracted_trace(instance_id: str) -> Optional[Path]:
@@ -143,7 +169,7 @@ async def call_llm_with_retry(client, messages: list) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             resp = await client.chat.completions.create(
-                model="gpt-5-20250807",
+                model="gpt-5.2-20251211",
                 messages=messages,
             )
             return resp.choices[0].message.content or ""
@@ -189,6 +215,13 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     instance_id = instance.get("instance_id", "unknown")
     print(f"Loaded instance: {instance_id}")
 
+    prompt_path = find_latest_prompt(FULL_PROMPTS_DIR, instance_id)
+    if prompt_path is None:
+        print(f"Error: Full prompt dump not found in {FULL_PROMPTS_DIR} for {instance_id}")
+        return
+    original_prompt = prompt_path.read_text(encoding="utf-8").strip()
+    print(f"Loaded full prompt from {prompt_path}")
+
     # 2. Read the agent's actual execution trace (includes original prompt as first user message)
     agent_log = _load_agent_log_from_data_dir(instance_id)
     if agent_log:
@@ -199,8 +232,16 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
 
     # 3. Construct the Optimization Prompt
     optimization_payload = TASK_OPTIMIZATION_PROMPT.format(
+        original_prompt=original_prompt,
         trace=agent_log,
     )
+
+    output_dir = BASE_DIR / "textgrads"
+    output_path = next_textgrad_path(output_dir, instance_id)
+    PROMPT_INPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    input_path = PROMPT_INPUTS_DIR / output_path.name
+    input_path.write_text(optimization_payload, encoding="utf-8")
+    print(f"Saved task optimization input prompt to {input_path}")
 
     print(f"\n=== Computing Task Optimization for {instance_id} ===")
 
@@ -219,11 +260,14 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     print("-" * 60)
 
     # Save the optimized prompt to a file for the next iteration
-    output_dir = BASE_DIR / "textgrads"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = next_textgrad_path(output_dir, instance_id)
     output_path.write_text(optimized_task_description)
     print(f"\nSaved optimized task description to {output_path}")
+
+    PROMPT_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_copy_path = PROMPT_OUTPUTS_DIR / output_path.name
+    output_copy_path.write_text(optimized_task_description, encoding="utf-8")
+    print(f"Saved task optimization output to {output_copy_path}")
 
 
 if __name__ == "__main__":

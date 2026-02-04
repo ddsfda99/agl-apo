@@ -1,0 +1,127 @@
+You are working in the cfn-lint 0.55.0 repository under /testbed. Your task is to fix a false positive in rule W2001 (“Parameter not used”) when an AWS::ApiGateway::RestApi Body uses Fn::Transform Name: AWS::Include to include a local OpenAPI/Swagger file that itself references template Parameters via Ref or Fn::Sub. The fix must be precise: mark only those parameters as “used” that are actually referenced inside the included local file, and leave W2001 intact for genuinely unused parameters. Do not globally suppress W2001. Address the issues found in the previous attempt: incorrect environment assumptions, risky file I/O in the rule, wrong testing abstraction, broad exception swallowing, and unintended integration test count changes.
+
+Follow this plan and constraints carefully:
+
+1) Environment and repository navigation
+- Work under /testbed as the repo root. Do not assume /workspace exists.
+- Paths in tests and code should resolve relative to the template’s filename when needed.
+
+2) Understand current behavior and scope of change
+- W2001 is implemented in src/cfnlint/rules/parameters/Used.py. It builds the set of “used” parameters by scanning the main template for Ref and Fn::Sub and warns on any template Parameters not found.
+- Fn::Transform with AWS::Include injects external content at deploy time, which cfn-lint does not parse today; parameters referenced inside the included file are missed and reported unused.
+- Do not implement a blanket suppression. Only augment the “used” set with parameters that are actually referenced inside local include content of AWS::ApiGateway::RestApi Body. For remote includes (s3:// or http(s)://), or when parsing fails, keep existing behavior unchanged.
+
+3) Testing methodology and placement
+- Use existing testing patterns. Do not call rule.match directly and then assert on m.rule.id; RuleMatch does not carry rule metadata. If you need rule IDs, run the rule via the Rules engine to produce Match objects that have .rule.id and .message.
+- Prefer BaseRuleTestCase and helpers in the repository for consistency. Look at tests/unit/rules/parameters/test_used.py for patterns.
+- Add a new test file under tests/unit/rules/parameters/, for example tests/unit/rules/parameters/test_used_apigw_include.py. Use pytest tmp_path to create temporary files and templates.
+
+4) Create reproduction tests
+Add at least these tests, using the Rules engine to execute W2001 and assert on Match objects:
+
+- Positive include usage:
+  - Template defines Parameters A and B.
+  - Resource of Type AWS::ApiGateway::RestApi with Properties.Body containing Fn::Transform Name: AWS::Include, Parameters Location pointing to a local file in tmp_path.
+  - The included file references both A and B via Ref and/or Fn::Sub (string or map forms).
+  - Assert W2001 does not flag A or B.
+
+- Unused parameter with include:
+  - Same as above, but add a third parameter C that is not referenced anywhere (neither in the main template nor the included file).
+  - Assert W2001 flags C as unused.
+
+- No include:
+  - Template with Parameters D and E, with no references to E.
+  - Assert W2001 flags E, confirming baseline behavior unchanged.
+
+- Remote include:
+  - Template with include Location set to an S3 or HTTP URL. Parameter F is referenced only in the remote file (not present locally).
+  - Assert W2001 flags F. We do not parse remote include content.
+
+- Non-ApiGateway transform:
+  - Template using Fn::Transform Name: AWS::Include in a different resource type or in a property that is not RestApi Body.
+  - Assert W2001 behavior is unchanged; no special handling occurs.
+
+Test guidance:
+- Run the rule via Rules engine and filter results by rule.id == "W2001". Assert on counts and messages rather than relying on RuleMatch from rule.match.
+- Use tmp_path.joinpath("openapi.yaml") to write the included content. Keep the included file in YAML or JSON. Include references such as:
+  - Ref: {"Ref": "A"} or {"Ref": "B"}
+  - Fn::Sub string: "arn:aws:s3:::${A}/${B}"
+  - Fn::Sub map: {"Fn::Sub": {"String": "vpc-${VpcId}-${Env}", "Variables": {"Env": {"Ref": "B"}}}}
+- Ensure template’s Parameters section contains the names you expect to be counted as used.
+
+5) Locate and adjust code
+- Open src/cfnlint/rules/parameters/Used.py.
+- Identify the logic that constructs the used_params set by scanning for Ref and Fn::Sub.
+- Do not introduce broad file I/O throughout the rule. Keep changes minimal and tightly scoped.
+- Augment used_params only for AWS::ApiGateway::RestApi resources where Properties.Body is an Fn::Transform Name: AWS::Include with a local Location.
+
+6) Implement the precise fix without risky behavior
+Modify Used.py to do the following in a minimal, safe way:
+
+- Iterate over Resources and find those with:
+  - Type == "AWS::ApiGateway::RestApi"
+  - Properties.Body containing a dict with key "Fn::Transform"
+  - That transform’s "Name" equals "AWS::Include"
+  - Parameters dict includes "Location"
+
+- Determine if Location is local:
+  - Treat paths without "://" as local. Do not attempt to fetch s3:// or http(s)://.
+  - Resolve relative paths against os.path.dirname(cfn.filename) so tests and real templates work reliably.
+  - If the resolved path exists and is a regular file, read it. If not, skip augmentation.
+
+- Parse the included content as YAML or JSON using safe loaders already present in the project (e.g., yaml.safe_load). Avoid creating new Template instances for the included content. Work with a dict/list in memory.
+
+- Scan the parsed included content for parameter references:
+  - Use cfn.search_deep_keys("Ref") to find Ref nodes and collect their values.
+  - Use cfn.search_deep_keys("Fn::Sub") to find Fn::Sub nodes:
+    - For string form, call cfnlint.helpers.get_sub_parameters to extract parameter names referenced in "${...}".
+    - For map form, process the "String" field as above. If "Variables" is present, consider variable keys used in the String. If those variables map to other references, do not recursively resolve; only count names that appear in the "String" interpolation.
+  - Only consider names that are present in the template’s Parameters section. Intersect discovered names with the set of cfn.template["Parameters"].keys().
+  - Exclude AWS pseudo parameters (e.g., names starting with "AWS::"). Reuse existing pseudo-parameter filters in the rule if available.
+
+- Merge the discovered names from the included content into the existing used_params set.
+
+- Error handling:
+  - Catch only narrow exceptions:
+    - FileNotFoundError, IsADirectoryError for path issues.
+    - yaml.YAMLError or json.JSONDecodeError for parsing issues.
+  - On exceptions, do not modify used_params and keep default behavior. Optionally log at debug level via logging.getLogger("cfnlint").debug with a short message. Do not swallow exceptions broadly with except Exception.
+
+- Scope:
+  - Only apply this logic to AWS::ApiGateway::RestApi with Body Fn::Transform Name: AWS::Include. Do not change behavior for other resource types or other transforms.
+
+- Performance and safety:
+  - Avoid heavy imports and new Template instances per resource.
+  - If multiple RestApi resources reference the same local include path, you may cache the parsed content or the extracted parameter names in a simple dict keyed by absolute path to avoid re-reading, but keep it simple and within the rule’s lifecycle.
+
+7) Strengthen filtering and consistency
+- Ensure discovered names are intersected with the template’s Parameters keys before adding to used_params.
+- Ensure pseudo parameters are excluded. Reuse any existing helper or logic in Used.py that already does this for Fn::Sub scanning.
+- Keep the rule’s core behavior intact for templates without such includes.
+
+8) Run tests and verify integration baseline
+- Run the new unit tests and ensure they pass.
+- Run the existing unit test suite to ensure no regressions.
+- Run the integration tests that previously failed and verify counts remain unchanged:
+  - test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+  - test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_module_integration
+  - test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+- If counts differ after your change, isolate and fix the cause:
+  - Confirm your logic only affects AWS::ApiGateway::RestApi Body includes with local Location.
+  - Verify you did not introduce global suppression or change scanning behavior elsewhere.
+  - Remove any unused imports, and ensure no broad try/except exists that could hide errors.
+
+9) Clean up and documentation
+- Keep code changes focused and documented with concise comments explaining why AWS::Include in RestApi Body needs special handling and why only local files are parsed.
+- Do not commit any edits.
+- Remove any temporary files created in tests if they aren’t under pytest-managed tmp paths.
+- Avoid heavy refactoring or changes outside Used.py and the new tests.
+
+Notes and constraints
+- Do not implement a blanket suppression for W2001; this was the core issue with the previous attempt.
+- Do not attempt to fetch or parse remote include content (S3/HTTP). Prefer correctness over silence.
+- Keep exception handling narrow; do not use broad except Exception that silently changes outcomes.
+- Aim for minimal, well-scoped changes inside Used.py that merge discovered usage from local included files into the existing “used parameters” set.
+- Use the Rules engine in tests to assert on rule.id "W2001" and messages; don’t rely on RuleMatch carrying rule metadata.
+- Ensure paths are resolved relative to cfn.filename, not the working directory.
+- Verify that your change does not alter unrelated rule counts in integration tests.

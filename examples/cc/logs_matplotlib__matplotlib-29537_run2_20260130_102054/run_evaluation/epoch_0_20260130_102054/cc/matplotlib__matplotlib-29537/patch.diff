@@ -1,0 +1,40 @@
+diff --git a/lib/matplotlib/tests/test_ticker.py b/lib/matplotlib/tests/test_ticker.py
+index 12142b6edc..5ca13a9aca 100644
+--- a/lib/matplotlib/tests/test_ticker.py
++++ b/lib/matplotlib/tests/test_ticker.py
+@@ -859,6 +859,17 @@ class TestScalarFormatter:
+         assert not tmp_form.get_useOffset()
+         assert tmp_form.offset == 0.5
+ 
++    def test_set_use_offset_one(self):
++        tmp_form = mticker.ScalarFormatter()
++        tmp_form.set_useOffset(1)
++        assert not tmp_form.get_useOffset()
++        assert tmp_form.offset == 1
++
++    def test_constructor_use_offset_one(self):
++        tmp_form = mticker.ScalarFormatter(useOffset=1)
++        assert not tmp_form.get_useOffset()
++        assert tmp_form.offset == 1
++
+     def test_use_locale(self):
+         conv = locale.localeconv()
+         sep = conv['thousands_sep']
+diff --git a/lib/matplotlib/ticker.py b/lib/matplotlib/ticker.py
+index 2314790924..6a1ece3775 100644
+--- a/lib/matplotlib/ticker.py
++++ b/lib/matplotlib/ticker.py
+@@ -510,9 +510,11 @@ class ScalarFormatter(Formatter):
+         will be formatted as ``0, 2, 4, 6, 8`` plus an offset ``+1e5``, which
+         is written to the edge of the axis.
+         """
+-        if val in [True, False]:
++        # Treat only actual boolean types as the automatic mode toggle.
++        # Numeric values (including 1) should be treated as explicit offsets.
++        if isinstance(val, (bool, np.bool_)):
+             self.offset = 0
+-            self._useOffset = val
++            self._useOffset = bool(val)
+         else:
+             self._useOffset = False
+             self.offset = val

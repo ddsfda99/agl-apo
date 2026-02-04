@@ -1,0 +1,45 @@
+Summary of the failure and root cause
+- The MultiHeadAttention layer only enforced shape consistency between query and value inputs in symbolic mode via compute_output_shape/compute_output_spec.
+- In eager execution (using plain NumPy arrays), the call() method did not validate that query.shape[-1] == value.shape[-1], so mismatched inputs were silently accepted.
+- A temporary test demonstrated the issue: calling the layer with query and key having last dim 16 and value having last dim 8 did not raise a ValueError, causing the test to fail.
+
+What the coding agent did well
+- Quickly located the relevant code in keras/src/layers/attention/multi_head_attention.py and identified that compute_output_shape already had the right error message and check for symbolic mode.
+- Reproduced the issue by adding a focused pytest that forces eager execution with NumPy arrays, confirming the mismatch was not caught.
+- Implemented a minimal, safe eager-mode check in call() to align behavior with symbolic mode:
+  - It safely reads query.shape and value.shape.
+  - Only raises when both last dimensions are statically known and are integers, so it won’t break dynamic/graph contexts.
+  - Uses the same standardized error message as compute_output_shape for consistency.
+- Verified the fix by:
+  - Running the temporary test (now passes).
+  - Running the entire attention test suite (68 tests, all passed), which suggests no regressions were introduced.
+- Cleaned up by removing the temporary test file after verification.
+
+Where the coding agent didn’t do well and how to improve
+- Initial Grep misstep:
+  - The agent first tried to Grep for the error message and got “No files found,” even though the exact string exists in multi_head_attention.py. This suggests either the Grep pattern or search configuration was off (e.g., quoting/escaping issues, or not searching the right paths).
+  - Improvement: When Grep fails unexpectedly, corroborate by directly opening candidate files or broadening the search pattern. Use case-insensitive or partial matching to locate related messages more reliably.
+- Scope of validation:
+  - The fix addresses query/value last-dim mismatches in eager mode, but there is also a symbolic-mode validation for key/value non-last-dim mismatches. The eager call path still relies on downstream shape enforcement to catch key/value shape mismatches.
+  - Improvement: Consider adding a parallel eager-mode validation for key/value shape incompatibilities to ensure consistent error behavior across execution modes. This would make eager errors as informative as symbolic errors. If you do this, match the existing error message format for consistency.
+- Test placement:
+  - The agent added a temporary test to the repository, ran it, then removed it. While this is fine for local debugging, it doesn’t prevent future regressions.
+  - Improvement: Integrate a permanent unit test into the existing multi_head_attention_test.py that verifies eager-mode mismatches raise the same standardized error. This cements the behavior and protects against regressions.
+- Coverage:
+  - The agent ran the attention suite, which is good, but did not run the full repository tests. Given changes to a core layer, broader regression testing can help catch subtler issues.
+  - Improvement: Run the full test suite or at least additional modules that might touch attention indirectly to ensure no unexpected interactions.
+
+Technical review of the fix
+- Placement: The check is inserted early in call() right after setting key=value when key is None, before building masks and projections. This is a sensible guardrail that fails fast.
+- Robustness: The check only triggers when q_dim and v_dim are statically known integers, which avoids false positives in dynamic graph contexts.
+- Consistency: The error message exactly mirrors compute_output_shape’s message, ensuring users see the same standardized wording in both eager and symbolic mode.
+- Compatibility: Running the attention tests shows no adverse impact on masking, constraints, dtype policies (including quantized policy map), LoRA, and high-dimensional attention axes.
+
+Actionable recommendations
+- Add a similar eager-mode validation for key/value dimensional compatibility to mirror the existing symbolic check for value_shape[1:-1] versus key_shape[1:-1]. This ensures fully consistent error behavior in eager execution.
+- Create a permanent test in multi_head_attention_test.py that covers eager-mode mismatches for both query/value last-dim and key/value non-last-dim cases, asserting the standardized messages.
+- Improve search workflow: When Grep fails unexpectedly, cross-check by reading key files or expanding the search pattern to avoid wasting time.
+- After making changes in a core layer, run the full repo tests, not just the attention suite, to catch broader integration issues.
+
+Bottom line
+- The failure occurred because eager-mode lacked shape validation in call(), while symbolic mode had it in compute_output_shape. The agent’s fix correctly added an eager-mode check to call() with safe conditions and consistent error messaging, and tests passed. The main areas to improve are better initial search practices, extending eager validations to key/value shapes, and adding permanent tests to prevent regressions.

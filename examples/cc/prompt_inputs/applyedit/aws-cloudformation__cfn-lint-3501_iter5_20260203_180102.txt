@@ -1,0 +1,303 @@
+You are an expert in coding agent prompt optimization.
+Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
+You are given the original prompt and the evaluations of previous failures, and you should modify or add new prompts to 
+produce a well-informed and guided prompt so that the coging agent can solve the problem in the original prompt this time.
+
+the original prompt:
+You are given a code repository in the current directory (this is cfn-lint). Implement a **correct** fix for the issue described below. Do **not** commit changes.
+
+## Issue to fix
+**W2001 “Parameter not used” false positive when using `Fn::Transform` (`AWS::Include`) in `AWS::ApiGateway::RestApi` `Body`**  
+*cfn-lint version: 0.55.0*
+
+### Scenario
+A CloudFormation template (`api.cfn`) includes an OpenAPI/Swagger file (`api-specification.yml`) using:
+
+```yaml
+Body:
+  Fn::Transform:
+    Name: AWS::Include
+    Parameters:
+      Location: ./api-specification.yml
+```
+
+The included file contains intrinsic functions like `Fn::Sub` referencing template parameters (e.g., `${PetLambdaArn}`, `${UserPoolArn}`). cfn-lint currently warns W2001 that these parameters are unused because it only scans the main template, not the included file.
+
+### Required behavior
+Parameters referenced in the included file must be treated as **used** for purposes of W2001.  
+Do **not** “fix” this by disabling W2001 whenever `Fn::Transform` or `AWS::Include` appears. That broad suppression is incorrect and will hide real unused-parameter warnings.
+
+---
+
+## Constraints / pitfalls from previous failed attempts (must follow)
+1. **No broad suppression:** Do not short-circuit W2001 when an include is present. The rule must still find genuinely unused parameters.
+2. **Implement real detection:** You need to discover parameter references inside the included content (preferably by parsing the included YAML/JSON and walking it, not by turning the rule off).
+3. **Be careful about `Fn::Transform` representation:** YAML may parse transforms differently; don’t assume only one exact dict shape without checking how this repo parses templates.
+4. **Don’t break unrelated warnings/tests:** Prior attempts caused unrelated integration output changes. Keep the fix scoped and validated with targeted tests first.
+
+---
+
+## What to implement (high-level guidance)
+Implement support so that when the template contains an `Fn::Transform` with `Name: AWS::Include`, the linter:
+1. Resolves the `Location` file path (at least local relative paths).
+2. Loads and parses the included file (YAML/JSON).
+3. Finds intrinsic usage patterns in the included structure, at minimum:
+   - `Ref: SomeParam`
+   - `Fn::Sub` strings containing `${SomeParam}` (and `Fn::Sub` list form, if present)
+4. Feeds those discovered parameter names into the same “used parameter” detection that W2001 relies on.
+
+### Where to hook this
+Prefer a solution that integrates into existing template preprocessing/transform tracking (e.g., whatever builds `cfn.transform_pre[...]`) so other rules can reuse it.  
+If that’s too invasive, a minimal acceptable approach is enhancing the W2001 implementation to additionally scan included files and merge results into its used-set—**but do not return early or disable the rule**.
+
+---
+
+## Testing requirements (very important)
+### 1) Add a failing unit test first
+Create a unit test demonstrating the bug:
+- A fixture template similar to the scenario with `PetLambdaArn` and `UserPoolArn` parameters.
+- The template uses `Fn::Transform` `AWS::Include` to include a YAML file containing `Fn::Sub` that references those parameters.
+- Assert that W2001 does **not** report those parameters as unused.
+
+### 2) Ensure the include file is discoverable
+Path resolution must work in tests. Resolve `Location: ./api-specification.yml` relative to the directory of the template file (not the current working directory). If current code doesn’t do this, implement it.
+
+### 3) Run targeted tests first
+Before full suite:
+- Run the single unit test you added
+- Then run the relevant unit test module(s) for parameter rules (W2001) to ensure no regressions
+
+Only then run the full test suite.
+
+### 4) No unrelated behavior changes
+If integration tests change output (e.g., new W7001 findings), stop and investigate what your code changed globally. The fix should not cause other templates to suddenly emit new unrelated warnings.
+
+---
+
+## Implementation details you should consider
+- Search the codebase for where W2001 is implemented (likely a rule under `src/cfnlint/rules/parameters/...`) and where templates are loaded/normalized.
+- Search for existing mechanisms that gather `Ref`, `Fn::Sub`, and other intrinsic usage (`transform_pre`, deep key search, graph building, etc.). Reuse those patterns rather than inventing a one-off parser.
+- When parsing included YAML:
+  - Handle both mapping form (`Fn::Sub: "..."`) and the `!Sub` YAML tag if the loader preserves it (check existing parsing utilities in repo).
+  - You don’t need to fully evaluate CloudFormation, only detect parameter-name tokens.
+- Keep the solution narrow to `AWS::Include` and local files. If remote S3 locations exist, you may safely skip them (but do so gracefully without crashing; don’t mark params as used unless you actually detect usage).
+
+---
+
+## Step-by-step workflow to follow
+1. Inspect current W2001 behavior and locate the relevant rule code.
+2. Write a minimal reproduction unit test fixture + assertion. Confirm it fails on current code.
+3. Implement include resolution + parse + parameter-reference extraction, and integrate those references into W2001’s “used parameters” computation (or preferably into shared preprocessing used by W2001).
+4. Re-run the unit test and relevant parameter-rule tests until passing.
+5. Run the full test suite to ensure no unrelated warnings/output changes.
+6. Remove any temporary/debug files.
+
+---
+
+## Input example (for your fixtures/tests)
+Use this structure (adapt paths to the test fixtures layout used by this repo):
+
+Template:
+```yaml
+AWSTemplateFormatVersion: 2010-09-09
+Description: Some API
+
+Parameters:
+  PetLambdaArn:
+    Type: String
+  UserPoolArn:
+    Type: String
+
+Resources:
+  SomeApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Body:
+        Fn::Transform:
+          Name: AWS::Include
+          Parameters:
+            Location: ./api-specification.yml
+```
+
+Included `api-specification.yml`:
+```yaml
+openapi: 3.0.1
+paths:
+  /pet:
+    get:
+      x-amazon-apigateway-integration:
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PetLambdaArn}/invocations
+components:
+  securitySchemes:
+    AwsCognitoUserPoolAuthorizer:
+      x-amazon-apigateway-authorizer:
+        providerARNs:
+          - Fn::Sub: ${UserPoolArn}
+```
+
+Expected: **No W2001** for `PetLambdaArn` and `UserPoolArn`.
+
+---
+
+Deliverables
+- Code changes implementing the fix.
+- New/updated unit tests that fail before the fix and pass after.
+- Confirmation you ran targeted tests and then the full test suite successfully.
+
+Do not commit your edits.
+
+the evaluations of previous failures:
+## Why the agent failed
+
+The agent’s fix made the full test suite fail (3 integration tests) even though targeted unit tests passed. The failures show **integration output count changed** (expected 35 findings, got 36) and the CLI run returned a different **exit code** (expected 12, got 14) for the QuickStart template `test/fixtures/templates/quickstart/openshift.yaml`. That indicates the change had **unintended global side effects** beyond W2001.
+
+Root cause: the agent implemented the include-parsing logic **inside the W2001 rule** and did so by **unconditionally parsing local files referenced by any `Fn::Transform` with `Name: AWS::Include` anywhere in the template**, without any schema/path constraints and with parsing behavior that can misinterpret non-template YAML. This can cause W2001’s “used parameter” set to change in unexpected ways across large templates, which then changes the set of warnings emitted and therefore integration snapshots/exit codes.
+
+Additionally, the agent made other correctness mistakes (not just test failures) that violate the prompt constraints.
+
+---
+
+## Specific problems in the agent’s implementation
+
+### 1) The new fixture uses the wrong syntax (`${{Param}}`) and doesn’t reproduce the stated bug
+In the prompt scenario, included Swagger uses standard CloudFormation `Fn::Sub` placeholders: `${PetLambdaArn}`, `${UserPoolArn}` (single braces).  
+The agent’s `api-specification.yml` fixture uses **double-brace** placeholders:
+
+```yaml
+Fn::Sub: arn:aws:apigateway:${{AWS::Region}}:.../${{PetLambdaArn}}/...
+Fn::Sub: ${{UserPoolArn}}
+```
+
+That syntax is **not CloudFormation `Fn::Sub`**. It looks like a different templating style and is not what cfn-lint is supposed to parse here. The agent then added custom parsing support for this nonstandard pattern. This is a major mismatch with the required behavior and makes the test less meaningful.
+
+Impact:
+- The new test doesn’t validate the real-world issue described.
+- The code now “supports” an invented pattern, which can accidentally match unrelated strings in real templates and alter results.
+
+### 2) It’s not scoped to `AWS::ApiGateway::RestApi.Properties.Body` (over-broad scanning)
+The issue is specifically about `AWS::ApiGateway::RestApi` `Body` containing an include, but the agent scans:
+
+```py
+transform_paths = cfn.search_deep_keys("Fn::Transform")
+```
+
+…and then processes any AWS::Include with a local `Location` **anywhere** in the template. That breaks the “keep fix scoped” guidance and increases the chance of changing outputs in unrelated templates/rules.
+
+Even if “AWS::Include” is valid in more places, the prompt asked for a narrow fix and warned about unrelated integration changes.
+
+### 3) Parsing the included YAML with `cfn_yaml.load` can treat non-CFN YAML as CFN and inject behaviors
+The agent loads the include file via:
+
+```py
+included_obj = cfn_yaml.load(include_path)
+```
+
+`cfn_yaml.load` is CloudFormation-aware: it resolves/constructs tags like `!Sub`, `!Ref`, etc into dict forms. That’s good for CFN templates, but OpenAPI/Swagger YAML is **not a CFN template** and can contain keys/structures that look CFN-like or include tag-like tokens, leading to surprising parse results.
+
+Also, the agent requires:
+
+```py
+if not isinstance(included_obj, dict):
+    continue
+```
+
+but OpenAPI YAML is a dict (root object), so it will parse and then the walker will traverse everything, potentially matching accidental `Ref` keys or `Fn::Sub` keys in specs that aren’t intended as CFN intrinsics.
+
+This can easily change W2001 behavior in large integration templates (like quickstart ones) if they include files with strings that match the regex patterns.
+
+### 4) The new `_extract_sub_params` is too permissive and will over-match
+They used:
+
+```py
+re.findall(r"\${([^!].*?)}", s)
+```
+
+This is **broader than the existing `Template.get_sub_parameters` logic**, which uses a different regex and expectations (and has known behavior around `${!Something}`).
+The new regex can extract many things that are not parameters (e.g., `${AWS::Region}` pseudoparam, `${stageVariables.foo}`, `${context.authorizer...}`, `${request.path.id}`, etc. common in API Gateway / OpenAPI strings). Those could get incorrectly treated as “used parameters”.
+
+Even worse, they added the `${{...}}` variant which can match things never meant to be CFN.
+
+This is a likely contributor to the integration output change: W2001 could stop firing for parameters it should flag (or the opposite), changing the global findings count and exit codes.
+
+### 5) The rule-level file I/O is a design smell and causes non-deterministic behavior
+Rules are expected to analyze the in-memory template representation. Adding filesystem reads inside a rule:
+- Makes results dependent on filesystem layout and relative paths.
+- Risks performance regressions when linting large templates.
+- Can break parallel test execution if fixtures overlap.
+- Makes it hard for other rules to reuse “used parameter” data (contrary to prompt’s “prefer hooking into preprocessing”).
+
+The prompt explicitly suggested integrating into shared preprocessing (`transform_pre` / transform tracking) so other rules can reuse it. The agent did the opposite: a one-off I/O scan inside W2001.
+
+### 6) Relative path resolution is incomplete for cfn-lint usage patterns
+They used:
+
+```py
+base = os.path.dirname(cfn.filename) if cfn.filename else ""
+include_path = os.path.normpath(os.path.join(base, location))
+```
+
+Problems:
+- `cfn.filename` might be relative already; joining/normalizing can produce paths that differ from how other parts of the tool resolve templates.
+- Doesn’t consider template loaders that use different filename semantics (URI-like, stdin, etc.).
+- Doesn’t handle Windows paths, `file://`, etc. (maybe fine for tests, but inconsistent).
+
+### 7) Unit test was not written “failing first” and was integrated incorrectly
+They didn’t demonstrate the test failing on the old code (trace doesn’t show).
+Also, they modified the existing `success_templates` list rather than adding a *targeted assertion test* verifying no W2001 matches for specific parameters. A “success template” test can hide regressions because it doesn’t assert *why* it passes.
+
+---
+
+## What the failures indicate (why full suite broke)
+
+The integration tests compare expected counts and/or JSON output for running `cfn-lint` on QuickStart templates. Because the agent’s rule now reads `AWS::Include` files and extracts “used parameters” from them with permissive regexes, **W2001 outcomes can change** for those templates. Any change in warnings affects:
+- number of findings (35 → 36)
+- exit code (expected 12, got 14) because exit code threshold depends on emitted rule classes / counts in those integration harnesses.
+
+Even if QuickStart template doesn’t use `AWS::Include`, the code scans for `Fn::Transform` everywhere. Some templates may have `Fn::Transform` blocks for other transform names, and in YAML those may be represented in ways the agent didn’t anticipate. If any of them include `Name: AWS::Include` with a local path (even in fixtures), it triggers the new behavior.
+
+---
+
+## How the agent should improve to pass all tests
+
+### A) Fix the test to match the real scenario
+- Use `${PetLambdaArn}` and `${UserPoolArn}` (single braces).
+- Put `Fn::Sub` in the included spec exactly like the prompt.
+- Add a dedicated unit test asserting **no W2001** for those parameters, not just “template is successful”.
+
+### B) Remove nonstandard `${{...}}` support
+It’s not requested and increases false matches. Rely on existing `Template.get_sub_parameters`/`REGEX_SUB_PARAMETERS` patterns to stay consistent with the rest of cfn-lint.
+
+### C) Scope the include scanning narrowly
+At minimum:
+- Only scan includes under `Resources/*/Properties/Body` for `AWS::ApiGateway::RestApi`
+- Or even better, only scan includes in properties that are known to accept templated body content (there is a constant `TEMPLATED_PROPERTY_CFN_PATHS` in `helpers.py` that could be leveraged).
+
+This prevents unintended changes in unrelated templates and aligns with “keep fix scoped”.
+
+### D) Don’t implement this inside W2001 if possible
+Preferred design per prompt:
+- Add include resolution/parse into Template preprocessing (`Template.transform_pre` or a new shared structure like `transform_pre["Fn::Transform::AWS::Include"]`).
+- Then W2001 just consumes that precomputed set.
+
+This reduces side effects and makes behavior consistent for other rules too.
+
+### E) Use consistent parsing and extraction logic
+- Parse included YAML/JSON using the same decoding mechanisms, but treat it as **data**, not necessarily a CFN template.
+- Walk the included structure and detect only:
+  - `{"Ref": "ParamName"}`
+  - `{"Fn::Sub": "..."}` (string form)
+  - `{"Fn::Sub": ["...", {...}]}` (list form)
+- Extract sub params using `Template.get_sub_parameters` or `REGEX_SUB_PARAMETERS` to match existing semantics.
+
+### F) Handle missing/unreadable include files safely *without changing outputs*
+If the include file can’t be read/parsed, do not mark any params as used, and do not emit extra errors/warnings from W2001. Just ignore.
+
+---
+
+## Summary
+
+The agent failed because it introduced an over-broad, rule-local filesystem include scanner with overly permissive parameter extraction (including nonstandard `${{...}}`) and a mismatched test fixture. This caused integration outputs/exit codes to change, violating the “no unrelated behavior changes” constraint. The fix should be narrowed, use consistent CFN `Fn::Sub` parsing, and ideally be integrated into shared template preprocessing rather than implemented directly inside W2001.
+
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
+Return a complete revised prompt text that can be used directly as the user prompt.

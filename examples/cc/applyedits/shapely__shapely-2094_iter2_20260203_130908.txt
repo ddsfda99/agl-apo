@@ -1,0 +1,91 @@
+You are an expert Python/C-extension contributor working in the code repository in the current directory.
+
+## Goal (what to build)
+Implement the enhancement: **Expose a `fix_structure` keyword in the WKT reader** so that WKT parsing can automatically “fix” certain structural issues such as **unclosed LinearRings in POLYGON** WKT (close rings automatically) instead of raising:
+
+> `IllegalArgumentException: Points of LinearRing do not form a closed linestring`
+
+### Required API surface
+- Add `fix_structure` to `shapely.wkt.loads` (and `shapely.wkt.load`).
+- Ensure it is **plumbed all the way down to the GEOS WKTReader** via Shapely’s compiled layer (the `lib.from_wkt` ufunc / C-extension), not by any Python string rewriting.
+- Default behavior must remain unchanged (i.e., current strict parsing stays the default). `fix_structure` should default to `False` (unless repository conventions indicate otherwise—verify).
+- Do **not** invent unsupported kwargs at Python level unless the compiled layer accepts them.
+
+### Non-goals / pitfalls to avoid (based on previous failures)
+- Do **not** implement a Python WKT “repair” parser/rewriter. This must be done through GEOS WKTReader capabilities.
+- Do **not** add `fix_structure` only at `shapely.wkt.loads` if the underlying `lib.from_wkt` does not accept it—this previously caused `TypeError`.
+- Do **not** paste diff markers (`+`) into files; after edits, quickly sanity-check with `python -c "import shapely.wkt"`.
+
+## Key constraints / reality check
+The repository currently calls (roughly): `shapely.wkt.loads` → `shapely.from_wkt` / `shapely.io.from_wkt` → `lib.from_wkt(...)` (compiled ufunc).
+Your job is to **extend the compiled ufunc and its GEOS interaction** to support a `fix_structure` boolean, if the linked GEOS provides such an option.
+
+### First step: confirm GEOS support
+Before coding, locate whether GEOS exposes a fix-structure option for the WKT reader, e.g. a function resembling:
+- `GEOSWKTReader_setFixStructure_r(...)` (or similarly named)
+- or a general “set fix structure” / “set fix invalid structure” option.
+
+Do this by:
+- Grepping the repository C sources and headers vendored/used.
+- Checking the GEOS C API headers available in the build environment (likely included via `geos_c.h`).
+- Searching in `src/` for WKTReader usage, `GEOSWKTReader_create_r`, and any `_set*` calls.
+
+If GEOS **does not** support it in the minimum supported version for this repo, then:
+- Do **not** hack around with Python parsing.
+- Instead: add the API with a clear error (or skip) is not acceptable; the task explicitly requests exposing fix_structure. In that case, you must determine whether the project already conditionally compiles features based on GEOS version and implement similarly:
+  - Implement `fix_structure` only when GEOS provides it; otherwise raise a clear `NotImplementedError` or `ValueError` at runtime **and** skip tests accordingly (but prefer feature-availability gating consistent with existing patterns).
+  - Add `pytest.mark.skipif` based on GEOS version / capability detection for tests that require fix_structure.
+
+## Implementation plan (follow this order)
+
+### 1) Write reproduction tests first (but only after confirming backend path)
+Add tests that:
+1. Demonstrate current failure without fix_structure:
+   - `wkt.loads("POLYGON ((0 0, 1 0, 1 1, 0 1))")` raises an exception.
+2. Demonstrate success with fix_structure enabled:
+   - `wkt.loads(..., fix_structure=True)` returns a valid polygon and is closed.
+   - Validate via `.wkt` equality or by checking the first/last coordinate of the exterior ring.
+3. Ensure default behavior unchanged:
+   - When `fix_structure` is omitted or False, the exception still occurs.
+
+Test placement: find existing test module for WKT IO (likely `shapely/tests/test_wkt.py` or similar). Follow existing testing style.
+
+Important: If the feature depends on GEOS version/capability, guard tests with skip conditions matching repo conventions (search existing tests for `GEOS_VERSION` checks or capability flags).
+
+### 2) Locate the actual code path and extension interface
+- Find Python wrapper(s): `shapely/wkt.py`, `shapely/io.py`, or similar.
+- Confirm how `loads` forwards parameters into `shapely.from_wkt` / `shapely.io.from_wkt`.
+- Identify where `lib.from_wkt` is defined (C/Cython/pybind). Search for `from_wkt` in `src/` and in build configuration.
+
+### 3) Extend compiled ufunc / binding
+- Update the `lib.from_wkt` ufunc to accept a `fix_structure` boolean keyword/argument.
+- Ensure the argument is parsed and passed into the GEOS WKTReader configuration for each parse.
+- Configure the WKTReader with the fix-structure option (when requested).
+- Maintain backward compatibility: existing function signature behavior should remain valid for callers who don’t pass the new kwarg.
+
+### 4) Plumb through Python API
+- Update `shapely.io.from_wkt` (or wherever the public function is) to accept `fix_structure=False` and forward it to `lib.from_wkt`.
+- Update `shapely.wkt.loads` and `shapely.wkt.load` signatures to include `fix_structure` and forward it correctly.
+  - Ensure `load()` forwards the user-provided value; do not drop/override kwargs.
+
+### 5) Validate and run tests
+- Run targeted tests first.
+- Run the full test suite if feasible.
+- If any failures occur, fix them properly rather than weakening tests.
+
+### 6) Clean up
+Remove any temporary files/scripts you created.
+
+## Output expectations
+- You must implement the feature in the correct layer (compiled binding) and expose it in Python.
+- Tests should pass (or be correctly skipped when GEOS lacks the capability, following established repo conventions).
+- No Python-level WKT rewriting.
+- No syntax errors—sanity-import after edits.
+
+## Helpful “do this, not that”
+- Do: inspect and modify `src/` code that wraps GEOS WKTReader.
+- Do: add capability/version checks if needed.
+- Don’t: call `shapely.from_wkt(..., fix_structure=...)` until you have actually added support to the underlying `lib.from_wkt`.
+- Don’t: attempt to “repair” WKT text in Python.
+
+Now implement the feature end-to-end following the steps above.

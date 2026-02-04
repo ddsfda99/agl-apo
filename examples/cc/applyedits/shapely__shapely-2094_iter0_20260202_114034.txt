@@ -1,0 +1,92 @@
+You are an expert coding agent working inside a code repository in the current directory.
+
+Task: ENH: expose GEOS “fix structure” keyword in WKT reader (close linestrings automatically)
+
+Background / expected behavior
+- Creating a Polygon from coordinates auto-closes the ring, but reading equivalent WKT currently errors when the ring is not closed:
+  - Example invalid-but-fixable WKT: `POLYGON ((0 0, 1 0, 1 1, 0 1))` (missing final `0 0`)
+  - Desired: allow users to load such WKT by enabling GEOS “fix structure” mode, which auto-closes rings.
+- GEOS C API provides `GEOSWKTReader_setFixStructure_r(handle, reader, doFix)` (confirmed available on typical GEOS installations), but Shapely’s WKT path likely does not call it.
+- Implement a user-facing keyword on `shapely.wkt.loads` (and any underlying `from_wkt` helpers as appropriate) to control this behavior:
+  - Default should remain strict (current behavior), unless repository conventions indicate otherwise.
+  - Add a non-strict option that enables fix-structure (auto-repair) so nested GeometryCollections can be parsed without pre-walking and repairing WKT text externally.
+
+Critical failure points from previous attempt (avoid repeating)
+1) Do not stop after investigation. You must implement the change, add tests, and run them.
+2) Start by creating a minimal failing test and run it to see the exact failure.
+3) The fix is almost certainly in the GEOS-backed WKT reader in C (search for `from_wkt` / `GEOSWKTReader_read_r`). Don’t get stuck searching for “FixStructure” in Python only.
+4) Use grep + targeted reads for large C files; don’t try to open huge files in one shot.
+
+Step-by-step instructions (follow in order)
+
+A) Understand repository layout and current behavior
+1) Confirm repo root (run `pwd` and `ls`).
+2) Locate existing WKT loading entry points:
+   - Python: `shapely/wkt.py` or similar
+   - C extension: search for `from_wkt` and `GEOSWKTReader_read_r`
+3) Determine current public API:
+   - `shapely.wkt.loads`
+   - potentially `shapely.from_wkt` (if present)
+   - Identify how keyword args are forwarded into the C/ufunc layer.
+
+B) Write a reproduction/regression test first
+1) Add a focused test (pytest) that captures both behaviors:
+   - Strict/default: `wkt.loads("POLYGON ((0 0, 1 0, 1 1, 0 1))")` should raise an exception (or follow current “on_invalid” semantics if the library uses that).
+   - Non-strict/fix enabled: `wkt.loads(..., fix_structure=True)` (or `strict=False`, see below) should return a valid polygon and its WKT should be closed (last point equals first). Also assert it doesn’t crash for nested cases.
+2) Add one additional test for a nested geometry:
+   - `GEOMETRYCOLLECTION (POINT (0 0), POLYGON ((0 0, 1 0, 1 1, 0 1)))`
+   - With fix enabled, the whole collection should load; the polygon member should be closed.
+3) Make the tests check geometry validity/structure in a robust way:
+   - Prefer checking `geom.geom_type`, `len(geom.geoms)` for collections, and polygon exterior coordinates first==last.
+   - Avoid overfitting exact WKT formatting beyond closure.
+
+C) Decide on the public keyword name (and keep it consistent)
+Implement exactly one of these designs (pick the one most consistent with existing API patterns you find in the repo):
+1) Preferred if repository already exposes GEOS-like options: `fix_structure=` boolean, default False.
+2) If the repo already uses “strict” nomenclature: `strict=` boolean default True, where `strict=False` implies `fix_structure=True`.
+If both exist in related APIs, support both but ensure no ambiguity (e.g., if both provided, raise ValueError).
+
+D) Implement the feature in the correct layer(s)
+1) C layer (most important):
+   - Find the function that reads WKT via `GEOSWKTReader_create_r` + `GEOSWKTReader_read_r` (previous trace suggests `src/ufuncs.c` contains `from_wkt_func`).
+   - Create/set the fix-structure option on the reader before reading:
+     - `GEOSWKTReader_setFixStructure_r(ctx, reader, fix_structure ? 1 : 0);`
+   - Ensure this is done once per reader (not per-geometry inside a loop) where possible.
+   - Add compile-time guarding only if required by CI; if the symbol is always available for supported GEOS versions, call unconditionally. If guards are needed, use the project’s existing GEOS version macros (search for patterns like `GEOS_SINCE_...`) and provide a fallback behavior (e.g., ignore fix_structure when unavailable).
+2) Python API layer:
+   - Plumb the keyword from `shapely.wkt.loads` down to the underlying `from_wkt` implementation (Python wrapper or ufunc).
+   - Update docstrings and any function signatures.
+   - Ensure the default preserves current behavior.
+3) Ensure error/invalid-handling semantics remain compatible:
+   - If there is an existing `on_invalid` parameter (`"raise"`, `"warn"`, `"ignore"`, etc.), integrate cleanly:
+     - strict default should still raise on malformed.
+     - when fix_structure enabled, GEOS should attempt repair first; if still invalid, then apply `on_invalid` policy.
+
+E) Validate by running tests (must do)
+1) Run only the new test(s) first (fast path), then run the relevant full test subset (or whole suite if feasible).
+2) If failures occur:
+   - Inspect traceback
+   - Verify the keyword is actually reaching the C reader
+   - Confirm GEOS call is executed (not compiled out)
+   - Adjust tests only if they are asserting the wrong existing semantics.
+
+F) Clean up
+- Remove any temporary scripts you created.
+- Ensure code formatting and imports follow project style.
+- Do not commit changes.
+
+Implementation hints (use these to avoid getting stuck)
+- To find the exact spot to patch in C:
+  - `grep -R "GEOSWKTReader_create_r" -n src`
+  - `grep -R "GEOSWKTReader_read_r" -n src`
+  - Look for a function named like `from_wkt_func`.
+- The missing capability is likely a single-line call to `GEOSWKTReader_setFixStructure_r` after creating the reader.
+- Keep the default as strict unless project history indicates otherwise.
+
+Deliverables
+- New/updated tests proving:
+  1) default strict behavior (existing error/raise) remains unchanged
+  2) non-strict/fix behavior successfully loads unclosed rings and closes them
+  3) nested geometrycollection case also works
+- Code changes in the correct Python + C locations to expose and implement the keyword.
+- Evidence of running tests (include commands you ran and summarized results in your final message).

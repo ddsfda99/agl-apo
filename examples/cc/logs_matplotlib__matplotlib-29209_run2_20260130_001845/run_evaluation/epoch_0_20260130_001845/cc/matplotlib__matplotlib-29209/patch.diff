@@ -1,0 +1,82 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index c55f778118..17158424e5 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -5918,7 +5918,44 @@ class Axes(_AxesBase):
+         if len(args) == 1:
+             C = np.asanyarray(args[0])
+             nrows, ncols = C.shape[:2]
+-            if shading in ['gouraud', 'nearest']:
++            if shading == 'nearest':
++                # For 'nearest' shading with only C provided, treat C as
++                # grid-point centered data and compute the cell edges by
++                # interpolating midpoints between adjacent centers in both
++                # x and y directions, then use the 'flat' algorithm with
++                # these computed edges.
++                Xc, Yc = np.meshgrid(np.arange(ncols), np.arange(nrows))
++                def _interp_grid(X):
++                    # helper to compute edges from centers along columns
++                    if np.shape(X)[1] > 1:
++                        dX = np.diff(X, axis=1) * 0.5
++                        if not (np.all(dX >= 0) or np.all(dX <= 0)):
++                            _api.warn_external(
++                                f"The input coordinates to {funcname} are "
++                                "interpreted as cell centers, but are not "
++                                "monotonically increasing or decreasing. "
++                                "This may lead to incorrectly calculated cell "
++                                "edges, in which case, please supply "
++                                f"explicit cell edges to {funcname}.")
++                        hstack = np.ma.hstack if np.ma.isMA(X) else np.hstack
++                        X = hstack((X[:, [0]] - dX[:, [0]],
++                                    X[:, :-1] + dX,
++                                    X[:, [-1]] + dX[:, [-1]]))
++                    else:
++                        # Degenerate case: only one value; duplicate to form an edge.
++                        X = np.hstack((X, X))
++                    return X
++                # Expand x-direction (columns)
++                X = _interp_grid(Xc)
++                Y = _interp_grid(Yc)
++                # Expand y-direction (rows) by applying helper to transposed arrays
++                X = _interp_grid(X.T).T
++                Y = _interp_grid(Y.T).T
++                shading = 'flat'
++            elif shading == 'gouraud':
++                # Default to grid of centers when Gouraud is requested; users
++                # typically provide matching X, Y when using Gouraud. Without
++                # X, Y we assume uniform spacing.
+                 X, Y = np.meshgrid(np.arange(ncols), np.arange(nrows))
+             else:
+                 X, Y = np.meshgrid(np.arange(ncols + 1), np.arange(nrows + 1))
+diff --git a/lib/matplotlib/tests/test_axes.py b/lib/matplotlib/tests/test_axes.py
+index 62eb491aa4..22c08891c6 100644
+--- a/lib/matplotlib/tests/test_axes.py
++++ b/lib/matplotlib/tests/test_axes.py
+@@ -9452,3 +9452,27 @@ def test_wrong_use_colorizer():
+     for kwrd in kwrds:
+         with pytest.raises(ValueError, match=match_str):
+             fig.figimage(c, colorizer=cl, **kwrd)
++
++
++def test_pcolormesh_nearest_only_C_matches_with_xy():
++    # When only C is provided with shading='nearest', pcolormesh should
++    # compute cell edges from grid centers and behave the same as when
++    # explicit X, Y are provided with shading='nearest'.
++    C = np.arange(12).reshape(3, 4)
++    fig, ax = plt.subplots()
++    q = ax.pcolormesh(C, shading='nearest')
++    fig.canvas.draw()
++    # Coordinates should be cell edges of shape (M+1, N+1, 2)
++    assert q.get_coordinates().shape == (C.shape[0] + 1, C.shape[1] + 1, 2)
++    # Number of facecolors equals number of cells
++    assert q.get_facecolor().shape[0] == C.size
++
++    x = np.arange(C.shape[1])
++    y = np.arange(C.shape[0])
++    X, Y = np.meshgrid(x, y)
++    fig2, ax2 = plt.subplots()
++    q2 = ax2.pcolormesh(X, Y, C, shading='nearest')
++    fig2.canvas.draw()
++
++    # The computed coordinates should match those from explicit X, Y
++    assert np.allclose(q.get_coordinates(), q2.get_coordinates())

@@ -1,0 +1,80 @@
+You are an expert Python developer working inside the **existing repository in the current directory** (do not assume `/workspace`; first determine the repo root with `pwd`/`ls`). Your goal is to fix a Matplotlib bug and add a robust regression test.
+
+## Bug to fix
+`.remove()` on the `ErrorbarContainer` returned from `Axes.errorbar()` removes the artists from the axes, **but the corresponding legend entry remains** after re-calling `legend()`. This differs from `Line2D` behavior.
+
+Repro (from issue):
+
+```python
+from matplotlib import pyplot as plt
+
+ax = plt.gca()
+obj1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
+
+plt.legend()
+plt.savefig("test_errorbar_1.pdf")
+
+obj1.remove()
+
+ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
+plt.legend()
+plt.savefig("test_errorbar_2.pdf")
+```
+
+Expected: second figure legend contains only `"bar"`.
+
+## Required workflow (follow in order)
+1. **Confirm repository context**
+   - Run `pwd` and `ls`.
+   - Identify where Matplotlib sources and tests live in this repo.
+
+2. **Reproduce the bug before editing library code**
+   - Prefer a minimal *pytest* reproduction or a minimal script run via the test backend.
+   - Avoid GUI/backends; use Matplotlib’s testing configuration where possible.
+   - Demonstrate the incorrect legend behavior clearly (e.g., legend labels still include `"foo"` after `obj1.remove()`).
+
+3. **Add a regression test first (or immediately after confirming repro)**
+   - Do **not** create a brand-new “temporary” test module unless truly necessary.
+   - Prefer adding to an existing relevant test file (likely one covering containers or legend behavior, e.g. `test_container.py` / `test_legend.py`—choose the best semantic fit by searching existing tests).
+   - The test must be **robust and non-flaky**:
+     - Use `fig, ax = plt.subplots()` (no reliance on global pyplot state).
+     - Use `ax.legend()` (not `plt.legend()`).
+     - Assert on labels in a resilient way:
+       - Collect labels from `legend.get_texts()` and ensure `"foo"` is present initially.
+       - After `container.remove()` and adding `"bar"`, ensure `"foo"` is **not** present and `"bar"` **is** present.
+       - Don’t require exact ordering unless necessary.
+   - Use the appropriate Matplotlib test decorators/fixtures (e.g., `@check_figures_equal` if needed, but labels-only assertions are fine and faster).
+
+4. **Locate the root cause**
+   - Search the codebase for:
+     - `ErrorbarContainer`
+     - `Axes.errorbar`
+     - `add_container`, `containers`, and container `.remove()` behavior
+     - `_remove_method` (containers often rely on it to detach from axes)
+   - Determine why removing the container doesn’t remove it from the axes’ container registry and thus still gets picked up by legend creation.
+
+5. **Implement the fix**
+   - Ensure that creating an errorbar container registers it with the axes in a way that removal properly unregisters it (matching other container types).
+   - Prefer using existing public/internal APIs consistently (e.g., if other code paths use `Axes.add_container`, use that rather than manually appending to `ax.containers`).
+   - If you change both 2D and 3D paths (e.g., `Axes3D.errorbar`), either:
+     - add a small focused test for 3D too, **or**
+     - clearly justify the symmetry and why the change is safe. (If a 3D test is easy and fast, add it.)
+
+6. **Run targeted tests first**
+   - Run only the relevant test module(s) and/or `-k` selection for speed.
+   - Only run the full suite if time permits; avoid long runs by default in this environment.
+
+7. **No leftover artifacts**
+   - Don’t leave behind generated PDFs or scratch scripts in the repo.
+   - The regression test must be a committed-style test integrated into the existing test suite (not a “temporary” file). If you created any temporary files for manual repro, delete them.
+
+## Output expectations
+- Provide:
+  - The exact file(s) modified and a brief explanation of the fix.
+  - The final form of the regression test and why it’s robust.
+  - The exact pytest command(s) you ran and their results.
+
+## Hints (don’t treat as guaranteed, verify in code)
+- Errorbar returns a container. Containers typically need to be registered with the axes via a method that sets up a proper remove callback. If the container is only appended to an internal list, `.remove()` may not fully unregister it, leaving legend collection to still see it.
+
+Proceed carefully: reproduce → test → fix → targeted test run.

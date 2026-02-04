@@ -1,0 +1,158 @@
+You are working in the root of the code repository. Your goal is to fix the bug described below and validate it with both a minimal reproduction and the existing integration test fixtures. Follow these instructions precisely and do not commit changes.
+
+Context and goals
+- The bug: cfn-lint reports E3006 for resource types unavailable in a specified region, even when the resource has a Condition that evaluates to False for that region. Expected: only report E3006 if the resource’s Condition could evaluate to True in the given region. Otherwise, suppress E3006.
+- Root causes and required fixes:
+  1) The regional scenario generation in cfnlint/conditions/conditions.py is incorrect when a region is supplied. Conditions.build_scenarios must produce the Cartesian product of outcomes per condition in the given region.
+  2) There is a latent bug: build_scenerios_on_region is decorated with @lru_cache but returns a generator. Generators are single-use, so caching them returns exhausted iterators on subsequent calls. This can lead to order-dependent, flaky behavior. You must fix this by materializing and caching immutable outcomes, or remove the cache.
+  3) ResourceType rule logic must honor the resource’s Condition correctly under a region: only report E3006 if the resource’s Condition could be True in that region.
+  4) Integration test instability is caused by a date-sensitive rule E2533 DeprecatedRuntimeUpdate (Lambda runtime lifecycle). Make this deterministic by allowing injection of “current date” via an environment variable, and run tests with a stable date to match fixtures.
+
+Step-by-step plan
+1) Read and understand requirements
+- E3006 should be reported only if:
+  - the resource type is unavailable in the specified region, and
+  - the resource’s Condition could evaluate to True in that region.
+- If the resource’s Condition cannot be True in the given region, suppress E3006 for that resource.
+- Provide a minimal reproduction to demonstrate the behavior.
+- Reconcile outputs against the test fixtures; fix discrepancies by addressing regional scenario generation in Conditions and ResourceType rule logic.
+- Fix the generator caching bug in build_scenerios_on_region.
+- Stabilize E2533 by making “now” injectable so test results are deterministic.
+
+2) Create a minimal reproduction template to confirm the bug and expected behavior
+- Create a file named tmp_repro_global_accelerator.json in the repo root with the following contents. Use this exact snippet:
+
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "EnableGlobalAccelerator": {
+      "Type": "String",
+      "Default": "Yes",
+      "AllowedValues": ["Yes","No"]
+    }
+  },
+  "Conditions": {
+    "GAEnabledNotInChina": {
+      "Fn::And": [
+        { "Fn::Equals": [ { "Ref": "EnableGlobalAccelerator" }, "Yes" ] },
+        { "Fn::Not": [
+          { "Fn::Or": [
+            { "Fn::Equals": [ { "Ref": "AWS::Region" }, "cn-north-1" ] },
+            { "Fn::Equals": [ { "Ref": "AWS::Region" }, "cn-northwest-1" ] }
+          ] }
+        ] }
+      ]
+    }
+  },
+  "Resources": {
+    "MyListener": {
+      "Type": "AWS::GlobalAccelerator::Listener",
+      "Condition": "GAEnabledNotInChina",
+      "Properties": {
+        "AcceleratorArn": "arn:aws:globalaccelerator::123456789012:accelerator/abc",
+        "PortRanges": [ { "FromPort": 80, "ToPort": 80 } ],
+        "Protocol": "TCP"
+      }
+    }
+  }
+}
+
+- Run cfn-lint with the China region to reproduce the bug:
+  - cfn-lint --format json -r cn-north-1 -t tmp_repro_global_accelerator.json
+- Currently, you will likely see E3006 for AWS::GlobalAccelerator::Listener in cn-north-1 even though the Condition should make it False. After your fixes, E3006 should be suppressed for this case.
+
+3) Inspect expected results fixtures to understand integration failures and verify what differs
+- Open and read the expected results in:
+  - test/fixtures/results/quickstart/non_strict/openshift.json
+  - test/fixtures/results/quickstart/non_strict/… other files listed in the failing integration tests
+  - test/fixtures/results/quickstart/… for strict runs as needed
+- Compare the actual output to these JSON fixtures to determine which Rule.Id findings are in excess or missing. Do not assume E3006 is the only issue; verify via comparison.
+- Avoid external tools like jq. Use Python to parse JSON if you need to inspect output.
+
+4) Locate the most likely bug source and plan fixes
+- The regional scenario generation in cfnlint/conditions/conditions.py is incorrect when a region is provided. Focus on Conditions.build_scenarios when region is not None.
+- Current logic likely uses itertools.starmap with build_scenerios_on_region and then incorrectly zips condition_names with a single iterator’s booleans, which does not produce the Cartesian product of booleans across all condition names.
+- Additionally, build_scenerios_on_region is decorated with @lru_cache but returns a generator. This caching of a generator is unsafe; the generator may be exhausted on first use and return empty on subsequent calls.
+- Plan:
+  - Fix build_scenarios to:
+    - condition_names = list of condition names from the template
+    - options_per_condition = [list(self.build_scenerios_on_region(name, region)) for name in condition_names]
+    - for combo in itertools.product(*options_per_condition):
+      - yield dict(zip(condition_names, combo))
+  - Fix build_scenerios_on_region caching:
+    - Option A: Change build_scenerios_on_region to return a tuple of boolean outcomes (e.g., (True, False), (True,), (False,)), and keep @lru_cache to cache the tuple. All callers should treat the return as an immutable sequence, not an iterator.
+    - Option B: Remove @lru_cache entirely and always return a fresh generator. If you take this path, materialize with list() at call sites to avoid exhaustion issues.
+  - Ensure the non-region branch of build_scenarios remains unchanged and correct.
+
+5) Implement the fixes
+- In cfnlint/conditions/conditions.py:
+  - Modify build_scenarios so that when region is supplied:
+    - condition_names = list of condition names from the template
+    - options_per_condition = [list(self.build_scenerios_on_region(name, region)) for name in condition_names]
+    - for combo in itertools.product(*options_per_condition):
+      - yield dict(zip(condition_names, combo))
+    - Keep the non-region branch intact.
+  - Fix build_scenerios_on_region so it does not return a bare generator that is cached. Prefer to return a tuple of booleans and cache that immutable value, or remove @lru_cache. Update any call sites accordingly.
+  - Do not rename the function at this time even though it has a typo; that could be a larger refactor. If needed, add a comment noting the typo.
+
+- In cfnlint/rules/resources/ResourceType.py:
+  - Ensure validation of resource type availability respects the resource’s Condition under the specified region:
+    - If the resource has no Condition, validate as usual.
+    - If the resource has a Condition:
+      - Use the fixed regional scenarios to determine if the condition can be True under the region provided:
+        - outcomes = list(validator.cfn.conditions.build_scenerios_on_region(resource_condition_name, region))
+      - Only report E3006 for the resource if True is present in outcomes.
+      - If the condition can only be False for that region, skip E3006 for that resource.
+    - Do not make the logic stricter than necessary; the rule should only trigger when the resource could exist in that region and the type is not available.
+
+6) Make E2533 deterministic for integration tests
+- The integration tests can fail due to the date-sensitive E2533 DeprecatedRuntimeUpdate rule, which depends on “current date” when checking Lambda runtime lifecycles. This is unrelated to the regional conditions fix but must be stabilized for tests.
+- Steps:
+  - Locate the E2533 rule code by searching the repository for "E2533" and "DeprecatedRuntimeUpdate".
+  - Modify that rule so the “current date” is taken from an environment variable, e.g., CFNLINT_NOW, if present; otherwise fallback to datetime.date.today():
+    - import os and datetime
+    - now_str = os.environ.get("CFNLINT_NOW")
+    - if now_str is not None:
+      - parse now_str as YYYY-MM-DD into a datetime.date
+    - else:
+      - now = datetime.date.today()
+  - Use this deterministic “now” value in the rule’s comparisons to AdditionalSpecs/LmbdRuntimeLifecycle.json dates.
+- When running tests, set CFNLINT_NOW to a stable date that aligns with fixtures (a date before the update-block date for runtimes flagged in the fixtures). If unsure, open AdditionalSpecs/LmbdRuntimeLifecycle.json to find “update-block” dates for the runtimes used in the quickstart templates, and pick a date before those.
+- Example usage:
+  - CFNLINT_NOW=2023-06-01 pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+  - Iterate on the date if the fixture comparison still shows E2533 differences.
+
+7) Validate with unit and integration tests
+- Run the minimal reproduction again:
+  - cfn-lint --format json -r cn-north-1 -t tmp_repro_global_accelerator.json
+  - Verify that E3006 is not reported for MyListener when GAEnabledNotInChina is the condition.
+- Run the failing integration tests with deterministic now:
+  - CFNLINT_NOW=2023-06-01 pytest -q test/integration/test_quickstart_templates_non_strict.py::TestQuickStartTemplates::test_templates
+  - CFNLINT_NOW=2023-06-01 pytest -q test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates
+- If failures persist:
+  - Programmatically run cfn-lint with --format json against the corresponding templates, parse outputs in Python, count findings per Rule.Id, and compare to the fixture JSON to identify which rules differ.
+  - Confirm whether E3006 differences have been resolved. If other rule IDs differ, verify whether they are impacted by the scenario logic or the deterministic date change and adjust accordingly.
+
+8) Optional unit tests to lock in behavior (do not commit, use locally)
+- Add a small unit test for build_scenarios(region=...) with two or more conditions that each can be True/False depending on the same region. Verify that the Cartesian product is emitted as expected.
+- Add tests for ResourceType.validate to ensure E3006 is suppressed when a resource’s Condition can only be False in the target region, and enforced when it could be True.
+- These tests help you validate correctness locally but should not be committed.
+
+9) Debugging guidance
+- Do not rely on jq or other external tools that may not be installed.
+- Use Python to parse JSON output from cfn-lint to compare against fixture files. Example sketch:
+  - Load cfn-lint output and fixture into Python dicts, then aggregate counts per Rule.Id and compare.
+- Avoid path confusion. Run tests and commands from the repository root.
+- Inspect actual messages versus expected fixtures to ensure you are fixing the correct cause.
+
+10) Clean up
+- Remove tmp_repro_global_accelerator.json after validation.
+- Do not commit any changes.
+
+Acceptance criteria
+- With -r cn-north-1, cfn-lint does not report E3006 for AWS::GlobalAccelerator::* resources when their Conditions are False for cn-north-1.
+- The scenario generation in Conditions.build_scenarios produces correct combinations under a region via Cartesian product of per-condition outcomes.
+- ResourceType rule logic honors Conditions when checking type availability in a region, only reporting E3006 if the resource’s Condition can be True in that region.
+- The generator caching bug is resolved: build_scenerios_on_region no longer returns a cached, single-use generator; either it returns an immutable sequence and caches that, or it returns a fresh generator without caching.
+- Integration tests for quickstart templates no longer fail due to E2533 differences. Injecting CFNLINT_NOW yields deterministic behavior consistent with fixtures.
+- All other integration expectations match the fixture JSONs.

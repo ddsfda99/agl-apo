@@ -1,0 +1,121 @@
+### What failed / how we know
+After the agent’s changes, unit tests mostly passed, but **3 integration tests failed**:
+
+- `test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates`
+- `test/integration/test_quickstart_templates_non_strict.py::{test_templates,test_module_integration}`
+
+The failures are deterministic: expected counts/exit codes changed for `test/fixtures/templates/quickstart/openshift.yaml` (expected 35 failures but got 36; expected exit code 12 but got 14).
+
+That means the agent introduced a **new lint finding (or upgraded severity)** on that template. Since `openshift.yaml` contains **no** `Fn::Transform` / `AWS::Include` usages (the agent even grepped and found none), the new behavior is a **side-effect** of the new W2001 implementation.
+
+---
+
+### Root causes
+
+#### 1) W2001 now reads external files during linting (non-deterministic & cross-template side effects)
+The agent modified `W2001` to:
+- search for `Fn::Transform` entries
+- when `Name == AWS::Include`, load `Location` via `cfn_yaml.load()`
+- parse it as a Template and scan it for `Ref` and `Fn::Sub`
+
+Problems:
+- This introduces **file I/O during rule evaluation**, which can affect results depending on CWD, file existence, file encoding, YAML quirks, etc.
+- Integration tests run `cfn-lint` as a CLI over many templates; adding file reads can change global behavior (timing, error handling, broken pipe, etc.) and more importantly **it can create additional matches in transformed trees indirectly**.
+
+Even though `openshift.yaml` doesn’t use `AWS::Include`, W2001 still calls `cfn.search_deep_keys("Fn::Transform")` on a huge template. That’s cached, but it is an extra deep scan for every template and could interact with caching and template mutations.
+
+#### 2) The “Location resolution” logic is wrong/inconsistent with how cfn-lint resolves includes
+They changed path resolution twice:
+
+- Initially: always resolve relative to `os.path.dirname(cfn.filename)`
+- Then: only resolve relative if path starts with `./` or `../`, else treat as “as-is”
+
+This is ad-hoc and likely doesn’t match how `AWS::Include` locations work in practice in this project/test harness. It can accidentally load a file from an unexpected path if the current working directory differs (integration tests run from repo root), or fail to load and silently ignore.
+
+That doesn’t directly explain `openshift.yaml`, but it demonstrates the implementation is brittle and environment-dependent—exactly what integration tests are guarding against.
+
+#### 3) The rule is scanning included OpenAPI YAML as if it were a CFN template
+The agent’s new fixture `api-specification.yml` contains CloudFormation intrinsic functions (`Fn::Sub`) embedded in OpenAPI. That’s realistic, but **it’s not a CloudFormation template structure**.
+
+By wrapping the included document in `Template(include_path, include_template, cfn.regions)`, you:
+- run Template initialization which precomputes `transform_pre["Ref"]`, `transform_pre["Fn::Sub"]`, etc.
+- build Graph/Conditions/Context (Template constructor does Graph build in a try/except)
+
+This is heavy and can emit matches or behave differently if the included YAML contains keys like `Resources`, `Parameters`, or other CFN-like keys. It also risks exceptions (silently swallowed) and inconsistent extraction.
+
+A safer approach would be to **parse the included YAML as plain data and run the same `search_deep_keys`-style traversal without constructing a Template**, or reuse existing include/transform machinery.
+
+#### 4) Security / policy issue: enabling arbitrary file reads from templates
+This is a major design problem for a linter:
+- A malicious template could point `Location` to `/etc/passwd` or other sensitive files.
+- The agent’s code will read it (if readable) during lint.
+- Even if it doesn’t exfiltrate, it’s still unauthorized file access and can break sandbox assumptions.
+
+Integration tests might not explicitly check this, but it’s a correctness and security regression and often causes CI/environment failures.
+
+#### 5) The new W2001 behavior likely created an extra finding in openshift quickstart
+The symptom: `openshift.yaml` now produces one more result in integration tests (35 → 36) and exit code changes (12 → 14 in non-strict).
+
+Exit code 14 in this repo corresponds to having at least one finding at/above a certain class (often errors). The failure stack shows `subprocess.CalledProcessError` with return code 14: that’s the CLI returning a different class threshold, implying the additional message could be an error-level rule (E*) now triggered due to new behavior, or a different count of existing ones.
+
+Given the only changed logic is W2001 (warning), the *count* mismatch in the strict test suggests:
+- either W2001 now emits a warning in openshift where it previously didn’t (increasing total findings by 1), affecting expected total findings list,
+- or file I/O / transform parsing is perturbing rule execution order or results formatting.
+
+Even one extra **warning** can change the JSON output length; those integration tests compare result sets, not just exit codes.
+
+---
+
+### Process / debugging issues by the agent
+
+#### 6) The agent didn’t localize the regression before running full suite
+They ran full `pytest -q`, saw quickstart failures, and then:
+- grepped for `Fn::Transform` in `openshift.yaml` (none)
+- tried to run `cfn-lint ... | jq` (jq missing, caused BrokenPipe and confusion)
+
+They never actually inspected **what the extra new finding was**. That’s the key step:
+- run cfn-lint, capture JSON, diff against expected fixture, identify the new message and which rule emitted it.
+
+Without identifying the new finding, they couldn’t implement a targeted fix.
+
+#### 7) They added a new fixture and modified unit tests without ensuring it aligns with integration harness
+The new success template `used_include_transform.yaml` uses:
+```yaml
+Location: test/fixtures/templates/good/parameters/api-specification.yml
+```
+This is a relative path. Whether that is correct depends on how the CLI resolves it. Their own code treats it as “as-is” (no joining) which assumes process CWD is repo root. That’s not always true in unit/integration harnesses; it happened to pass the unit test after the second tweak, but it’s fragile.
+
+---
+
+### How to fix (high-level guidance)
+
+1) **Don’t implement AWS::Include support inside W2001 by reading files directly.**
+   - Correct place is the **transform system** (`cfnlint.template.transforms`) or decode layer so included content becomes part of the template tree (or at least produces reference metadata).
+   - Then W2001 can stay purely tree-based and deterministic.
+
+2) If AWS::Include must be handled in W2001:
+   - Resolve includes using the same logic the project uses elsewhere (there may already be helper logic for includes/transforms).
+   - Restrict file access to within the template directory (or configured allowed roots), and fail safely.
+   - Avoid constructing a full `Template` for included YAML; just traverse the loaded object for `Ref` keys and `Fn::Sub` values.
+
+3) **Identify and remove the extra finding in openshift quickstart**
+   - Run `cfn-lint --format json test/fixtures/templates/quickstart/openshift.yaml` and diff with stored expected results in `test/fixtures/results/.../openshift.json`.
+   - Determine which rule is new.
+   - Ensure W2001 doesn’t emit new warnings on that template due to the added `search_deep_keys("Fn::Transform")` scan or any other side effect.
+
+4) Update tests only after behavior is correct.
+   - The integration fixtures are the “golden” outputs. If your change is truly intended to add findings, you must update those expected JSON files as well. The agent did not, hence failures.
+
+---
+
+### Concrete “bad spots” in the patch
+- Adding `import os` and `cfnlint.decode.cfn_yaml` into a lint rule and performing file I/O during `match()`.
+- Swallowing all exceptions (`except Exception`) and silently continuing, making behavior unpredictable and hiding failures.
+- Incorrect path resolution heuristics for `Location`.
+- Instantiating `Template` for included content (heavy, may build graphs/contexts, can introduce unexpected behavior).
+- Not determining the exact additional finding that breaks integration snapshots before attempting fixes.
+
+---
+
+### Summary
+The agent’s fix “worked” for the newly added unit test but **broke snapshot-based integration tests** because it introduced **non-hermetic file-loading behavior** into `W2001`, changing outputs for quickstart templates. The implementation is also insecure and inconsistent with the project’s transform/include architecture. The next attempt should move include-handling into the transform/decode layer (or at minimum make W2001’s include scanning deterministic, sandboxed, and side-effect-free) and then regenerate/update integration expected results only if the behavior change is truly desired.

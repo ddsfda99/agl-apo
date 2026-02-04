@@ -1,0 +1,184 @@
+The agent failed for two broad reasons: (1) it changed behavior in the wrong layer / with the wrong semantics, and (2) it broke/added tests incorrectly (naming, assumptions, and deleting coverage).
+
+Below is a detailed review of the missteps and what to do differently.
+
+---
+
+## 1) The agent didn’t understand Sphinx testroot naming conventions
+
+### What happened
+Sphinx’s pytest fixture for `@pytest.mark.sphinx(testroot=...)` looks for sources under:
+
+```
+tests/roots/test-<testroot>/
+```
+
+The agent created directories:
+
+- `tests/roots/test-figure-in-seealso/`
+- `tests/roots/test-admonition-in-table/`
+
+but used markers:
+
+- `testroot='test-figure-in-seealso'`
+- `testroot='test-admonition-in-table'`
+
+That made pytest search for:
+
+- `tests/roots/test-test-figure-in-seealso`  ✅ (it tried this)
+- `tests/roots/test-test-admonition-in-table` ✅ (it tried this)
+
+…which don’t exist, causing setup failures:
+
+> FileNotFoundError: ... `/tests/roots/test-test-admonition-in-table`
+
+### How to fix
+Use `testroot='figure-in-seealso'` and store files under `tests/roots/test-figure-in-seealso/` (no `test-` prefix in the marker).
+
+Same for admonition table test: `testroot='admonition-in-table'` with directory `tests/roots/test-admonition-in-table/`.
+
+---
+
+## 2) The agent removed an existing test and replaced it with a different one (regression in coverage)
+
+### What happened
+It **replaced** the existing test:
+
+```py
+@pytest.mark.sphinx('latex', testroot='latex-figure-in-admonition')
+def test_latex_figure_in_admonition(...):
+    assert r'\begin{figure}[H]' in result
+```
+
+with a new test about seealso.
+
+This is a big red flag: the original test validates an existing behavior contract (figures in admonitions should be forced non-floating via `[H]`). Removing it reduces coverage and may violate expected behavior.
+
+### How to fix
+Never delete/replace unrelated tests to “make your change pass”. Add new tests *in addition* to existing ones, unless the upstream requirement explicitly changed and you update all related sources accordingly.
+
+---
+
+## 3) The new tests are brittle / based on incorrect assumptions about LaTeX output
+
+### Example: “no `\begin{figure}[` inside seealso”
+The agent assumed “floats forbidden in boxed env, so ensure no figure floats exist”. That may be correct, but the test is overly simplistic:
+
+- It searches for `\\begin{sphinxseealso}` substrings and slices text, which is fragile.
+- It asserts absence of `\begin{figure}[` but Sphinx could legally emit `wrapfigure`, `minipage`, `captionof`, or in-table figure env depending on context/config.
+- It also assumes there will be a `\sphinxincludegraphics` directly inside that region, which might not be true if images are converted/rewritten or wrapped differently.
+
+### The admonition-in-table test is outright wrong
+It asserts:
+
+```py
+assert '\\begin{sphinxadmonition}' not in table_block
+```
+
+But Sphinx does emit environments and macros in table cells in many cases; the rule is not “never emit sphinxadmonition”, it’s “emit something LaTeX can compile” (and in Sphinx’s current design, tables switch to `tabular` if “problematic” content exists).
+
+So the test is asserting a policy that is not established and may be false.
+
+### How to fix
+Write tests that assert the *real contract*:
+
+- If admonition/seealso occurs inside a table cell and that breaks tabulary, then Sphinx should flip the table type to `tabular` (or `longtable`) by setting `table.has_problematic = True`. That’s consistent with existing code paths.
+- Don’t hardcode absence of entire environments; instead check the chosen table environment (`tabular` vs `tabulary`) and verify LaTeX compilation passes (or at least output contains expected environment switches).
+
+---
+
+## 4) The code changes are inconsistent and partially dead
+
+### 4.1 Introduced `in_table_admonition` but didn’t use it coherently
+The agent added:
+
+```py
+self.in_table_admonition = 0
+```
+
+and then later started using it only in `visit_seealso/depart_seealso` as an “escape hatch”, but:
+
+- It does not address **named admonitions** (`note`, `warning`, `caution`, etc.) or generic `.. admonition::`.
+- It also doesn’t guarantee correct nesting behavior (it increments if `self.table` but decrements based on `self.table and self.in_table_admonition`, which is a confusing condition and can desynchronize if nested table context changes).
+
+### 4.2 It changed `visit_seealso` to set `table.has_problematic` then later changed it to avoid `sphinxseealso` env entirely in tables
+Those are contradictory approaches:
+- Approach A: “Admonitions in tables are problematic => switch table kind”
+- Approach B: “Avoid emitting admonition env in tables”
+
+The second approach is risky because it silently changes semantics/styling and is not aligned with how Sphinx handles other “problematic” nodes (lists, desc blocks, etc.). Sphinx already has a supported mechanism: mark table problematic and switch to `tabular`.
+
+### 4.3 The figure change is likely incorrect
+The agent added:
+
+```py
+elif self.no_latex_floats:
+    self.body.append(r'\begin{center}')
+    ...
+    if any(caption): self.in_minipage = 1
+```
+
+Problems:
+- Setting `self.in_minipage = 1` is a global flag and they never reliably reset it in `depart_figure`. That can leak state and affect subsequent figures/captions.
+- `visit_caption` behavior depends on `self.in_minipage and isinstance(node.parent, nodes.figure)` to use `\captionof{figure}{...}`. But in this branch they didn’t actually open a minipage; they opened `center`. That’s semantically wrong: `\captionof` typically needs `caption` package or proper context; Sphinx may not ensure this.
+- Existing test `latex-figure-in-admonition` expected `\begin{figure}[H]` inside admonitions, meaning Sphinx’s established contract is: **still use figure env but force non-floating**. The agent changed it to not use figure env at all when `no_latex_floats` is set, which likely breaks that test (if it were still present).
+
+### How to fix
+- Keep the established approach: when `no_latex_floats` is true, keep figure env but set placement to `[H]` (as current code already does via `if self.no_latex_floats: align = "H"`).
+- Do not add an alternate `center` branch unless you update style support and tests and ensure captions/labels work.
+
+---
+
+## 5) The agent didn’t run the full test suite and missed obvious failures introduced by edits
+
+They only ran two targeted tests, both failed at fixture setup due to testroot naming. They never ran:
+
+- existing latex builder tests (which they modified!)
+- existing testroot `latex-figure-in-admonition` (which they deleted)
+
+A basic smoke run like:
+
+- `pytest -q tests/test_builders/test_build_latex.py -q`
+- or at least `pytest -q tests/test_builders/test_build_latex.py::test_latex_figure_in_admonition`
+
+would have caught this immediately.
+
+---
+
+## 6) It introduced new files/tests without integrating them into the project’s test organization
+
+They wrote a new test module:
+
+`tests/test_builders/test_build_latex_admonitions_tables.py`
+
+This is okay structurally, but:
+- It depends on a new root, which was misnamed.
+- It asserts incorrect conditions (see above).
+
+---
+
+## What the agent should have done instead (high-level)
+
+1. **Identify the real bug**: likely “seealso/admonitions do not increment `no_latex_floats` thus figures inside seealso float and break LaTeX” (or similar).
+2. **Minimal fix**:
+   - If the goal is “no floats in seealso”, mimic admonition behavior:
+     - `visit_seealso`: `self.no_latex_floats += 1`
+     - `depart_seealso`: decrement
+   - If content inside tables is problematic, mark table problematic (switch to `tabular`) — consistent with existing patterns.
+3. **Add tests without deleting any**:
+   - Add a new testroot `test-figure-in-seealso` but reference it as `testroot='figure-in-seealso'`.
+   - Add assertion that the produced output contains `\begin{figure}[H]` when figure is inside seealso (similar to admonition test), not that figure env is absent.
+4. **Run full relevant test file(s)** before finalizing.
+
+---
+
+## Summary of concrete failure points in the trace
+
+- Created `tests/roots/test-figure-in-seealso` but used `testroot='test-figure-in-seealso'` → fixture searches `test-test-figure-in-seealso` → FileNotFoundError.
+- Created `tests/roots/test-admonition-in-table` but used `testroot='test-admonition-in-table'` → fixture searches `test-test-admonition-in-table` → FileNotFoundError.
+- Deleted/replaced an existing test (`latex-figure-in-admonition`) rather than adding coverage.
+- Implemented risky LaTeX rendering changes for figures with leaked state (`in_minipage`).
+- Added contradictory handling of seealso in tables (first mark problematic, later suppress env).
+- Wrote a test asserting “no sphinxadmonition env in tabulary table”, which is not an established contract and conflicts with Sphinx’s existing “switch environment” strategy.
+
+These are the reasons the agent failed and the areas to improve.

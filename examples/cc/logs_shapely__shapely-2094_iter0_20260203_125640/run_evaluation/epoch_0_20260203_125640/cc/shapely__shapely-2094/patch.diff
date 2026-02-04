@@ -1,0 +1,224 @@
+diff --git a/shapely/wkt.py b/shapely/wkt.py
+index 7bc19c9..a8f4865 100644
+--- a/shapely/wkt.py
++++ b/shapely/wkt.py
+@@ -6,29 +6,208 @@ Also provides pickle-like convenience functions.
+ import shapely
+ 
+ 
+-def loads(data):
++def _parse_numbers(point_str):
++    # Parse a coordinate string into list of floats, preserving NaN tokens
++    parts = point_str.strip().split()
++    nums = []
++    for p in parts:
++        try:
++            nums.append(float(p))
++        except ValueError:
++            # In case of tokens like 'nan' or unexpected, try lowercase
++            if p.lower() == "nan":
++                nums.append(float("nan"))
++            else:
++                # Fallback: non-numeric token, keep as-is by returning None
++                return None
++    return nums
++
++
++def _format_numbers(nums):
++    return " ".join(
++        str(n).rstrip("0").rstrip(".") if isinstance(n, float) else str(n) for n in nums
++    )
++
++
++def _repair_ring(ring_content):
++    # ring_content like "0 0, 1 0, 1 1, 0 1" without parentheses
++    points = [p.strip() for p in ring_content.strip().split(",") if p.strip()]
++    if len(points) < 1:
++        return ring_content
++    first = _parse_numbers(points[0])
++    last = _parse_numbers(points[-1])
++    if first is None or last is None:
++        return ring_content
++    if len(first) != len(last) or any((a != b) for a, b in zip(first, last)):
++        # append first point to close the ring
++        points.append(_format_numbers(first))
++    return ", ".join(points)
++
++
++def _extract_substrings_at_depth(s, target_depth):
++    # Return list of substrings inside parentheses at the given depth
++    result = []
++    depth = 0
++    start = None
++    for i, ch in enumerate(s):
++        if ch == "(":  # enter deeper level
++            depth += 1
++            if depth == target_depth:
++                start = i + 1
++        elif ch == ")":
++            if depth == target_depth and start is not None:
++                result.append(s[start:i])
++                start = None
++            depth -= 1
++    return result
++
++
++def _repair_polygon(data):
++    # Keep the prefix up to the first '(' (type and optional dimension tokens)
++    idx = data.find("(")
++    if idx == -1:
++        return data
++    prefix = data[:idx].rstrip()
++    rest = data[idx:]
++    # Extract each ring content at depth==2
++    rings = _extract_substrings_at_depth(rest, 2)
++    if not rings:
++        return data
++    repaired_rings = ["(" + _repair_ring(r) + ")" for r in rings]
++    # Rebuild using the outer parentheses from rest
++    return f"{prefix}{rest[0]}{', '.join(repaired_rings)}{rest[-1]}"
++
++
++def _repair_multipolygon(data):
++    idx = data.find("(")
++    if idx == -1:
++        return data
++    prefix = data[:idx].rstrip()
++    rest = data[idx:]
++    # For multipolygon, rings are at depth 3, and each polygon content at depth 2
++    polygons = _extract_substrings_at_depth(rest, 2)  # contents of each polygon (within ((...)))
++    if not polygons:
++        return data
++    # Each polygon content itself has one or more rings enclosed in parentheses
++    repaired_polygons = []
++    for poly_content in polygons:
++        # poly_content contains e.g. "(ring1), (ring2)" without the outer parentheses
++        rings = _extract_substrings_at_depth("(" + poly_content + ")", 2)
++        repaired_rings = ["(" + _repair_ring(r) + ")" for r in rings]
++        repaired_polygons.append("(" + ", ".join(repaired_rings) + ")")
++    return f"{prefix}{rest[0]}{', '.join(repaired_polygons)}{rest[-1]}"
++
++
++def _split_collection_items(inner):
++    # inner is the content inside GEOMETRYCOLLECTION (...)
++    items = []
++    depth = 0
++    start = 0
++    for i, ch in enumerate(inner):
++        if ch == "(":
++            depth += 1
++        elif ch == ")":
++            depth -= 1
++        elif ch == "," and depth == 0:
++            items.append(inner[start:i].strip())
++            start = i + 1
++    tail = inner[start:].strip()
++    if tail:
++        items.append(tail)
++    return items
++
++
++def _repair_geometrycollection(data):
++    idx = data.find("(")
++    if idx == -1:
++        return data
++    prefix = data[:idx].rstrip()
++    # find matching closing for the first '('
++    depth = 0
++    end = None
++    for i in range(idx, len(data)):
++        ch = data[i]
++        if ch == "(":
++            depth += 1
++        elif ch == ")":
++            depth -= 1
++            if depth == 0:
++                end = i
++                break
++    if end is None:
++        return data
++    inner = data[idx + 1 : end]
++    items = _split_collection_items(inner)
++    repaired_items = [_repair_wkt(item) for item in items]
++    return f"{prefix}({', '.join(repaired_items)})"
++
++
++def _repair_wkt(data):
++    # Attempt to repair common structural issues for polygons and collections
++    s = data.strip()
++    # If EMPTY geometries, return as-is
++    if "EMPTY" in s.upper():
++        return data
++    upper = s.upper()
++    if upper.startswith("POLYGON"):
++        return _repair_polygon(s)
++    if upper.startswith("MULTIPOLYGON"):
++        return _repair_multipolygon(s)
++    if upper.startswith("GEOMETRYCOLLECTION"):
++        return _repair_geometrycollection(s)
++    if upper.startswith("LINEARRING"):
++        # Close the ring
++        idx = s.find("(")
++        if idx != -1:
++            content = s[idx + 1 : -1]
++            repaired = _repair_ring(content)
++            return f"{s[:idx]}({repaired})"
++        return s
++    # other types left unchanged
++    return data
++
++
++def loads(data, strict=True, fix_structure=None):
+     """Load a geometry from a WKT string.
+ 
+     Parameters
+     ----------
+     data : str
+         A WKT string
++    strict : bool, default True
++        If False, attempt to repair common structural issues when reading,
++        such as automatically closing LinearRings in Polygons.
++        This is an alias for ``fix_structure=True``.
++    fix_structure : bool, optional
++        If True, attempt to repair common structural issues when reading.
++        If not provided, it is inferred from ``strict``.
+ 
+     Returns
+     -------
+     Shapely geometry object
+ 
+     """
++    if fix_structure is None:
++        fix_structure = not strict
++    if fix_structure:
++        data = _repair_wkt(data)
+     return shapely.from_wkt(data)
+ 
+ 
+-def load(fp):
++def load(fp, strict=True, fix_structure=None):
+     """Load a geometry from an open file.
+ 
+     Parameters
+     ----------
+     fp :
+         A file-like object which implements a `read` method.
++    strict : bool, default True
++        If False, attempt to repair common structural issues when reading,
++        such as automatically closing LinearRings in Polygons.
++        This is an alias for ``fix_structure=True``.
++    fix_structure : bool, optional
++        If True, attempt to repair common structural issues when reading.
++        If not provided, it is inferred from ``strict``.
+ 
+     Returns
+     -------
+@@ -36,6 +215,10 @@ def load(fp):
+ 
+     """
+     data = fp.read()
++    if fix_structure is None:
++        fix_structure = not strict
++    if fix_structure:
++        data = _repair_wkt(data)
+     return loads(data)

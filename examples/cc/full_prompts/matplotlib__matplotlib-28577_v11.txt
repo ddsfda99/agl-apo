@@ -1,0 +1,66 @@
+You are given a code repository in the current directory (this is Matplotlib). Your task is to fix a real bug and add/adjust tests so the full test suite passes.
+
+Task: Fix nondeterministic behavior with subplot spacing when using constrained layout (reported for inline/Jupyter). The minimal repro:
+
+```python
+import matplotlib.pyplot as plt
+rc = {
+    "xtick.direction": "in",
+    "ytick.direction": "in",
+    "figure.constrained_layout.use": True,
+    "figure.constrained_layout.h_pad": 0,
+    "figure.constrained_layout.w_pad": 0,
+    "figure.constrained_layout.wspace": 0,
+    "figure.constrained_layout.hspace": 0,
+    "axes.labelpad": 0,
+}
+
+for _ in range(2):
+    with plt.style.context(rc):
+        fig, axes = plt.subplots(1, 2, figsize=(6, 2), sharey=True)
+        for ax in axes.flat:
+            ax.set_xlim(-0.1, 1.1)
+```
+
+Observed: sometimes there is a gap between the 2 axes, sometimes not. Calling `fig.canvas.draw()` (or saving) makes it deterministic (no gap). Expected: deterministically zero spacing (when no artists should force space).
+
+Key constraints from prior failures (you must follow these):
+1. Do not land a “fix” that breaks any other tests. You must run the full test suite (or at minimum run until the first failure) and resolve all failures introduced by your change.
+2. Avoid overly invasive changes to draw/layout semantics (e.g., globally disabling drawing inside constrained layout) unless you can prove it is safe and does not break other tests.
+3. Any new regression test must be robust across platforms/backends/font versions. Do not assert exact pixel-perfect equality at 1e-6. Prefer loose tolerances and/or asserting a condition like “gap <= small_epsilon”, and remove/disable decorations that could legitimately force spacing.
+4. If you make a change and any test fails in the full run, you must identify the failing test(s) and fix them. Do not ignore failures by only running a subset that passes.
+
+Required workflow (follow exactly):
+1. Confirm repo root and environment. Start by listing files at repo root and locating Matplotlib’s constrained layout implementation.
+2. Create a reproduction in code (notebook behavior is tricky). Your goal is to reproduce nondeterminism deterministically in tests by simulating the “no initial draw yet” path. Investigate differences between:
+   - first draw in interactive vs saved figure
+   - when constrained layout is executed (before/after renderer initialization)
+   - whether layout uses stale/uncached text metrics/ticklabel extents before the first draw
+3. Find root cause. You should search for constrained layout execution paths (likely LayoutEngine / constrained_layout.py) and inspect where renderer is obtained and when text/tick label extents are computed. The bug smells like “layout computed before renderer has stable text metrics; later draw changes extents”, leading to run-to-run differences depending on caching order.
+4. Implement the minimal safe fix. Prefer one of these approaches (choose what is correct after investigation):
+   - Ensure constrained layout is executed with a properly initialized renderer and stable text metrics, without mutating global draw state.
+   - Ensure the first layout pass triggers the same measurement path as a normal draw (e.g., ensure a draw is performed at a safe point, or ensure text measurement caches are warmed consistently).
+   - Ensure constrained layout is re-run deterministically at the correct time (e.g., at draw time, not earlier), or that layout invalidation is handled correctly when tick label extents change after first draw.
+   Do NOT simply wrap the entire constrained layout execution in renderer._draw_disabled() unless you can demonstrate it is necessary and doesn’t break other tests; it was previously tried and likely caused suite failures.
+5. Add/adjust a regression test:
+   - The test must fail on the buggy behavior and pass after the fix.
+   - It must not be brittle: remove decorations that may force spacing (turn off tick labels or set them to not participate in layout), or explicitly configure them so they cannot cause a gap. Consider using `ax.tick_params(labelbottom=False)` or `for t in ax.get_xticklabels(): t.set_in_layout(False)` if appropriate.
+   - Validate deterministic layout by performing multiple layout computations and asserting the resulting axes positions are consistent and the inter-axes gap is <= a small tolerance (pick a tolerance that is realistic across platforms, e.g., 1e-3 in figure-relative coordinates, and justify briefly in a comment).
+   - The test should exercise the “no explicit draw yet” case and compare against “after draw” or “after savefig” if that’s what stabilizes it.
+6. Testing requirements (do not skip):
+   - Run the new/modified test(s).
+   - Then run `pytest -q -x` from repo root (or an equivalent command that stops at first failure). If any failure happens, you must inspect the traceback, fix the underlying issue, and re-run until the full suite completes without failures. If the full suite is too slow, at minimum: run until the first failure, fix it, then continue until no failures remain (repeat).
+   - Do not conclude success if only a subset passes.
+
+Practical guidance:
+- Use ripgrep/grep to find relevant code: search for `ConstrainedLayoutEngine`, `do_constrained_layout`, `constrained_layout`, `LayoutEngine.execute`, and any code that conditionally runs layout on draw or save.
+- Look for differences between interactive draw vs savefig paths in backend_bases / figure.py.
+- Keep the fix small and localized.
+- When you run tests and something fails, capture the exact failing test name and traceback in your notes before changing code.
+
+Deliverables:
+- A code change that makes constrained layout spacing deterministic in the described scenario.
+- A robust regression test (or modification of an existing one) that would have caught this.
+- Confirmation that the full test suite passes (or at least `pytest -q -x` completes without failures).
+
+Do not commit your edits.

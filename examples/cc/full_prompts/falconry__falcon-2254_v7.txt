@@ -1,0 +1,50 @@
+You are given a code repository in the current directory.
+
+## Task
+Deprecate asyncio aliases in `falcon.util`.
+
+Context: The docs already soft-deprecated these aliases (see falconry/falcon PR #2252). For Falcon **4.x**, the aliases must remain available and fully functional, but **accessing/using them must emit a deprecation warning**. They will be removed in **5.0** (do not remove them now).
+
+### What “correct” means for this task (4.x)
+- `falcon.util.create_task` and `falcon.util.get_running_loop` (and any other asyncio re-exports/aliases in `falcon.util`, if present) **must still exist** and be importable exactly as before.
+  - `from falcon.util import create_task` must continue to work normally.
+  - Names should still appear in module globals / `dir()` / `__all__` as they did previously (avoid lazy `__getattr__` solutions that change import/introspection semantics).
+- Using these aliases must emit Falcon’s deprecation warning type: `falcon.util.deprecation.DeprecatedWarning` (not Python’s built-in `DeprecationWarning`).
+- The warning should point to the *user’s call site* using an appropriate `stacklevel` (typically 2).
+- Do **not** broaden the scope:
+  - Do not remove/alter unrelated exports.
+  - Do not refactor large parts of the codebase to stop using these aliases unless absolutely required to keep tests passing.
+  - Do not remove or change `falcon.create_task` / `falcon.get_running_loop` exports unless they are directly part of the `falcon.util` alias deprecation and you add explicit tests for them. (Default: leave top-level exports alone.)
+
+## Process to follow
+1) **Find the aliases**: Inspect `falcon/util/__init__.py` and related util modules for `create_task`, `get_running_loop`, or other asyncio re-exports. Identify where they are defined and how they are exported.
+2) **Write a reproduction/expectation test FIRST**:
+   - Add a focused test that verifies calling `falcon.util.get_running_loop()` inside an async context emits `falcon.util.deprecation.DeprecatedWarning`.
+   - Add a test that `falcon.util.create_task(coro)` emits the same warning and still schedules/returns a task successfully.
+   - Ensure the test asserts the warning message matches something like `falcon.util.<name> is deprecated` and references `asyncio.<name>` as the replacement.
+   - Use `pytest.warns(...)` and ensure the call happens in user-space so `stacklevel` can be validated by pointing at the test line (don’t overfit, but do set stacklevel).
+3) **Implement the deprecation with minimal surface-area change**:
+   - Keep the symbols eagerly defined (normal functions or callables), not via module `__getattr__`.
+   - Implement thin wrapper functions that:
+     - emit `warnings.warn(..., DeprecatedWarning, stacklevel=2)`
+     - forward to `asyncio.get_running_loop()` / `asyncio.create_task(...)`
+   - Preserve compatibility across supported Python versions:
+     - If `asyncio.create_task` signature differs across versions, prefer a conservative wrapper (`*args, **kwargs`) or version-conditional parameters so tests pass in all supported environments.
+4) **Avoid breaking internal code/tests**:
+   - If Falcon’s own code uses these aliases and your new warnings cause tests to fail due to “warnings-as-errors”, prefer changing *internal* uses to call `asyncio.*` directly (or locally filter warnings internally) rather than changing the public API surface.
+   - Do not do broad mechanical refactors; only adjust the minimal internal call sites necessary to keep the suite clean.
+5) **Run the full test suite** (or at least targeted tests plus any impacted areas) and iterate until green.
+6) Clean up any temporary files.
+
+## Implementation constraints / pitfalls to avoid (based on previous failures)
+- **Do not** remove `create_task` / `get_running_loop` from `falcon.util` exports and “replace” them with `__getattr__`. This changes import semantics and breaks internal imports.
+- **Do not** remove them from `falcon/__init__.py` exports unless explicitly required and tested. Default assumption: leave them.
+- **Do not** refactor existing tests away from `falcon.util.*`; instead, **add** tests that assert the deprecation warnings.
+- Ensure the warning uses `falcon.util.deprecation.DeprecatedWarning` and includes `stacklevel=2`.
+
+## Deliverables
+- One or more new/updated tests proving the warning behavior for each alias.
+- Minimal code change implementing the warnings while preserving existing API behavior.
+- All tests passing.
+
+Do not commit your edits.

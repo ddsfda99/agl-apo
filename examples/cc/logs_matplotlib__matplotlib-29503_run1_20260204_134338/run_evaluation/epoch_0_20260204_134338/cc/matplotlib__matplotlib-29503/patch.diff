@@ -1,0 +1,74 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index bb50664bab..8d09035be8 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -2575,9 +2575,66 @@ class Axes(_AxesBase):
+             if yerr is not None:
+                 yerr = self._convert_dx(yerr, y0, y, self.convert_yunits)
+ 
+-        x, height, width, y, linewidth, hatch = np.broadcast_arrays(
+-            # Make args iterable too.
+-            np.atleast_1d(x), height, width, y, linewidth, hatch)
++        try:
++            x, height, width, y, linewidth, hatch = np.broadcast_arrays(
++                # Make args iterable too.
++                np.atleast_1d(x), height, width, y, linewidth, hatch)
++        except ValueError as e:
++            # Provide a more informative error message including parameter names
++            # to help users diagnose mismatched array sizes.
++            def _shape(v):
++                try:
++                    return np.atleast_1d(v).shape
++                except Exception:
++                    return ()
++
++            if orientation == 'vertical':
++                # In vertical bar, 'y' corresponds to 'bottom'.
++                shapes = {
++                    'x': _shape(x),
++                    'height': _shape(height),
++                    'width': _shape(width),
++                    'bottom': _shape(y),
++                }
++            else:  # horizontal
++                # In horizontal bar (barh), 'x' corresponds to 'left' and
++                # 'y' corresponds to the categorical positions 'y'.
++                shapes = {
++                    'left': _shape(x),
++                    'height': _shape(height),
++                    'width': _shape(width),
++                    'y': _shape(y),
++                }
++
++            # Try to identify a pair of parameters with conflicting shapes.
++            items = list(shapes.items())
++            nameA = nameB = None
++            shpA = shpB = None
++            for i in range(len(items)):
++                for j in range(i + 1, len(items)):
++                    s1 = items[i][1]
++                    s2 = items[j][1]
++                    # Focus on actual mismatches where neither side is scalar-like.
++                    if s1 != s2 and s1 != (1,) and s2 != (1,):
++                        nameA, shpA = items[i]
++                        nameB, shpB = items[j]
++                        break
++                if nameA is not None:
++                    break
++
++            if nameA is None:
++                # Fallback: include all shapes if we couldn't pick a specific pair.
++                details = ", ".join(f"{n} with shape {s}" for n, s in items)
++                raise ValueError(
++                    "shape mismatch: parameters could not be broadcast to a "
++                    f"single shape ({details})."
++                ) from e
++
++            raise ValueError(
++                "shape mismatch: objects cannot be broadcast to a single "
++                "shape. Mismatch is between parameters "
++                f"{nameA} with shape {shpA} and {nameB} with shape {shpB}."
++            ) from e
+ 
+         # Now that units have been converted, set the tick locations.
+         if orientation == 'vertical':

@@ -1,0 +1,47 @@
+Summary of the failure and root cause:
+- The underlying bug is that cfn-lint’s GetAtt validation (rule E1010) did not recognize dynamic Outputs on AWS::ServiceCatalog::CloudFormationProvisionedProduct. In the provider schema, this resource has a readOnly property Outputs that allows arbitrary keys via patternProperties, but the GetAtt attribute builder only added a literal “Outputs” attribute, not “Outputs.<key>”. As a result, GetAtt like [ResourceName, Outputs.SomeKey] was flagged invalid.
+- A second, closely related issue is rule E1040 (GetAttFormat) comparing the destination format to the attribute’s format. For ProvisionedProduct Outputs, the value type is string and has no “format”. If a destination schema requires a format (e.g., AWS::EC2::VPC.Id), E1040 will fail unless ProvisionedProduct is exempt (similar to nested stacks and custom resources). The current code exempts CustomResource and CloudFormation::Stack, but not ServiceCatalog::CloudFormationProvisionedProduct.
+
+What the agent tried and where it fell short:
+- Environment/path confusion: The agent initially targeted /workspace which didn’t exist. They eventually discovered the repo under /testbed, switched paths, and read files correctly.
+- Correct exploration: They identified the E1010 and E1040 rules and the GetAtt attribute construction under src/cfnlint/schema/_getatts.py. They also looked up the ServiceCatalog resource schema to confirm Outputs is a read-only object with dynamic keys and values of type string.
+- Partial fix: They added a special-case to GetAtts (src/cfnlint/schema/_getatts.py) to treat AWS::ServiceCatalog::CloudFormationProvisionedProduct Outputs similarly to nested stacks, mapping “Outputs..*” to a synthetic “CfnLintStringType” pointer so that GetAtt [Resource, Outputs.Key] would be valid and typed as string. This addresses E1010.
+- Missing complementary change: They did not adjust the E1040 rule (src/cfnlint/rules/functions/GetAttFormat.py). That rule still requires the attribute’s format to match the destination’s format and only exempts CustomResource and CloudFormation::Stack. CloudFormationProvisionedProduct Outputs have no format, so E1040 may still fail even after E1010 is fixed when a destination expects a specific format.
+- Unused test artifact: They created a YAML file under test/success/sc-product.yaml, but did not integrate it into any test suite. The repository’s tests won’t pick up that file automatically, so it doesn’t help verify the fix.
+
+Detailed technical analysis:
+- GetAtt attribute generation:
+  - In src/cfnlint/schema/_getatts.py, GetAtts builds attributes by walking readOnlyProperties or, for certain types in _all_property_types, recursing into properties. It does not consider patternProperties at all.
+  - For AWS::ServiceCatalog::CloudFormationProvisionedProduct, readOnlyProperties includes "/properties/Outputs", which yields an attribute “Outputs”. AttributeDict keys are used for fullmatch against requested attribute names, so “Outputs.Something” won’t match “Outputs”.
+  - There is a special-case for AWS::CloudFormation::Stack that adds “Outputs..*” mapped to “/properties/CfnLintStringType” to support nested stack outputs. A similar special-case is needed for ProvisionedProduct.
+- Type compatibility (E1010 type check):
+  - GetAtt rule simplifies validation to type compatibility (GetAtt.py: lines 105-147). Using the synthetic pointer "/properties/CfnLintStringType" resolves via the resolver to type “string”, which aligns with the schema for ProvisionedProduct Outputs values.
+- Format compatibility (E1040):
+  - E1040 compares destination “format” (e.g., AWS::EC2::VPC.Id) with the attribute schema’s “format”. Our synthetic pointer returns only type “string” without any “format”, so if the destination expects a format, E1040 will emit a ValidationError unless the resource type is exempt.
+  - E1040 currently exempts “AWS::CloudFormation::CustomResource” and “AWS::CloudFormation::Stack” in _resource_type_exceptions. It needs to include “AWS::ServiceCatalog::CloudFormationProvisionedProduct” for parity.
+
+Other process issues the agent should improve:
+- Always determine and validate the working directory before running tools. Start with pwd && ls to locate the repository root. Avoid hardcoded paths like /workspace.
+- Run the test suite to see failures and confirm the fix. Creating a standalone YAML file under test/success won’t be executed by pytest without a test referencing it.
+- When fixing feature gaps, look for all related rules. For GetAtt, both E1010 and E1040 can be involved. Fixing only one may still leave tests failing.
+
+Recommendations to make the fix robust and pass all tests:
+- Keep the special-case in src/cfnlint/schema/_getatts.py to add:
+  - For schema.type_name == "AWS::ServiceCatalog::CloudFormationProvisionedProduct":
+    - self._attrs["Outputs..*"] = "/properties/CfnLintStringType"
+  - This mirrors the handling for nested stacks and correctly allows dynamic “Outputs.<key>”.
+- Update src/cfnlint/rules/functions/GetAttFormat.py to exempt ProvisionedProduct in _resource_type_exceptions:
+  - Add "AWS::ServiceCatalog::CloudFormationProvisionedProduct" to self._resource_type_exceptions.
+  - This avoids false positives when the destination requires a format and the ProvisionedProduct Output doesn’t specify any.
+- Consider a more general improvement: teach GetAtts._process_schema to handle patternProperties generically for any object-type read-only property. The current implementation ignores patternProperties; that’s why special-casing is necessary. A general solution would future-proof against similar resources. Note: the current resolver doesn’t support patternProperties directly, so you’ll need fallback pointers like CfnLintStringType to represent types.
+- Add unit tests:
+  - Extend test/unit/rules/functions/test_getatt.py and/or test_getatt_format.py to include AWS::ServiceCatalog::CloudFormationProvisionedProduct with GetAtt to Outputs.SomeKey. Assert E1010 passes and E1040 doesn’t flag a mismatch.
+  - Tests should build a minimal template with a ProvisionedProduct resource and a consuming property with a destination type/format where appropriate.
+- Verify via pytest to ensure your changes don’t break other rules and that both E1010 and E1040 behave as intended.
+
+Pitfalls and cautions:
+- The synthetic pointer "/properties/CfnLintStringType" returns only a type array ["string"] via the resolver. If strict type checking is enabled and the destination expects non-string, E1010 will correctly reject it. That’s desired behavior.
+- Don’t rely on adding files under test/success unless you wire them into pytest. Unit tests are the right way to verify changes.
+- Special-casing is acceptable here due to the resolver’s limitations, but consider tracking a follow-up to implement patternProperties support in GetAtts and the resolver if broader coverage is needed.
+
+In short: the agent addressed E1010 with a targeted change but missed E1040. They also mixed path usage and wrote an unused test file. Completing the fix by exempting the ServiceCatalog ProvisionedProduct in GetAttFormat and adding unit tests will make the solution comprehensive and help pass the test suite.

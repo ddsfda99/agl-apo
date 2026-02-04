@@ -1,0 +1,138 @@
+diff --git a/falcon/response.py b/falcon/response.py
+index de3c3b1..db10076 100644
+--- a/falcon/response.py
++++ b/falcon/response.py
+@@ -347,6 +347,7 @@ class Response:
+         secure=None,
+         http_only=True,
+         same_site=None,
++        partitioned=None,
+     ):
+         """Set a response cookie.
+ 
+@@ -447,6 +448,12 @@ class Response:
+ 
+                 (See also: `Same-Site RFC Draft`_)
+ 
++            partitioned (bool): Set to ``True`` to emit the ``Partitioned``
++                attribute for a cookie that is intended to be cross-site but
++                partitioned (CHIPS). This attribute is only meaningful when
++                ``same_site`` is ``'None'`` and the cookie is ``secure``.
++                See the Privacy Sandbox CHIPS design for details.
++
+         Raises:
+             KeyError: `name` is not a valid cookie name.
+             ValueError: `value` is not a valid cookie value.
+@@ -515,6 +522,7 @@ class Response:
+         if http_only:
+             self._cookies[name]['httponly'] = http_only
+ 
++
+         # PERF(kgriffs): Morsel.__setitem__() will lowercase this anyway,
+         #   so we can just pass this in and when __setitem__() calls
+         #   lower() it will be very slightly faster.
+@@ -528,6 +536,18 @@ class Response:
+ 
+             self._cookies[name]['samesite'] = same_site.capitalize()
+ 
++            # Auto-apply Partitioned when SameSite=None and cookie is Secure.
++            # If partitioned is explicitly False, do not add the attribute.
++            if same_site == 'none' and is_secure and partitioned is not False:
++                # Setting the flag attribute to True causes Morsel to emit
++                # just the token per http.cookies semantics
++                self._cookies[name]['partitioned'] = True
++
++        # Respect explicit partitioned=True even if SameSite not set via arg.
++        # This allows manual control if desired.
++        if partitioned and not self._cookies[name]['partitioned']:
++            self._cookies[name]['partitioned'] = True
++
+     def unset_cookie(self, name, samesite='Lax', domain=None, path=None):
+         """Unset a cookie in the response.
+ 
+diff --git a/falcon/testing/client.py b/falcon/testing/client.py
+index 12f4259..d8bb480 100644
+--- a/falcon/testing/client.py
++++ b/falcon/testing/client.py
+@@ -110,6 +110,7 @@ class Cookie:
+             'secure',
+             'httponly',
+             'samesite',
++            'partitioned',
+         ):
+             value = morsel[name.replace('_', '-')] or None
+             setattr(self, '_' + name, value)
+@@ -153,6 +154,10 @@ class Cookie:
+     def same_site(self) -> Optional[int]:
+         return self._samesite if self._samesite else None  # type: ignore[attr-defined]
+ 
++    @property
++    def partitioned(self) -> bool:
++        return bool(self._partitioned)  # type: ignore[attr-defined]
++
+ 
+ class _ResultBase:
+     """Base class for the result of a simulated request.
+diff --git a/falcon/util/__init__.py b/falcon/util/__init__.py
+index 2d946f8..f02f10a 100644
+--- a/falcon/util/__init__.py
++++ b/falcon/util/__init__.py
+@@ -61,6 +61,16 @@ _reserved_cookie_attrs = http_cookies.Morsel._reserved  # type: ignore
+ if 'samesite' not in _reserved_cookie_attrs:  # pragma: no cover
+     _reserved_cookie_attrs['samesite'] = 'SameSite'  # type: ignore
+ 
++# NOTE(vytas): Backport support for the 'Partitioned' cookie attribute
++#   (CHIPS) for Python versions prior to 3.13. Falcon uses the stdlib
++#   http.cookies implementation, so ensure Morsel recognizes this as a
++#   boolean flag attribute with an uppercase token in output.
++#   See: https://developers.google.com/privacy-sandbox/3pcd/chips
++if 'partitioned' not in _reserved_cookie_attrs:  # pragma: no cover
++    _reserved_cookie_attrs['partitioned'] = 'Partitioned'  # type: ignore
++    # Mark as flag attribute (no value, emits just the token)
++    getattr(http_cookies.Morsel, '_flags', set()).add('partitioned')  # type: ignore
++
+ 
+ IS_64_BITS = sys.maxsize > 2**32
+ 
+diff --git a/tests/test_cookies.py b/tests/test_cookies.py
+index cb492c3..cd5e072 100644
+--- a/tests/test_cookies.py
++++ b/tests/test_cookies.py
+@@ -70,7 +70,9 @@ class CookieResourceSameSite:
+         resp.set_cookie('bar', 'foo', same_site='STRICT')
+ 
+     def on_put(self, req, resp):
+-        resp.set_cookie('baz', 'foo', same_site='none')
++        # For cross-site cookies, set SameSite=None and Secure, which should
++        # auto-apply Partitioned
++        resp.set_cookie('baz', 'foo', same_site='none', secure=True)
+ 
+     def on_delete(self, req, resp):
+         resp.set_cookie('baz', 'foo', same_site='')
+@@ -219,13 +221,15 @@ def test_unset_cookies_samesite(client):
+     # baz, foo, none
+     result_set_none = client.simulate_put('/same-site')
+ 
+-    def test_set(cookie, value, samesite=None):
++    def test_set(cookie, value, samesite=None, partitioned=False):
+         assert cookie.value == value
+         assert cookie.same_site == samesite
++        assert cookie.partitioned == partitioned
+ 
+     test_set(result_set_lax_empty.cookies['foo'], 'bar', samesite='Lax')
+     test_set(result_set_strict.cookies['bar'], 'foo', samesite='Strict')
+-    test_set(result_set_none.cookies['baz'], 'foo', samesite='None')
++    # SameSite=None + Secure should auto-set Partitioned
++    test_set(result_set_none.cookies['baz'], 'foo', samesite='None', partitioned=True)
+     # barz gets set with '', that is None value
+     test_set(result_set_lax_empty.cookies['barz'], 'barz')
+     test_set(result_set_lax_empty.cookies['barz'], 'barz', samesite=None)
+@@ -238,6 +242,8 @@ def test_unset_cookies_samesite(client):
+         assert cookie.value == ''  # An unset cookie has an empty value
+         assert cookie.same_site == samesite
+         assert cookie.expires < utcnow_naive()
++        # Partitioned should not be set for unset cookies
++        assert not getattr(cookie, 'partitioned', False)
+ 
+     test_unset(result_unset.cookies['foo'], samesite='Strict')
+     # default: bar is unset with no samesite param, so should go to Lax

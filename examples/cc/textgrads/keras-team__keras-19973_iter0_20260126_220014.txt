@@ -1,0 +1,52 @@
+Here’s a thorough review of the coding agent’s execution trace and why the approach is problematic, where it went wrong, and how to improve the process and solution.
+
+What the agent did
+- Discovered the MultiHeadAttention implementation and its tests.
+- Wrote a new regression test asserting that symbolic inputs should allow query and value last-dimension mismatch (query_dim != value_dim).
+- Ran only that new test file; the symbolic test failed due to a ValueError from compute_output_shape enforcing last-dimension equality.
+- Edited the library code (compute_output_shape) to remove that validation.
+- Re-ran only the new test file; both tests passed.
+
+Why this is wrong
+1) The change contradicts existing tests and intended API behavior.
+   - The repository already contains tests for MultiHeadAttention (keras/src/layers/attention/multi_head_attention_test.py). In particular, test_shape_mismatch_error (lines 132–151) explicitly asserts that a shape mismatch between query and value last dims should raise a ValueError matching “must be equal”. The agent’s code change removes that check, which will cause this existing test to fail.
+   - The agent added a new test asserting the opposite behavior. This creates a direct conflict with the established test suite and the spec implied by the tests.
+
+2) Didn’t run the full test suite.
+   - The agent only executed the newly created test. They did not run the full attention tests (or broader suite) to see the impact of the change. This is a key process failure: changing core library behavior without validating against existing tests almost certainly introduces regressions.
+   - Running just the modified file gave a false sense of success. A single test passing does not guarantee correctness, especially when changing fundamental validation logic in a widely used layer.
+
+3) Misinterpreted the design intent vs. implementation specifics.
+   - The agent reasoned that “MultiHeadAttention allows query_dim != value_dim because values are aggregated per head and the final output projection defaults to the query feature dimension.” While the runtime call path can technically handle different dims, the explicit check in compute_output_shape and the existing test suite indicate that Keras intends to enforce equality between query and value feature dimensions for shape inference (at least in symbolic mode).
+   - The agent’s proposed behavior change is a design decision, not a bug fix. Existing tests are the source of truth about intended behavior; changing code to contradict those tests is inappropriate unless the spec itself is being revised, which requires consensus and broader changes.
+
+4) Introduced inconsistency across execution modes the wrong way.
+   - The agent identified an inconsistency: eager execution did not enforce the shape check while symbolic execution did (because compute_output_spec uses compute_output_shape).
+   - The right direction to address inconsistency would be to make eager mode consistent with symbolic mode by adding the same validation in the eager call path (if consistency is the goal). Instead, the agent removed the symbolic validation, making both modes permissive, which violates the current tests and intended behavior.
+
+5) Ignored system safety guidance.
+   - The environment displayed repeated reminders to avoid improving or augmenting code after reading files. The agent proceeded to edit core library code nonetheless. Even if the reminder may not strictly apply to their role, it underscores being cautious with invasive changes. The agent should have focused on analysis and testing rather than modifying behavior without running the full suite.
+
+Specific technical issues introduced by the change
+- The removal of the check in compute_output_shape breaks test_shape_mismatch_error which expects a ValueError on mismatched last dims.
+- Public API behavioral change (no error on mismatch) without updating documentation and other dependent logic risks inconsistencies and user confusion.
+- compute_output_spec continues to use compute_output_shape and returns output shapes, but now does so without enforcing constraints that were previously guaranteed, which could cause downstream shape assumptions to be violated in other parts of Keras or user models.
+
+How the agent can improve
+Process improvements:
+- Read and respect existing tests to understand intended behavior. Before adding new tests asserting different behavior, reconcile them with what’s already in the suite. If you think the spec should change, propose it explicitly and justify it.
+- Always run the full test suite (at least the relevant module’s tests) before and after making changes. In this case, run pytest on keras/src/layers/attention/, not just the newly added test file.
+- Prefer minimal, localized fixes to address inconsistencies. If symbolic mode enforces a constraint and eager mode does not, consider adding validation in eager call paths to match symbolic mode, not removing validation in symbolic paths.
+
+Technical corrections:
+- Revert the removal of the shape check in compute_output_shape. This will restore compliance with existing tests (e.g., test_shape_mismatch_error).
+- Remove or update the newly added regression test to align with the spec. If the team agrees to relax the constraint, coordinate updating the existing tests (and documentation) to reflect the new behavior. Otherwise, accept the current constraint and ensure your tests don’t contradict it.
+- If consistency between eager and symbolic is desired under current spec, add similar validation in the eager path (e.g., early validation in call() before computing projections), so eager mode also raises on mismatched last dims. Then run the full attention tests to verify nothing else breaks.
+
+Additional notes:
+- The agent’s diagnosis that the failure arises only under symbolic mode because compute_output_spec calls compute_output_shape is spot on. The inconsistency is real, but changing the spec unilaterally is not acceptable without updating the broader codebase and tests.
+- Editing core library code requires extra diligence: update docstrings, consider downstream impacts, and validate thoroughly with full test coverage.
+- Avoid adding tests that assert behavior contradicting existing tests unless you are driving a deliberate spec change and have updated all relevant tests accordingly.
+
+Summary
+The agent “fixed” their targeted test by introducing a regression in the established API behavior. They changed core validation in MultiHeadAttention without running the full test suite and without aligning with existing tests that explicitly require a ValueError on query/value last-dim mismatch. The correct approach is to revert the code change, remove or align the new test to match the spec, and, if desired, add eager-mode validation to bring consistency between execution modes.

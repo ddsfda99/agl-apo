@@ -1,0 +1,134 @@
+The agent didn’t “fail the task” because of a subtle Sphinx bug—it failed because it never actually implemented a fix, and then it introduced a new failing test root/setup that doesn’t even run. The trace shows a classic pattern: investigation + adding a reproduction test, but no product-code change and the test harness wiring is wrong.
+
+Below are the concrete failure points and how to improve.
+
+---
+
+## 1) No original failing test / no failing behavior identified
+- The agent started by running the full suite: **2159 passed**.
+- That implies either:
+  - the actual task wasn’t represented in the local test suite (common in hidden-test tasks), or
+  - the agent didn’t reproduce the real failing scenario, or
+  - the task required a behavioral change not covered by existing tests.
+- Despite that, the agent never stated a *specific* failing symptom (error message / failing hidden test behavior) and jumped into code archaeology around HTML assets.
+
+**How to improve**
+- Establish a hypothesis tied to an observable failure. If no tests fail locally, create a minimal reproduction that runs and fails for the suspected hidden case *before* changing code.
+
+---
+
+## 2) The added “reproduction test” is invalid in Sphinx’s test harness
+### 2.1 Wrong testroot naming convention (first failure)
+Sphinx test roots are located under `tests/roots/test-<testroot>`. The fixture does:
+
+```py
+testroot_path = rootdir / ('test-' + testroot)
+```
+
+The agent first created:
+- Directory: `tests/roots/html_user_override_ext_css`  (missing `test-` prefix)
+- Test marker: `testroot='html_user_override_ext_css'`
+
+This immediately failed with:
+- `FileNotFoundError: ... /tests/roots/test-html_user_override_ext_css`
+
+The agent then “fixed” it incorrectly by setting:
+- `testroot='test-html_user_override_ext_css'`
+
+…but that caused the fixture to look for:
+- `tests/roots/test-test-html_user_override_ext_css` (double `test-`)
+
+**Correct approach**
+- Keep marker `testroot='html_user_override_ext_css'`
+- Create directory `tests/roots/test-html_user_override_ext_css`
+
+The agent *eventually* created `tests/roots/test-html_user_override_ext_css` (we see it in `ls`), but then changed the marker back to the non-prefixed value while the copied directory in the tempdir remained inconsistent. The test still didn’t run cleanly.
+
+### 2.2 Extension module import is broken (second failure)
+Once the testroot path issue was sidestepped, the next failure was:
+
+`ExtensionError: Could not import extension myext (No module named 'myext')`
+
+Why?
+- In Sphinx tests, to import a local extension module, the `conf.py` typically does:
+
+```py
+import os, sys
+sys.path.insert(0, os.path.abspath('.'))
+extensions = ['myext']
+```
+
+The agent’s *final* conf.py in `tests/roots/test-html_user_override_ext_css/conf.py` lacks the `sys.path.insert(...)`. So `myext.py` sitting next to conf.py is not importable.
+
+**How to improve**
+- Follow existing pattern in `tests/roots/test-util-copyasset_overwrite/conf.py` (which the agent even opened) and replicate it.
+
+---
+
+## 3) The reproduction scenario itself is muddled / likely not testing the right thing
+The agent’s intended behavior: “user html_static_path should override extension-added CSS with same name”.
+
+But:
+- `app.add_css_file('example.css')` only registers a link tag; it does not copy the file.
+- Copying of static assets is done from:
+  - theme static dirs
+  - `html_static_path` entries
+  - explicit extension copy logic (e.g., graphviz hacks `html_static_path.append(css_path)` in `config-inited`)
+- The agent tried to simulate extension assets by appending an absolute path to `html_static_path` in `on_config_inited`. This is similar to graphviz, but:
+  - `validate_html_static_path()` *removes* entries that don’t exist or are inside outdir. It does **not** remove absolute paths as such, so absolute is acceptable, but it must exist in the built confdir context.
+  - The test is asserting the content of `_static/example.css` after build, but if two sources copy a file with the same name, the “winner” depends on copy order.
+- Current Sphinx HTML builder copy order is:
+  1. `copy_theme_static_files()`
+  2. `copy_html_static_files()`  (user `html_static_path`)
+- So, **user static already runs after theme static**, but **not necessarily after extension-added “static via html_static_path”**, because those extension paths are just appended into `config.html_static_path` and will be copied in list order. If the extension appends after user paths, it will overwrite user files (and Sphinx will log an overwrite warning).
+
+So the actual issue (if any) is: extension mutating `html_static_path` can overwrite user files, which is arguably undesirable but is current behavior. If the hidden test expects a change, the agent needed to modify production code (e.g., protect user assets from being overwritten), not just add tests.
+
+**How to improve**
+- Decide policy explicitly:
+  - Should user files win? Then builder must ensure user paths are copied last, or avoid overwriting existing files.
+  - Or should extension files win? Then test should assert overwrite warning exists, or assert extension content.
+- Then implement it in `copy_asset` / `copy_static_files` / `copy_html_static_files` logic (and adjust tests accordingly).
+
+---
+
+## 4) No production code change at all
+After all the investigation, the agent:
+- never touched `sphinx/builders/html/__init__.py`, `copy_asset`, or related logic.
+- only created new tests and new root data, but they fail at setup.
+
+So even if the policy change was needed for hidden tests, nothing was implemented.
+
+**How to improve**
+- Once a failing reproduction exists, implement the smallest code change that fixes it.
+- Then run full suite.
+
+---
+
+## 5) Agent broke repository state by adding failing tests
+The newly added `tests/test_builders/test_html_user_static_override.py` will fail in CI even if the original suite passed, because:
+- testroot location mismatch and/or module import mismatch.
+
+**How to improve**
+- Don’t add a new test until you’ve verified the testroot convention and import mechanics by copying an existing working testroot+extension pattern.
+- Run the new test in isolation *and* run `python -c "import myext"` with correct sys.path assumptions inside the test root (or just follow established patterns).
+
+---
+
+## 6) Process issues / missed cues
+- The agent read `tests/roots/test-util-copyasset_overwrite/conf.py` which contains the exact `sys.path.insert` pattern needed, but didn’t apply it.
+- The agent also misread the `testroot` naming rule multiple times; a quick glance at any existing `pytest.mark.sphinx(..., testroot='basic')` would show directories are `test-basic` not `basic`.
+
+**How to improve**
+- When adding any Sphinx test root, copy an existing one and modify it.
+- Validate fixture behavior (`sphinx/testing/fixtures.py`) before creating directories.
+
+---
+
+## Summary of why the agent failed
+1. It never reproduced a real failing bug from the original task—tests were already passing.
+2. It added a new test root incorrectly (wrong directory naming), causing fixture `copytree` errors.
+3. It then created a local extension but forgot to add it to `sys.path`, causing `ExtensionError: No module named 'myext'`.
+4. It made no production code change, so even a correct test wouldn’t help fix hidden failures.
+
+These are the key points to address for the next attempt: create a valid reproduction using Sphinx’s test conventions, ensure the extension is importable, and then implement the actual behavioral change needed in the HTML static asset copy/overwrite semantics.

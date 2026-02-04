@@ -1,0 +1,72 @@
+You are an expert Matplotlib contributor working in the existing repository in the current directory. Fix the bug described below and leave the repo in a clean, test-covered state.
+
+Bug: `.remove()` on `ErrorbarContainer` does not remove the corresponding item from the legend  
+When calling `.remove()` on the `ErrorbarContainer` returned from `Axes.errorbar()`, the artists disappear from the plot, but the legend entry remains. This differs from typical behavior when removing a `Line2D` returned from `Axes.plot()`.
+
+Reproduction snippet (for understanding only; do not rely on PDF/image output for tests):
+```python
+from matplotlib import pyplot
+
+ax = pyplot.gca()
+obj1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
+pyplot.legend()
+obj1.remove()
+ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
+pyplot.legend()
+# Expected: legend contains only "bar"
+```
+
+Background/root cause (use this, don’t redo from scratch)
+- `ErrorbarContainer.remove()` removes contained artists and will remove the container from `ax.containers` only if a `_remove_method` hook is set.
+- `Axes.add_container()` is responsible for setting that hook.
+- The bug arises because `Axes.errorbar()` adds the `ErrorbarContainer` by directly appending to `self.containers` instead of calling `self.add_container(...)`, so `_remove_method` isn’t set and the container remains discoverable by legend-building logic.
+
+Required fix (2D)
+- In `lib/matplotlib/axes/_axes.py`, update `Axes.errorbar()` so the created `ErrorbarContainer` is registered via `self.add_container(errorbar_container)` rather than `self.containers.append(errorbar_container)`.
+- Ensure the return value of `Axes.errorbar()` remains unchanged.
+
+Very important: test integration in this repo
+- Matplotlib’s tests in this repo are enumerated in `lib/matplotlib/tests/meson.build` (explicit file list).
+- To avoid missing tests, do NOT add a brand-new test file unless you also add it to `lib/matplotlib/tests/meson.build`.
+- Preferred: add the regression test to an existing test module that is already listed (strongly recommended), such as:
+  - `lib/matplotlib/tests/test_legend.py` or
+  - `lib/matplotlib/tests/test_container.py`
+
+Test requirements (no image/PDF output)
+- Add a regression test that fails on current main and passes after your fix.
+- The test must assert programmatically that after removing an `ErrorbarContainer`, it no longer contributes to legend entries.
+- Avoid brittle assertions like `labels == ["bar"]`. Instead:
+  - Assert `"foo" in labels` before removal
+  - After removal and adding another labeled artist, assert `"foo" not in labels` and `"bar" in labels`
+- Acceptable approaches:
+  - Use `ax.get_legend_handles_labels()`, or
+  - Call `ax.legend()` and inspect `legend.get_texts()` strings
+
+Scope and hidden-test robustness
+- Implement the required 2D fix exactly as described.
+- Additionally, quickly audit for the same anti-pattern in closely related code paths, especially 3D:
+  - Search for other places that create an `ErrorbarContainer` and directly append to `.containers`.
+  - If `mpl_toolkits/mplot3d/axes3d.py` (or related 3D code) has the same issue for `errorbar`, fix it too and add a small 3D regression test in an existing 3D test module (already included in its test manifest). Then run the targeted 3D tests listed below.
+- If you do not change 3D, do not touch 3D files.
+
+Validation: what to run
+- Run the test file you edited.
+- Also run at least one nearby broader module if reasonable (legend/container related).
+- If you modify any 3D code, also run targeted 3D tests, for example:
+  - `pytest -q lib/mpl_toolkits/mplot3d/tests/test_axes3d.py lib/mpl_toolkits/mplot3d/tests/test_legend3d.py`
+
+Repo hygiene / deliverable requirements
+- Do not commit.
+- Do not leave temporary files/directories (for example `.claude/` or scratch scripts).
+- Ensure the working tree is clean except for intentional tracked changes.
+- Before finishing, check `git status --porcelain` and ensure there are no untracked artifacts beyond the intended changes (your new/modified test must be tracked and properly integrated).
+
+Implementation checklist
+1) Add/modify the regression test in an existing listed test module (preferred) OR, if you must add a new test file, also add it to `lib/matplotlib/tests/meson.build`.
+2) In `lib/matplotlib/axes/_axes.py`, locate where the `ErrorbarContainer` is created and appended to `self.containers`.
+3) Replace that append with `self.add_container(errorbar_container)`.
+4) (Optional/only if needed for hidden tests) apply the same fix pattern in 3D errorbar if it uses direct container append; add 3D regression test and run targeted 3D tests.
+5) Run tests and ensure everything passes.
+6) Leave the repo clean and ready.
+
+Deliver the final patch with both the fix and the regression test(s).

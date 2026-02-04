@@ -1,0 +1,89 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index bb50664bab..fa2e69935e 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -2575,9 +2575,53 @@ class Axes(_AxesBase):
+             if yerr is not None:
+                 yerr = self._convert_dx(yerr, y0, y, self.convert_yunits)
+ 
+-        x, height, width, y, linewidth, hatch = np.broadcast_arrays(
+-            # Make args iterable too.
+-            np.atleast_1d(x), height, width, y, linewidth, hatch)
++        try:
++            x, height, width, y, linewidth, hatch = np.broadcast_arrays(
++                # Make args iterable too.
++                np.atleast_1d(x), height, width, y, linewidth, hatch)
++        except ValueError as err:
++            # Only catch NumPy broadcasting/shape mismatch errors and provide
++            # a clearer message using Matplotlib parameter names and lengths.
++            emsg = str(err)
++            if ('broadcast' in emsg) or ('shape mismatch' in emsg):
++                def _eff_len(val):
++                    try:
++                        return len(val)
++                    except Exception:
++                        return 1
++                if orientation == 'vertical':
++                    # Map internal variables to user-facing parameter names.
++                    param_map = {
++                        'x': x, 'height': height, 'width': width, 'bottom': y
++                    }
++                    func = 'bar'
++                    primary = ('x', 'height')
++                    fallback_order = ['x', 'height', 'width', 'bottom']
++                else:  # horizontal (barh)
++                    param_map = {
++                        'y': y, 'width': width, 'height': height, 'left': x
++                    }
++                    func = 'barh'
++                    primary = ('y', 'width')
++                    fallback_order = ['y', 'width', 'left', 'height']
++                # Compute effective lengths; treat scalars as 1.
++                lengths = {name: _eff_len(val) for name, val in param_map.items()}
++                def _compose_msg(a, b):
++                    return (f"{func}(): '{a}' has length {lengths[a]} "
++                            f"but '{b}' has length {lengths[b]} (cannot broadcast)")
++                # Prefer the primary pair when both are non-1 and differ.
++                a, b = primary
++                if lengths[a] != 1 and lengths[b] != 1 and lengths[a] != lengths[b]:
++                    raise ValueError(_compose_msg(a, b)) from err
++                # Otherwise, find any pair of non-1 lengths that disagree.
++                non1 = [n for n in fallback_order if lengths[n] != 1]
++                for i in range(len(non1)):
++                    for j in range(i + 1, len(non1)):
++                        aa, bb = non1[i], non1[j]
++                        if lengths[aa] != lengths[bb]:
++                            raise ValueError(_compose_msg(aa, bb)) from err
++                # If we couldn't identify a clear mismatch, re-raise original.
++            raise
+ 
+         # Now that units have been converted, set the tick locations.
+         if orientation == 'vertical':
+diff --git a/lib/matplotlib/tests/test_axes.py b/lib/matplotlib/tests/test_axes.py
+index 97abc750b9..6216a7f00c 100644
+--- a/lib/matplotlib/tests/test_axes.py
++++ b/lib/matplotlib/tests/test_axes.py
+@@ -2117,6 +2117,23 @@ def test_bar_timedelta():
+     ax.barh(datetime.datetime(2018, 1, 1), 1,
+             height=datetime.timedelta(hours=3),
+             yerr=datetime.timedelta(hours=2))
++
++
++def test_barh_mismatched_lengths_error_message():
++    fig, ax = plt.subplots()
++    # Missing comma between 'bar' and 'baz' concatenates the strings,
++    # yielding a list of length 2, while widths has length 3.
++    arg_k = ["foo", "bar" "baz"]
++    arg_n = [1, 2, 3]
++    with pytest.raises(ValueError) as excinfo:
++        ax.barh(arg_k, arg_n)
++    msg = str(excinfo.value)
++    import re
++    # Robust checks: mention parameter names and mismatched lengths.
++    assert re.search(r"barh\(\).*'?y'?", msg)
++    assert re.search(r"'?width'?", msg)
++    assert ("2" in msg and "3" in msg)
++    assert ("cannot broadcast" in msg or "broadcast" in msg)
+     fig, ax = plt.subplots()
+     ax.barh([datetime.datetime(2018, 1, 1), datetime.datetime(2018, 1, 1)],
+             np.array([1, 1.5]),

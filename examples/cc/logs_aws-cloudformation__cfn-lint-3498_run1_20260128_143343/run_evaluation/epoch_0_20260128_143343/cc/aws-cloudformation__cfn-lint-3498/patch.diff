@@ -1,0 +1,61 @@
+diff --git a/src/cfnlint/rules/resources/ResourceType.py b/src/cfnlint/rules/resources/ResourceType.py
+index 869620247..91d01afa4 100644
+--- a/src/cfnlint/rules/resources/ResourceType.py
++++ b/src/cfnlint/rules/resources/ResourceType.py
+@@ -38,9 +38,14 @@ class ResourceType(CfnLintKeyword):
+             if validator.is_type(resource_condition, "string"):
+                 if validator.cfn is None:
+                     continue
+-                if False in validator.cfn.conditions.build_scenerios_on_region(
+-                    resource_condition, region
+-                ):
++                scenarios = list(
++                    validator.cfn.conditions.build_scenerios_on_region(
++                        resource_condition, region
++                    )
++                )
++                # Only skip validation in this region if the condition
++                # cannot be true for the given region
++                if True not in scenarios:
+                     continue
+             if resource_type in PROVIDER_SCHEMA_MANAGER.get_resource_types(
+                 region=region
+diff --git a/test/unit/rules/resources/test_type.py b/test/unit/rules/resources/test_type.py
+index 1415d244a..c631c372b 100644
+--- a/test/unit/rules/resources/test_type.py
++++ b/test/unit/rules/resources/test_type.py
+@@ -76,3 +76,34 @@ class TestType(BaseRuleTestCase):
+         )
+ 
+         self.assertListEqual(errors, [], errors)
++
++    @patch("cfnlint.template.Template", autospec=True)
++    def test_types_with_conditions_true_and_false(self, cfn):
++        # When a condition could be true or false in a region,
++        # the type availability should be validated (error expected
++        # for unknown types)
++        cfn = Mock()
++        cfn.conditions = Mock()
++        cfn.conditions.build_scenerios_on_region.return_value = [True, False]
++        validator = CfnTemplateValidator({}).evolve(cfn=cfn)
++        errors = list(
++            self.rule.validate(
++                validator,
++                "cfnResources",
++                {"Type": "Foo::Bar::Type", "Condition": "IsUsEast1"},
++                {},
++            )
++        )
++
++        self.assertListEqual(
++            errors,
++            [
++                ValidationError(
++                    "Resource type 'Foo::Bar::Type' does not exist in 'us-east-1'",
++                    path=deque(["Type"]),
++                    schema_path=deque([]),
++                    rule=ResourceType(),
++                ),
++            ],
++            errors,
++        )

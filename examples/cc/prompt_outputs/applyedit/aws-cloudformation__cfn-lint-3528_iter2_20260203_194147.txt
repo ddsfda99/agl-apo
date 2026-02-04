@@ -1,0 +1,91 @@
+You are an expert Python contributor working in the **cfn-lint** codebase. Your goal is to fix **only** the reported Step Functions StateMachine `Definition` schema validation issues (ASL support), add regression tests, and ensure the full test suite passes **without changing unrelated lint behavior**.
+
+## Problem Summary (what must be fixed)
+cfn-lint (v1.8.1) incorrectly validates the `AWS::StepFunctions::StateMachine` `Properties.Definition` schema against an older ASL schema. As a result it raises `E3601` for valid newer ASL fields:
+
+1) **Map state (INLINE mode)**: `ItemProcessor` should be accepted; `Iterator` is deprecated.  
+   - Current bug: requires `Iterator` and rejects `ItemProcessor`.
+
+2) **Fail state**: `CausePath` and `ErrorPath` should be allowed.
+
+3) **Choice state**: should accept additional operators:
+   - `IsBoolean`, `IsNumeric`, `IsPresent`, `IsString`, `IsTimestamp`
+   - `*EqualsPath`, `*GreaterThanPath`, `*LessThanPath`, etc (Path variants)
+   Ensure the “exactly one operator per choice rule” logic includes these.
+
+4) **Task state**: `TimeoutSecondsPath` and `HeartbeatSecondsPath` should be allowed.
+
+## Critical constraints (learn from prior failure)
+- **Do not modify unrelated rules, specs, or lifecycle data** (e.g., Lambda runtime lifecycle / `E2533` behavior).  
+- If integration tests fail due to **expected fixture drift** (common with date-sensitive warnings), fix tests in one of these acceptable ways:
+  1) **Preferred**: make date-dependent behavior deterministic in tests by freezing/patching the “current date” used by the rule(s).  
+  2) Acceptable: update **only** the expected fixture JSON outputs that are now legitimately different, after confirming the extra finding and that it’s unrelated to your StepFunctions change.
+- Keep scope tight: StepFunctions schema + tests + (only if necessary) deterministic test clock / fixture updates. No functional changes to other lints.
+
+## Required workflow
+Follow this exact sequence and keep it clean:
+
+### (1) Reproduce the bugs exactly
+Create minimal YAML templates (can use the ones in the issue description; fix indentation errors if needed so they parse) and run:
+- `cfn-lint ./a.yaml` for each case (Map, Fail, Choice, Task)
+Confirm you see the listed `E3601` errors **before** changes.
+
+### (2) Locate the schema(s) involved
+Search the repo for Step Functions StateMachine definition schemas, e.g.:
+- `AWS::StepFunctions::StateMachine`
+- `statemachine.json`
+- `"Definition"` schema
+Identify the JSON schema file(s) used by the rule emitting E3601 for StateMachine Definition.
+
+### (3) Implement schema updates (minimal, correct, spec-aligned)
+Update the Step Functions ASL schema so that:
+- **Map**: supports `ItemProcessor` (including nested `ProcessorConfig.Mode: INLINE`, nested `StartAt/States`, etc.)  
+  - `Iterator` should not be required when `ItemProcessor` is present.
+  - Decide correct constraint: likely “at least one of `Iterator` or `ItemProcessor` must exist”; if AWS requires exactly one, enforce XOR. Don’t accidentally combine this with Next/End constraints.
+- **Fail**: allow `CausePath` and `ErrorPath` in addition to `Cause` and `Error`.
+- **Choice**: extend operator list for the “one of these is required” rule to include:
+  - `IsBoolean`, `IsNumeric`, `IsPresent`, `IsString`, `IsTimestamp`
+  - relevant `*Path` variants (e.g., `NumericEqualsPath`, `StringEqualsPath`, etc.).  
+  Ensure schema enforces: per choice branch, exactly one operator (or one composite like And/Or/Not) is present; don’t loosen it so much that invalid combinations pass.
+- **Task**: allow `TimeoutSecondsPath` and `HeartbeatSecondsPath`.
+
+Make changes only where needed; keep schema readable.
+
+### (4) Add regression tests that mirror user repro
+Add unit tests (preferred) that validate that these templates **no longer raise E3601**.
+- Tests must be explicit and minimal: one test per bug category is fine.
+- Ensure the templates used in tests are valid YAML/JSON and valid CloudFormation structure.
+- If you add fixtures, place them in the appropriate test fixture folder.
+
+### (5) Run tests and handle failures correctly
+Run:
+- targeted tests you added
+- then `pytest -q`
+
+If integration tests fail:
+- First, determine whether it’s **fixture drift** (e.g., an extra finding like `E2533`) rather than a StepFunctions regression.
+- **Do not** “fix” by changing unrelated rule logic or data (no changes to Lambda lifecycle specs).
+- Preferred: patch/freeze the date used by date-dependent rules in tests so outputs are deterministic.
+- Otherwise: update only the expected fixture JSON(s) after diffing actual vs expected and confirming the delta is legitimate and unrelated.
+
+### (6) Validate with CLI repro again
+Re-run `cfn-lint` against the minimal repro YAML files and confirm the prior `E3601` messages are gone.
+
+### (7) Cleanup
+Remove any temporary YAML files created purely for manual reproduction (unless they were intentionally added as permanent fixtures for tests).
+
+## Practical debugging guidance (use these tactics)
+- Use `git diff` frequently to ensure changes stay in scope.
+- To inspect fixture drift:
+  - run the failing integration test alone
+  - dump actual matches to a file and diff against fixture JSON
+  - identify the single extra finding and decide: freeze date in tests (preferred) or update fixture.
+
+## Deliverable
+Produce a patch that:
+- updates the StepFunctions StateMachine `Definition` schema to support the newer ASL fields listed above,
+- adds regression tests,
+- passes `pytest -q`,
+- does not alter unrelated lint behaviors/specs.
+
+Do not commit changes.

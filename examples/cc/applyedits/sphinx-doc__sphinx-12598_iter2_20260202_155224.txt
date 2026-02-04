@@ -1,0 +1,112 @@
+You are given a code repository in the current directory (assume the repo root is the current working directory; do not use /workspace/default paths).
+Your task is to fix a LaTeX regression involving admonitions and tables, by adding precise regression tests first, then implementing a minimal, well-scoped fix.
+
+## Problem description
+
+Two LaTeX build regressions are reported:
+
+1) Nesting a `figure` directive inside a `seealso` admonition now fails LaTeX builds (likely due to #12508):
+
+```rst
+.. seealso::
+
+   .. figure:: path/to/image.png
+```
+
+LaTeX error:
+
+```
+! LaTeX Error: Not in outer par mode.
+l.2119 \begin{figure}[htbp]
+```
+
+2) Putting a `sphinxadmonition` (or seealso-like admonition) inside a `tabulary` now fails:
+
+```
+! Missing \endgroup inserted.
+l.6208 \end{tabulary}
+```
+
+This reportedly happens in the MyST documentation.
+
+## Key constraints (read carefully)
+
+- Do not make broad behavioral changes “just to make it compile”.
+- Do not globally disable floats inside all `seealso` content unless you can prove that is the intended policy; prefer the narrowest fix tied to the actual failure mode.
+- Do not globally mark tables as “problematic” (forcing `tabular` instead of `tabulary`) without a targeted failing test that demonstrates the specific breakage and that the fix is limited in scope.
+- Add tests that precisely verify the structure/containment (not just “string exists somewhere”), so they won’t pass for the wrong reason.
+- If a LaTeX compilation test is added, it must be additive and optional (skipped when TeX is unavailable), but you must still add a non-compilation test that fails without the fix and passes with it (so CI without TeX still validates behavior).
+- Keep changes minimal and localized. Prefer fixing the LaTeX writer’s state handling (e.g., “are we in a boxed environment / table cell?”) over blanket heuristics.
+
+## Required workflow
+
+### 1) Reproduce with a failing test (before any fix)
+
+Create minimal regression coverage in `tests/test_builders/test_build_latex.py` (or the most appropriate existing latex test module) with a new test root under `tests/roots/`:
+
+A. **Figure inside seealso**
+- Add a minimal rst source containing only:
+  - a `.. seealso::` directive
+  - inside it, a `.. figure::` pointing at an existing test image from the latex test roots (reuse an existing image file already in tests; do not introduce new binary files).
+- Build LaTeX (not PDF) and assert on the produced `.tex` content.
+- The assertion must verify **containment/order**, not just presence:
+  - `\begin{sphinxseealso}` occurs before the figure environment
+  - the figure environment inside that block is forced into a non-floating form that is safe in a boxed/framed environment (how you assert depends on the intended fix, but it must be unambiguous and local to the seealso block).
+  - Example of a robust check: extract the substring between `\begin{sphinxseealso}` and `\end{sphinxseealso}` and assert on figure-related markup within that substring.
+
+B. **Admonition/seealso inside a table triggering tabulary issue**
+- Add a minimal rst source that creates a table which triggers `tabulary` in LaTeX output (typically a `.. list-table::` with widths, or a normal grid table that Sphinx renders as tabulary; inspect existing tests for which constructs generate `tabulary`).
+- Place an admonition-like directive (ideally `.. seealso::` or `.. admonition::`) inside a table cell.
+- Build LaTeX and add assertions that:
+  - demonstrate the table is rendered using `tabulary` in the baseline output (i.e., assert `\begin{tabulary}` is present), and
+  - verify the admonition content in the cell is emitted in a way that does not break grouping. Your assertion must be structural (e.g., no raw `\begin{sphinxadmonition}` inside the tabulary cell if that is the root problem; or that the writer switches to a safe wrapper/macro).
+- The test must fail on current code and pass after your fix without needing LaTeX compilation.
+
+Optional: Add an additional LaTeX compilation test (only if you can do it in a way that is skipped when TeX isn’t available). If added, it must compile the generated `.tex` and fail before your fix. But do not rely on compilation tests alone.
+
+### 2) Locate the bug precisely
+
+Use ripgrep to find relevant writer code:
+- Search for `visit_seealso`, `sphinxseealso`, `no_latex_floats`, `sphinxadmonition`, `tabulary`, `has_problematic`, and any logic that handles “boxed” environments or table cell contexts.
+- Identify where LaTeX output enters/exits `seealso` and where it decides whether to emit floating environments (`figure`) and how it handles admonitions inside tables.
+
+### 3) Implement a minimal, well-scoped fix
+
+Your fix must address both regressions with minimal collateral impact:
+
+- For **figure inside seealso**:
+  - The LaTeX error “Not in outer par mode” usually indicates a float is being started inside a context that disallows it (often a box/minipage/framed environment).
+  - Determine whether `seealso` is implemented using a boxed environment (e.g., heavybox/framed/minipage). If so, floats must be suppressed or transformed only within that context.
+  - Implement a targeted mechanism: e.g., track “in boxed admonition-like environment that disallows floats” and only adjust figure emission inside that context. Avoid changing float behavior globally for `seealso` unless you can demonstrate that `seealso` is always boxed and never should allow floats.
+
+- For **admonition inside tabulary**:
+  - Determine why `sphinxadmonition` breaks `tabulary` (grouping, paragraph mode, unbalanced groups, etc.).
+  - Implement a solution that is local to “admonition-like node within a table cell rendered via tabulary”.
+  - Avoid blanket `table.has_problematic = True` unless your new regression test demonstrates that the only safe solution is to choose `tabular`, and you can constrain it narrowly (e.g., only when an admonition node appears in a cell, not for all seealso everywhere).
+  - Prefer transforming the admonition rendering inside tables into a table-safe form (e.g., a macro that does not open problematic environments) if possible, rather than changing the table type.
+
+### 4) Validate
+
+- Run the specific new tests you added.
+- Run a focused subset of LaTeX builder tests relevant to figures/admonitions/tables.
+- If TeX is available and you added compilation tests, run them too, but ensure the non-compilation assertions already cover correctness.
+
+### 5) Clean up
+
+- Ensure only necessary test roots/files are added.
+- Do not leave temporary debugging files.
+- Do not commit.
+
+## Output expectations
+
+When you finish, the repository should contain:
+- One or more new regression tests that:
+  - fail on the original code,
+  - pass after the fix,
+  - include containment/order assertions (not naive presence checks),
+  - do not depend solely on TeX compilation.
+- A minimal fix in the LaTeX writer (and/or latex style macros if that is the correct place) that:
+  - prevents floats from being emitted in invalid contexts for the seealso case without broadly disabling floats everywhere,
+  - prevents admonition-like LaTeX output from breaking tabulary (prefer a local rendering change; only switch away from tabulary if proven necessary and narrowly scoped).
+
+Proceed step-by-step: write failing tests first, confirm they fail, then implement the minimal fix, then rerun tests.

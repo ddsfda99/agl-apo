@@ -1,0 +1,138 @@
+## What failed (symptoms)
+
+After the agent’s changes, the full test run still had **3 failing integration tests**, all in:
+
+- `test/integration/test_quickstart_templates.py::TestQuickStartTemplates::test_templates`
+- `test/integration/test_quickstart_templates_non_strict.py::{test_templates,test_module_integration}`
+
+The failure is:
+
+- **Expected 35 failures, got 36** in the module-integration scenario for `quickstart/openshift.yaml`
+- **Expected exit code 12, got 14** in the CLI non-strict scenario for `quickstart/openshift.yaml`
+
+So the agent’s StepFunctions schema edits introduced **one extra lint finding** (or changed severity classification) for that specific template. That changed the **count** and therefore the computed **exit code**.
+
+---
+
+## Root cause: schema rewrite broadened validation in unintended ways
+
+The agent “fixed” Step Functions ASL validation by **rewriting the entire** `src/cfnlint/data/schemas/other/step_functions/statemachine.json` via a big `Write` operation.
+
+This is the core problem. That file is a shared schema used for ASL validation; replacing it wholesale is extremely risky because:
+
+1. **It can inadvertently change rules/validation behaviors outside the intended new keywords** (ItemProcessor, *Path variants, choice operators).
+2. It can introduce subtle schema mistakes that cause new failures in real-world templates (here: QuickStart openshift).
+3. It can alter typing constraints (integer vs number), required fields, additionalProperties behavior, etc., which can create *new* errors or warnings.
+
+The integration failure confirms that happened: `openshift.yaml` now triggers an extra match.
+
+### Specific schema regressions introduced
+
+Even from the snippet of the original schema shown earlier, the rewrite changed a lot more than requested:
+
+- `TimeoutSeconds` at top-level changed from **integer** to **integer** (ok) but earlier it was `integer`, later agent uses `integer` elsewhere and sometimes `number` (inconsistent).
+- Multiple spots contain invalid JSON Schema keywords:
+  - `types` used instead of `type` inside many items (`"types": "object"`). That was already present in the original file in several places, but rewriting the file makes it much harder to ensure you didn’t amplify such issues.
+- The new `map` schema:
+  - Previously required `Iterator`. Agent changed to:
+    - `required: ["Type"]`
+    - `oneOf`: required `Iterator` OR `ItemProcessor`
+  - This is correct conceptually, but the overall Map object’s `additionalProperties:false` + new `oneOf` structure may now validate differently and create new errors in nested cases.
+- Choice operator:
+  - Added many new fields (good), but the agent did **not** model the important invariant that most choice operators require both `Variable` and one comparator *except* for some special ones; the existing schema already didn’t enforce `Variable` strictly, and the rewrite continues to not enforce it. This broadens what is accepted and might also change error reporting order/quantity.
+
+The point: the task required “add support for X fields”; the agent applied a **schema redesign** instead of a minimal extension, and that impacted unrelated integration expectations.
+
+---
+
+## The agent didn’t diagnose the integration failure at all
+
+After running `pytest`, the agent:
+
+- Saw the failing tests are about openshift template counts/exit code.
+- Did **not** inspect what the 36th error actually was.
+- Did **not** run `cfn-lint ... --format json` and diff vs expected JSON results to find the extra entry.
+- Did **not** determine if the extra match is StepFunctions-related or unrelated.
+
+They ran `wc -l` on the JSON output (472 lines), which doesn’t help.
+They counted expected results length (35), but never computed actual JSON array length, never diffed.
+
+So the agent left the repo in a state where unit tests for StepFunctions pass, but integration expectations are broken.
+
+---
+
+## A major process error: overwriting an entire unit test file
+
+To add StepFunctions schema tests, the agent overwrote
+`test/unit/rules/resources/stepfunctions/test_state_machine_definition.py` completely with a new version.
+
+Even though it “passed” that unit test file, this is still bad practice because:
+
+- It risks deleting other important tests in that file (today it happened to be same-ish, but this approach often drops cases).
+- It’s not a minimal change and makes reviews hard.
+- It introduces risk for future merges.
+
+This isn’t the direct cause of the current failure, but it’s a strong indicator of the same “big hammer” approach.
+
+---
+
+## Another process error: creating broken reproduction YAML, then deleting it
+
+The agent created reproduction templates under `repro/`, but:
+- The initial `repro/a.yaml` was **invalid YAML** (bad indentation), producing `E0000 mapping values are not allowed`.
+- They fixed it later, but then **deleted** the directory.
+
+This doesn’t affect tests, but it shows:
+- lack of validation of reproductions before using them,
+- loss of artifacts that could help debug the extra openshift error.
+
+---
+
+## Why openshift exit code changed (how exit code is computed)
+
+In these tests, exit code isn’t “number of errors”; it’s a bitmask / severity-based code cfn-lint uses. The non-strict test expects exit code 12; agent got 14. That implies:
+- a new severity category is now present (likely an additional **Error**, or a change from Warning→Error, etc.)
+- or total differs enough to affect CLI return code.
+
+So the new extra issue likely has severity that flips the computed exit code.
+
+---
+
+## Concrete improvements to make the agent pass all tests
+
+### 1) Find the exact extra lint finding (must-do)
+Run:
+
+- `cfn-lint --include-checks I --include-experimental --configure-rule E3012:strict=false --format json -- test/fixtures/templates/quickstart/openshift.yaml > /tmp/new.json`
+- Diff `/tmp/new.json` against `test/fixtures/results/quickstart/non_strict/openshift.json` (and strict version) by comparing entries based on `(Rule.Id, Location.Path, Location.Start.LineNumber, Message)`.
+
+Until the extra finding is identified, you’re guessing.
+
+### 2) Revert “rewrite” strategy: patch schema minimally
+Once you know the extra finding is caused by StepFunctions schema changes, fix by:
+- reverting the file to original and applying **minimal targeted additions**:
+  - add only the new properties to the appropriate `task`, `fail`, `choice.Operator`, and `map` definitions
+  - update Map to allow `ItemProcessor` in addition to `Iterator` without altering unrelated parts.
+
+This avoids changing schema behavior in other places and is the safest way to keep integration outputs stable.
+
+### 3) Ensure schema changes don’t impact QuickStart templates
+After minimal patch:
+- re-run the openshift scenario and ensure output matches expected 35.
+- run full suite.
+
+### 4) Avoid overwriting files wholesale
+Use surgical edits:
+- `Edit` on only the relevant JSON fragment
+- add tests by appending new parametrized cases, not rewriting files.
+
+---
+
+## Summary of why the agent failed
+
+- The agent’s changes were **too broad**: replaced the StepFunctions ASL schema file completely rather than extending it.
+- This introduced a **behavior change** that made cfn-lint report **one additional issue** on a pinned integration fixture (`openshift.yaml`), breaking expected counts and exit codes.
+- The agent didn’t perform the necessary debugging step: **identify and diff the extra lint finding**, so they never corrected the underlying regression.
+- The agent used risky practices (overwriting whole test file; broken repro YAML) that correlate with the regression and made it harder to recover.
+
+To pass all tests, the fix must be: **identify the extra openshift match and adjust the StepFunctions schema changes to avoid it**, ideally via a minimal patch approach.

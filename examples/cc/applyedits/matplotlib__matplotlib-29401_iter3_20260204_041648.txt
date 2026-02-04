@@ -1,0 +1,109 @@
+You are an expert Python developer working inside the **existing repository in the current directory**. Your goal is to fix a Matplotlib bug and add **robust** regression tests that will pass in CI and satisfy Matplotlib’s style expectations.
+
+## Bug to fix
+Calling `.remove()` on the `ErrorbarContainer` returned by `Axes.errorbar()` removes the artists from the axes, **but the corresponding legend entry remains** after re-calling `legend()`. This differs from `Line2D` behavior.
+
+Repro (from issue):
+
+```python
+from matplotlib import pyplot as plt
+
+ax = plt.gca()
+obj1 = ax.errorbar([1], [1], [1], marker="o", label="foo")
+
+plt.legend()
+plt.savefig("test_errorbar_1.pdf")
+
+obj1.remove()
+
+ax.errorbar([1.1], [1.1], [1], marker="o", label="bar")
+plt.legend()
+plt.savefig("test_errorbar_2.pdf")
+```
+
+Expected: the second figure legend contains only `"bar"`.
+
+---
+
+## Critical requirements from prior failures (must follow)
+1. **Do not rewrite whole files.** Make minimal, surgical diffs (patch only what you must).
+2. **No global pyplot state in tests you touch/add.** New/modified tests must use:
+   - `fig, ax = plt.subplots()` (or `plt.figure()` + `add_subplot`, but no `plt.gca()`).
+   - `ax.legend()` (not `plt.legend()`).
+   - Ensure figures are closed/cleaned up if the file/module doesn’t already guarantee cleanup.
+3. **If you add a test to a file that contains pyplot-state tests, either:**
+   - refactor those existing tests you touch into explicit fig/ax style, **or**
+   - add robust cleanup for them (e.g., close figures), so the module is not flaky.
+   Keep edits minimal, but do not leave the module in a state that risks inter-test coupling.
+4. **3D API note:** `Axes3D.errorbar()` does **not** return an `ErrorbarContainer` (it returns a tuple). If you change 3D code, verify correctly:
+   - either add a correct 3D regression test (preferred if small),
+   - or explicitly justify the symmetry and safety without running broken verification code.
+
+---
+
+## Required workflow (follow in order)
+
+### 1) Confirm repository context
+- Run `pwd` and `ls`.
+- Identify where Matplotlib sources and tests live (e.g., `lib/matplotlib/...`).
+
+### 2) Reproduce the bug *in pytest* before editing library code
+- Prefer a minimal pytest reproduction in an existing appropriate test module.
+- Use a non-interactive testing backend/config already used by Matplotlib tests.
+- Demonstrate failure by asserting legend labels still include `"foo"` after `container.remove()` and re-legend.
+
+### 3) Add a regression test (before fixing, or immediately after confirming failure)
+- Do **not** create a new “temp” test module unless truly necessary.
+- Find the best existing test file by searching for:
+  - errorbar container tests (`ErrorbarContainer`, `test_container.py`, `test_legend.py`, etc.)
+- The test must be robust and non-flaky:
+  - Use `fig, ax = plt.subplots()`
+  - Use `ax.errorbar(..., label="foo")`
+  - Call `leg = ax.legend()` and assert `"foo"` appears in `t.get_text()` for `leg.get_texts()`
+  - Then `container.remove()`
+  - Add a new labeled artist/container: `ax.errorbar(..., label="bar")`
+  - Call `leg = ax.legend()` again
+  - Assert `"foo"` is **not** present, `"bar"` **is** present (do not require order)
+- If the test file you edit contains any `plt.gca()`/`plt.legend()` patterns and you touch that area, update them to explicit fig/ax style or ensure proper cleanup to prevent cross-test bleed. Keep diffs minimal but CI-safe.
+
+### 4) Locate root cause
+Search for and inspect code around:
+- `ErrorbarContainer`
+- `Axes.errorbar`
+- axes container registry: `Axes.add_container`, `ax.containers`
+- container removal mechanism: `_remove_method`
+Determine why `.remove()` doesn’t unregister the container from the axes such that legend creation still sees it.
+
+### 5) Implement the fix
+- Ensure the errorbar container is registered with the axes through the correct mechanism so it gets a working `_remove_method`.
+- Prefer using `Axes.add_container(container)` rather than manually appending to `ax.containers`.
+- Be mindful that `add_container` may auto-label unlabeled containers (e.g., `_containerN`); that should be acceptable because legend ignores `_`-prefixed labels. Confirm quickly by searching existing container behavior/tests.
+
+#### 3D considerations (only if you touch 3D code)
+- If you change `mpl_toolkits.mplot3d` errorbar behavior, validate correctly:
+  - `Axes3D.errorbar()` returns a tuple; do **not** call `.remove()` on that tuple.
+  - If writing a 3D test: after calling `ax.errorbar(..., label="foo")`, find the `ErrorbarContainer` in `ax.containers` (by type and/or label), call `.remove()` on that container, and assert legend labels update accordingly.
+  - If not writing a 3D test, provide a clear justification for the change and why it’s safe.
+
+### 6) Run targeted tests
+- Run only the relevant test module(s) first (e.g., `pytest lib/matplotlib/tests/test_...py -k errorbar`).
+- Show the exact command(s) and results.
+
+### 7) No leftover artifacts
+- Do not leave PDFs, scratch scripts, or new temporary files in the repo.
+
+---
+
+## Output expectations
+In your final response, include:
+- Exact file(s) modified.
+- Brief explanation of the root cause and fix (mention `_remove_method` / container registration explicitly).
+- The regression test(s) added/modified and why they are robust (no global pyplot state, non-flaky assertions).
+- Exact pytest command(s) run and the outcome.
+
+---
+
+## Hint (verify in code; don’t assume)
+The likely issue is that the `ErrorbarContainer` is appended directly to `ax.containers` instead of being registered via `Axes.add_container`, so `_remove_method` is never set and the container remains in the registry used by legend collection. Fix should align errorbar containers with other container types.
+
+Proceed: pytest repro (failing) → add/adjust regression test(s) → minimal code fix → rerun targeted tests.

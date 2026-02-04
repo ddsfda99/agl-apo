@@ -87,6 +87,11 @@ class ClaudeController:
         setting_cmd = "cat > /testbed/.claude/settings.json <<'CC_SETTING'\n" + setting + "\nCC_SETTING\n"
         self.container.send_command(setting_cmd)
 
+        # Copy local skills into the container so Claude Code can load them.
+        skills_src_path = Path("skills").resolve()
+        self.container.send_command("mkdir -p /testbed/.claude/skills")
+        self.container.copy_to_container(str(skills_src_path), "/testbed/.claude/skills")
+
         # Copy CLAUDE.md to /testbed
         instructions_dir = self._instructions_path
         self.container.copy_to_container(str(self._instructions_file), instructions_dir)

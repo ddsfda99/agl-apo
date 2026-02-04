@@ -1,0 +1,116 @@
+## What went wrong (root causes)
+
+### 1) The agent edited the *wrong* implementation of `Response.set_cookie`
+Falcon in this repo is **Cythonized**: `falcon/response.cpython-311-...so` exists, and `falcon.response.Response.set_cookie` is a **cyfunction**. Evidence from the trace:
+
+- `Glob "**/falcon/**/*.so"` shows: `/testbed/falcon/response.cpython-311-x86_64-linux-gnu.so`
+- Runtime inspection shows:
+  - `inspect.signature(falcon.response.Response.set_cookie)` **does not include** `partitioned`
+  - `repr: <cyfunction Response.set_cookie ...>` (i.e., not the Python function you edited)
+
+So the edits to `/testbed/falcon/response.py` did not affect the method actually used at runtime. That’s why tests failed with:
+
+> `TypeError: set_cookie() got an unexpected keyword argument 'partitioned'`
+
+Even though the source file’s signature was modified.
+
+**How to improve:** Before changing behavior, the agent must verify which implementation is imported at runtime (pure Python vs compiled extension). A quick `python -c "import falcon, inspect; print(falcon.response.__file__)"` / checking `type(falcon.response.Response.set_cookie)` would have revealed it is Cython.
+
+---
+
+### 2) The attempted monkey-patch was placed where it never takes effect
+After realizing the Cython issue, the agent tried to monkey-patch `Response.set_cookie` inside `falcon/util/__init__.py`. But in Falcon’s import order:
+
+- `falcon/__init__.py` imports `from falcon.response import Response` **before** importing `from falcon.util import ...`
+
+So by the time `falcon.util` runs, `falcon.Response` (the public alias) is already bound to the original Cython method.
+
+But it gets worse:
+
+- Even after `import falcon.util`, `Response.set_cookie` is still a `cyfunction`:
+  - `is function? False`
+  - `repr: <cyfunction Response.set_cookie ...>`
+- That indicates Falcon’s `Response` type likely prevents overriding Cython methods cleanly (or the assignment is getting overwritten / not applied in the module import path used by tests).
+
+The agent demonstrated that monkey-patching works in an isolated snippet (assigning `Response.set_cookie = new` in a running interpreter), but it **didn’t work when embedded in the import-time code path**.
+
+**How to improve:** If you’re going to monkey-patch, you must:
+- Ensure the patch executes in the same interpreter/session used by tests (import timing).
+- Patch the *public* symbol (`falcon.Response`) or patch before it is imported/bound.
+- Add a sanity assertion in the patch site (e.g., log/raise if patch didn’t stick) rather than silently `pass` on exceptions.
+
+---
+
+### 3) The tests the agent added were incorrect with respect to Falcon’s test client behavior
+The agent wrote:
+
+```py
+set_cookie = result.headers['set-cookie']
+```
+
+But Falcon’s test client explicitly notes:
+
+- `_ResultBase.headers` excludes cookies (“except for cookies, which may be accessed via the `cookies` attribute.”)
+
+So `result.headers['set-cookie']` can be absent even when cookies exist. This caused `KeyError: 'set-cookie'` in the failing tests (for the explicit case). Even if `partitioned` support worked, the test should primarily validate via `result.cookies[...]` or iterate raw headers from the StartResponseMock (but Result doesn’t preserve duplicates well).
+
+**How to improve:** Follow existing patterns in `tests/test_cookies.py`, which uses `result.cookies[...]` to assert cookie attributes. If you really need the raw header string, you must pull it from the raw header list before it is collapsed into `CaseInsensitiveDict` (Falcon’s Result loses multi-value fidelity).
+
+---
+
+### 4) The new behavior was not integrated consistently across WSGI and ASGI
+Falcon ASGI `Response` subclasses the same base `falcon.response.Response`. Since the base is Cython, both WSGI and ASGI are affected. The agent only edited the Python source and later tried a util-level monkey patch. Nothing was done in the actual compiled implementation.
+
+**How to improve:** Any new cookie attribute must be supported by the canonical implementation used by both stacks (likely the `.pyx`/Cython source that generates `falcon/response.*.so`, or a pure-Python fallback selected at build time).
+
+---
+
+### 5) Risky/incorrect “auto-enable” logic
+Agent introduced:
+
+```py
+if partitioned is None:
+    if normalized_samesite == 'None':
+        self._cookies[name]['partitioned'] = True
+```
+
+This is speculative and not grounded in an existing failing test or spec in the trace. Also, CHIPS rules in browsers require additional constraints (notably Secure, and typically SameSite=None). Auto-enabling may be undesired (and would be a breaking change).
+
+**How to improve:** Don’t invent new semantics unless the task explicitly requires it. Implement the smallest change needed for tests/spec.
+
+---
+
+### 6) Violated the “don’t augment malware” reminder? (Process issue)
+Not malware-related here, but the agent ignored the tool reminder’s intent: it made broad behavioral changes and added monkey patches rather than minimal, test-driven updates. This is more of a discipline issue: changes should be localized and justified by failing tests/spec.
+
+---
+
+## Why the agent failed, succinctly
+- It modified `falcon/response.py`, but Falcon uses `falcon/response.cpython-311-...so` at runtime, so changes never applied.
+- The follow-up monkey-patch didn’t apply (import order / type restrictions) and was silently ignored.
+- The added tests were incorrect because Falcon’s `Result.headers` omits Set-Cookie.
+
+---
+
+## Concrete improvements for the agent workflow (to pass tests next time)
+
+1. **Always confirm runtime source**
+   - Print `falcon.response.__file__`
+   - Print `type(falcon.response.Response.set_cookie)` or `repr(...)`
+   - If it’s a `cyfunction`, search for the generating source (`.pyx`, `.pxd`) rather than editing `.py`.
+
+2. **Avoid adding new tests that assert impossible invariants**
+   - Use `result.cookies` for cookie assertions as per existing tests.
+   - If raw headers are needed, extend the test harness appropriately (don’t assume `result.headers` contains Set-Cookie).
+
+3. **Don’t rely on import-time monkey patches**
+   - If you must patch, patch where the public API binds symbols (`falcon/__init__.py`) or ensure it runs before `falcon.Response` is hoisted.
+   - Add a verification check (fail fast if patch didn’t stick).
+
+4. **Keep behavior minimal**
+   - Add `partitioned` support only; avoid auto-enable unless the task/tests explicitly require it.
+
+5. **Update both runtimes**
+   - Ensure WSGI and ASGI share behavior through the actual compiled base implementation or a shared helper.
+
+If you provide the original task statement (not included in the trace), I can map these failures to the exact requirement and point out any additional mismatches.

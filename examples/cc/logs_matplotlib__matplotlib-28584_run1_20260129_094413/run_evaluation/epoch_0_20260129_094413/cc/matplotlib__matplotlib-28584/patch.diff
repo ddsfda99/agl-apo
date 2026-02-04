@@ -1,0 +1,52 @@
+diff --git a/lib/matplotlib/axis.py b/lib/matplotlib/axis.py
+index cbf7928ec4..da257d553d 100644
+--- a/lib/matplotlib/axis.py
++++ b/lib/matplotlib/axis.py
+@@ -1609,6 +1609,27 @@ class Axis(martist.Artist):
+         """Get the text of the label."""
+         return self.label.get_text()
+ 
++    def set_label(self, label, fontdict=None, **kwargs):
++        """
++        Set the text value of the axis label.
++
++        This method provides a convenient alias consistent with other Axis
++        APIs (e.g., ``set_major_formatter``). It overrides
++        `.Artist.set_label` on Axis to set the axis label text, matching the
++        behavior of `.Axes.set_xlabel` / `.Axes.set_ylabel`.
++
++        Parameters
++        ----------
++        label : str
++            Text string.
++        fontdict : dict, optional
++            Text properties.
++        **kwargs
++            Additional `~matplotlib.text.Text` properties forwarded to the
++            axis label `.Text` instance.
++        """
++        return self.set_label_text(label, fontdict, **kwargs)
++
+     def get_major_locator(self):
+         """Get the locator of the major ticker."""
+         return self.major.locator
+diff --git a/lib/matplotlib/tests/test_axes.py b/lib/matplotlib/tests/test_axes.py
+index 33c81c44ab..c6ff6eb78b 100644
+--- a/lib/matplotlib/tests/test_axes.py
++++ b/lib/matplotlib/tests/test_axes.py
+@@ -60,6 +60,15 @@ def test_get_labels():
+     assert ax.get_ylabel() == 'y label'
+ 
+ 
++def test_axis_set_label_alias():
++    fig, ax = plt.subplots()
++    # Using Axis API should set axis label text
++    ax.xaxis.set_label('x alias')
++    ax.yaxis.set_label('y alias')
++    assert ax.get_xlabel() == 'x alias'
++    assert ax.get_ylabel() == 'y alias'
++
++
+ def test_repr():
+     fig, ax = plt.subplots()
+     ax.set_label('label')

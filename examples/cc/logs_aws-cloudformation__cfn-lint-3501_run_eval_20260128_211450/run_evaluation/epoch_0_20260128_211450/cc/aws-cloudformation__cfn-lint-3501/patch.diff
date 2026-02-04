@@ -1,0 +1,152 @@
+diff --git a/src/cfnlint/rules/parameters/Used.py b/src/cfnlint/rules/parameters/Used.py
+index b0f6a0033..402bda6e0 100644
+--- a/src/cfnlint/rules/parameters/Used.py
++++ b/src/cfnlint/rules/parameters/Used.py
+@@ -5,9 +5,12 @@ SPDX-License-Identifier: MIT-0
+ 
+ from __future__ import unicode_literals
+ 
++from typing import List, Tuple
++
+ from cfnlint._typing import RuleMatches
+ from cfnlint.rules import CloudFormationLintRule, RuleMatch
+ from cfnlint.template import Template
++from cfnlint.decode.cfn_yaml import load as yaml_load
+ 
+ 
+ class Used(CloudFormationLintRule):
+@@ -19,6 +22,74 @@ class Used(CloudFormationLintRule):
+     source_url = "https://github.com/aws-cloudformation/cfn-lint"
+     tags = ["parameters"]
+ 
++    def _gather_refs_from_include(self, cfn: Template) -> Tuple[List[str], List[str]]:
++        """Scan Fn::Transform blocks using AWS::Include for local file references
++        and collect Ref and Fn::Sub parameter usages from the included content.
++
++        Only local file paths are processed. Remote includes (s3://, http://, https://)
++        are skipped to avoid external dependencies during linting.
++        """
++        include_refs: List[str] = []
++        include_subs: List[str] = []
++
++        try:
++            transform_paths = cfn.search_deep_keys("Fn::Transform")
++        except Exception:
++            transform_paths = []
++
++        for tpath in transform_paths:
++            # Last element is the value of Fn::Transform
++            value = tpath[-1]
++            if not isinstance(value, dict):
++                continue
++            name = value.get("Name")
++            if name != "AWS::Include":
++                continue
++            params = value.get("Parameters", {})
++            if not isinstance(params, dict):
++                continue
++            location = params.get("Location")
++            # Only process local file paths
++            if not isinstance(location, str):
++                continue
++            if location.startswith("s3://") or location.startswith("http://") or location.startswith("https://"):
++                continue
++            try:
++                included = yaml_load(location)
++            except Exception:
++                # If loading fails, skip without breaking lint run
++                continue
++
++            try:
++                temp_cfn = Template(None, included)
++            except Exception:
++                # Fail-safe: if Template construction fails, skip
++                continue
++
++            # Collect Ref usages from included content
++            try:
++                for ref_path in temp_cfn.search_deep_keys("Ref"):
++                    ref_val = ref_path[-1]
++                    if isinstance(ref_val, str):
++                        include_refs.append(ref_val)
++            except Exception:
++                pass
++
++            # Collect Fn::Sub parameter usages from included content
++            try:
++                for sub_path in temp_cfn.search_deep_keys("Fn::Sub"):
++                    sub_val = sub_path[-1]
++                    if isinstance(sub_val, list):
++                        # [string, mapping] form
++                        string_part = sub_val[0]
++                        include_subs.extend(temp_cfn.get_sub_parameters(string_part))
++                    elif isinstance(sub_val, str):
++                        include_subs.extend(temp_cfn.get_sub_parameters(sub_val))
++            except Exception:
++                pass
++
++        return include_refs, include_subs
++
+     def match(self, cfn: Template) -> RuleMatches:
+         matches: RuleMatches = []
+ 
+@@ -28,24 +99,36 @@ class Used(CloudFormationLintRule):
+ 
+         reftrees = cfn.transform_pre.get("Ref", [])
+         subtrees = cfn.transform_pre.get("Fn::Sub", [])
+-        refs = []
++        refs: List[str] = []
+         for reftree in reftrees:
+-            refs.append(reftree[-1])
++            ref_val = reftree[-1]
++            if isinstance(ref_val, str):
++                refs.append(ref_val)
+         if le_refs:
+             for le_ref in le_refs:
+-                if le_ref[-1] not in refs:
+-                    refs.append(le_ref[-1])
++                ref_val = le_ref[-1]
++                if isinstance(ref_val, str) and ref_val not in refs:
++                    refs.append(ref_val)
+ 
+-        subs = []
++        subs: List[str] = []
+         for subtree in subtrees:
+-            if isinstance(subtree[-1], list):
+-                subs.extend(cfn.get_sub_parameters(subtree[-1][0]))
+-            elif isinstance(subtree[-1], str):
+-                subs.extend(cfn.get_sub_parameters(subtree[-1]))
++            sub_val = subtree[-1]
++            if isinstance(sub_val, list):
++                # [string, mapping]
++                string_part = sub_val[0]
++                subs.extend(cfn.get_sub_parameters(string_part))
++            elif isinstance(sub_val, str):
++                subs.extend(cfn.get_sub_parameters(sub_val))
++
++        # Gather references from locally included content via AWS::Include
++        include_refs, include_subs = self._gather_refs_from_include(cfn)
++        refs.extend([r for r in include_refs if isinstance(r, str)])
++        subs.extend([s for s in include_subs if isinstance(s, str)])
+ 
+         for paramname in cfn.template.get("Parameters", {}).keys():
+-            if paramname not in refs:
+-                if paramname not in subs:
++            # Only treat direct string matches as usage
++            if isinstance(paramname, str):
++                if paramname not in refs and paramname not in subs:
+                     message = "Parameter {0} not used."
+                     matches.append(
+                         RuleMatch(["Parameters", paramname], message.format(paramname))
+diff --git a/test/unit/rules/parameters/test_used.py b/test/unit/rules/parameters/test_used.py
+index ac71758ad..672ffa332 100644
+--- a/test/unit/rules/parameters/test_used.py
++++ b/test/unit/rules/parameters/test_used.py
+@@ -19,6 +19,7 @@ class TestParameterUsed(BaseRuleTestCase):
+             "test/fixtures/templates/good/parameters/used_transforms.yaml",
+             "test/fixtures/templates/good/parameters/used_transform_removed.yaml",
+             "test/fixtures/templates/good/parameters/used_transform_language_extension.json",
++            "test/fixtures/templates/good/parameters/used_include_apigw.yaml",
+         ]
+ 
+     def test_file_positive(self):

@@ -1,0 +1,23 @@
+diff --git a/babel/localedata.py b/babel/localedata.py
+index 2aabfd1..128cb20 100644
+--- a/babel/localedata.py
++++ b/babel/localedata.py
+@@ -47,11 +47,18 @@ def normalize_locale(name: str) -> str | None:
+ def resolve_locale_filename(name: os.PathLike[str] | str) -> str:
+     """
+     Resolve a locale identifier to a `.dat` path on disk.
++
++    Modifiers (suffix after '@') are not encoded in the data filenames and
++    should fall back to the base locale file.
+     """
+ 
+     # Clean up any possible relative paths.
+     name = os.path.basename(name)
+ 
++    # Strip any modifier (e.g. "ja_JP@custom" -> "ja_JP").
++    # Babel's locale-data files do not include modifiers in filenames.
++    name = name.partition('@')[0]
++
+     # Ensure we're not left with one of the Windows reserved names.
+     if sys.platform == "win32" and _windows_reserved_name_re.match(os.path.splitext(name)[0]):
+         raise ValueError(f"Name {name} is invalid on Windows")

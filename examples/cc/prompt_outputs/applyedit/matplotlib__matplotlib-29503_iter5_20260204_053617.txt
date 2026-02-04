@@ -1,0 +1,147 @@
+You are an expert Python developer working on the Matplotlib codebase in the current directory.
+
+Task: **[ENH] Show parameter names in error message for mismatched array sizes in `bar()` / `barh()`**.
+
+A common user mistake (e.g., missing a comma in a labels list) triggers a long NumPy broadcasting traceback with an unhelpful message like “Mismatch is between arg 2 … arg 3 …”. We want Matplotlib to catch **only the specific NumPy broadcasting/shape-mismatch** case that occurs in `Axes.bar`/`Axes.barh` and raise a clearer `ValueError` that **mentions the Matplotlib parameter names** involved (e.g., `y` vs `width` for `barh`, `x` vs `height` for `bar`) and their lengths, instead of leaking the raw NumPy broadcast error.
+
+You are given failure feedback from prior attempts. You must incorporate the improvements below so the fix is narrowly targeted, correct, and won’t break unrelated cases.
+
+---
+
+## Key requirements (must follow)
+
+### A) Tests (must add, permanent)
+1. Add **permanent regression tests** (do not delete after debugging).
+2. Tests must be **robust and meaningful**:
+   - Assert exception type is `ValueError`.
+   - Assert message references the relevant Matplotlib argument names.
+   - Assert message associates the correct lengths with the correct parameter names (not just that “2” and “3” appear somewhere).
+   - Assert message does **not** contain the old NumPy-style “arg 2/arg 3” phrasing (e.g., `arg 2`, `arg 3`, or `Mismatch is between arg`).
+   - Allow optional quotes around names (e.g., `y` vs `'y'`).
+   - Use regex that binds name↔length (examples below).
+3. Add **two tests**:
+   - One for `barh()` mismatch (repro given below).
+   - One for `bar()` mismatch (analogous vertical version).
+4. Place tests in an appropriate existing axes test module near other `bar`/`barh` tests. **Avoid arbitrary insertion into unrelated sections** of huge files. Prefer an existing file that already contains `test_bar*`/`test_barh*`.
+
+### B) Implementation (must be narrowly targeted)
+5. Do **not** broadly rewrite any `ValueError` containing “broadcast” / “shape mismatch”. This was a prior failure: it can mask unrelated errors and break tests.
+6. Only intercept **the specific NumPy broadcast errors** raised by the broadcast operation used in `bar`/`barh`. Restrict by matching specific known NumPy broadcast messages/patterns (see below) **and** by verifying we can confidently identify conflicting core-parameter lengths.
+7. Only rewrite for **scalar-or-1D** inputs for the relevant core data parameters. If any involved input is 2D+ (or otherwise not 0D/1D), do **not** rewrite; re-raise original error unchanged.
+8. Compute “effective length” safely:
+   - scalar / 0d array → length 1
+   - 1D array-like → length `len(...)`
+   - 2D+ → bail out (don’t rewrite)
+9. Determine which parameters are in conflict by actual length disagreement among **core user-facing data parameters only**:
+   - For `bar()`: `x`, `height`, `width`, `bottom`
+   - For `barh()`: `y`, `width`, `height`, `left`
+   - Do **not** use style parameters (`linewidth`, `hatch`, etc.) when deciding conflicts to avoid misleading messages.
+10. Choose the conflicting pair from computed lengths (do not hardcode a “preferred pair” unless it’s actually conflicting).
+11. Message must be parameter-name based, not “arg 2/arg 3”. Example acceptable messages:
+   - `barh(): 'y' has length 2 but 'width' has length 3 (cannot broadcast)`
+   - `bar(): x has length 2 but height has length 3 (cannot broadcast)`
+   Exact phrasing can vary, but must clearly map parameter names to lengths.
+
+### C) Workflow
+12. Add the tests first (red), then implement, then run only targeted tests while iterating (`pytest path/to/test_file.py -k barh` etc.). Don’t run the full suite initially.
+
+---
+
+## Reproduction examples (use in tests)
+
+### `barh()` repro (missing comma makes labels length 2)
+```python
+arg_k = ["foo", "bar" "baz"]  # missing comma => len 2
+arg_n = [1, 2, 3]             # len 3
+ax.barh(arg_k, arg_n)
+```
+Expected: a `ValueError` whose message mentions `barh`, `y`, `width`, and lengths 2 and 3 tied to those names, and does NOT mention `arg 2/arg 3`.
+
+### `bar()` repro (analogous mismatch)
+Create a similarly minimal mismatch, e.g.:
+```python
+x = ["foo", "bar" "baz"]  # len 2
+h = [1, 2, 3]             # len 3
+ax.bar(x, h)
+```
+Expected: a `ValueError` mentioning `bar`, `x`, `height`, and the lengths, without `arg 2/arg 3`.
+
+---
+
+## Guidance for robust test assertions (do this)
+Write regex(es) that bind each parameter to its length, allowing flexible words and optional quotes. For example, for `barh` allow either order:
+
+- Pattern A (y then width):
+  - `r"barh\(\):.*'?y'?.*(length|len).*2.*'?width'?.*(length|len).*3"`
+- Pattern B (width then y):
+  - `r"barh\(\):.*'?width'?.*(length|len).*3.*'?y'?.*(length|len).*2"`
+
+Also assert absence of the old style:
+- message should NOT contain `arg 2`, `arg 3`, or `Mismatch is between arg`.
+
+Do similarly for `bar` with `x` and `height`.
+
+Keep the test tolerant about punctuation/parentheses, but strict about (name ↔ length) association.
+
+---
+
+## Implementation strategy (do this, avoid prior pitfalls)
+
+### 1) Locate broadcast point in `Axes.bar`
+Find where `bar` broadcasts the core inputs (likely `np.broadcast_arrays(...)`). This is where NumPy throws the unhelpful broadcasting `ValueError`.
+
+### 2) Exception filtering (must be tight)
+When catching `ValueError` from broadcasting, only rewrite if:
+- The exception message matches one of a few **specific** NumPy broadcast errors, e.g. (exact matching/regex is OK):
+  - `"shape mismatch: objects cannot be broadcast to a single shape"`
+  - `"operands could not be broadcast together"`
+  - (Optionally include other well-known NumPy broadcast phrasing used by `broadcast_arrays`.)
+- AND you can compute conflicting lengths among the relevant core parameters (scalar/1D only; ignore 2D+).
+
+If these conditions are not met, re-raise the original error unchanged.
+
+### 3) Length computation (must be safe)
+Implement a helper that inspects `np.asanyarray(val)` (careful: don’t force object conversion that changes semantics) or uses `np.ndim`/`np.shape` robustly:
+- If `np.ndim(val) == 0`: effective length = 1
+- If `np.ndim(val) == 1`: effective length = `len(val)`
+- Else: return `None` meaning “don’t rewrite”.
+
+Only rewrite if all candidate core params involved in the mismatch have defined effective lengths (not `None`).
+
+### 4) Identify actual conflicting parameters
+From the core params for the called orientation (`bar` vs `barh` user-facing names), build a dict `{name: effective_length}` and consider only lengths > 1 (since 1 is broadcastable).
+
+If there are at least two different non-1 lengths, pick two parameters whose lengths differ (e.g., first mismatch pair) and report those. Don’t always report `y` vs `width` if the mismatch is actually elsewhere.
+
+### 5) Map to correct user-facing names
+- `Axes.barh` may call into `Axes.bar` internally with swapped semantics. The raised message must reference **what the user called**: for `barh`, use `y`/`width`/`left`/`height`; for `bar`, use `x`/`height`/`width`/`bottom`.
+- If easiest, implement the rewrite logic in a shared internal helper that receives:
+  - `funcname` (`"bar"` or `"barh"`)
+  - a dict of user-facing parameter values (`{"y": y, "width": width, ...}` etc.)
+  - then performs the check and constructs the message.
+
+### 6) Message content
+Include:
+- `bar()` or `barh()` prefix (or similar function context)
+- the two parameter names and their lengths
+- a short “cannot broadcast” hint (optional)
+Do not include “arg 2/arg 3”.
+
+### 7) Keep runtime impact minimal
+Do length inspection only inside the exception handler (i.e., only when broadcasting fails), not on the success path.
+
+---
+
+## Validation steps you must perform
+1. Run targeted tests only:
+   - `pytest <test_module> -k barh`
+   - `pytest <test_module> -k "bar and not barh"` (or similar)
+2. Ensure the error message produced passes the robust assertions and does not rewrite unrelated errors.
+
+---
+
+## Deliverables
+- Code change in `Axes.bar` / `Axes.barh` (or shared helper) that rewrites only the specific broadcast mismatch error into a parameter-name-based `ValueError`.
+- Two permanent regression tests: one for `barh`, one for `bar`, both robust as described.
+
+Now implement the enhancement in this repository following the workflow above.

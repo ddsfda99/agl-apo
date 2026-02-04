@@ -1,0 +1,150 @@
+## What went wrong (root causes)
+
+### 1) The agent never established the actual failing test / expected behavior
+From the trace, the agent immediately jumped into searching for `W2001` and “Include/AWS::Include/Fn::Transform” without:
+- running tests,
+- identifying the specific failing test name(s),
+- capturing the assertion message / diff,
+- narrowing to a minimal reproducer.
+
+As a result, it spent most of the time exploring unrelated internals (LanguageExtensions, mappings, schema patches) rather than proving what is broken and where.
+
+**Impact:** It’s very likely the agent fixed (or would have fixed) the wrong thing, because it did not anchor on the failure.
+
+**How to improve:** Always start by running the test suite (or at least the failing subset) and quote the failure. If tools don’t allow running tests, read CI logs or reproduce by inspecting the relevant `test/unit/...` file referenced by grep and confirm expectations.
+
+---
+
+### 2) Severe path confusion: mixing `/workspace/...` vs `/testbed/...`
+Early on:
+- `Grep` finds `src/cfnlint/rules/parameters/Used.py`
+- then `Read("/workspace/src/cfnlint/rules/parameters/Used.py")` fails with “File does not exist”
+- only later does it discover the correct root is `/testbed/...`.
+
+This repeats multiple times:
+- `Grep` with `path="/workspace/testbed"` fails
+- `Read("/src/cfnlint/template/template.py")` fails, etc.
+
+**Impact:** This wastes time and also breaks the agent’s mental model of the repository layout. It increases the chance of editing/patching nonexistent paths or misunderstanding what code is actually executed in tests.
+
+**How to improve:** After the first “file does not exist”, immediately `Glob` for a known file (e.g., `**/pyproject.toml`, `**/src/cfnlint/__init__.py`) and lock onto the correct repo root. All subsequent tool calls should use consistent absolute paths under that root.
+
+---
+
+### 3) The investigation wandered: “AWS::Include / Fn::Transform / LanguageExtensions” is a red herring for W2001
+The rule under inspection was `W2001` (parameter used check). The agent then spent a long time chasing:
+- `AWS::Include` (which isn’t even present in code as a transform implementation),
+- `Fn::Transform` behavior,
+- schema override include (`IncludeResourceTypes`),
+- mapping transform flags, etc.
+
+But none of that connects clearly to `W2001` except loosely “transforms exist”.
+
+**Impact:** The agent likely missed the actual bug in `W2001` logic or missed the specific template fixture that fails.
+
+**How to improve:** Once you locate the rule file, immediately find:
+- its unit/integration tests,
+- its fixtures,
+- how templates are preprocessed in those tests.
+E.g. `test/fixtures/templates/bad/parameters/...`, `test/unit/rules/parameters/...` etc. The trace never shows the agent searching for `test ... W2001` or reading fixtures for W2001.
+
+---
+
+### 4) The agent didn’t validate the rule’s assumptions about template preprocessing
+In `W2001` (`src/cfnlint/rules/parameters/Used.py`), the logic is:
+
+- gather `refs` from `cfn.transform_pre["Ref"]`
+- gather `subs` from `cfn.transform_pre["Fn::Sub"]`
+- special case: if `cfn.has_language_extensions_transform()`, also do `le_refs = cfn.search_deep_keys("Ref")` and merge them
+
+This is a fragile heuristic because:
+- `transform_pre` is populated *before* transforms run and then cached; after transform it is explicitly cleared via `_cache_clear()`, but `transform_pre` itself is not recomputed.
+- language extensions transform can rewrite templates and introduce/remove `Ref`/`Fn::Sub` usage.
+- `cfn.search_deep_keys("Ref")` includes Globals optionally and depends on caching behavior.
+
+The agent did read `Template.transform()` and `_cache_clear()`, but never connected that to W2001’s reliance on `transform_pre` vs `template` after transform. It also didn’t check how runner invokes transform relative to rules.
+
+**Impact:** If the failing tests are about “parameter used check behaves incorrectly after transform” (there are fixtures like `used_transform_removed.yaml`), then the likely bug is exactly this mismatch: W2001 checking the wrong version of the template or the wrong precomputed data.
+
+**How to improve:**
+- Identify whether rules run on `cfn.template` before or after `Template.transform()`.
+- If after transform, then using `transform_pre` might be stale or intentionally kept; tests will clarify intended behavior.
+- Read the specific fixtures mentioned by grep:  
+  `test/fixtures/templates/bad/parameters/used_transform_removed.yaml` and `good/...` (the trace found them but didn’t open them).
+
+---
+
+### 5) Missed the most relevant fixture files
+The grep result shows:
+- `test/fixtures/templates/bad/parameters/used_transform_removed.yaml`
+- `test/fixtures/templates/good/parameters/used_transform_removed.yaml`
+
+But the agent never read either. Those filenames strongly suggest the actual failing behavior is about parameter usage when transforms remove usage or move it.
+
+**Impact:** Without reading these files, the agent couldn’t possibly understand what W2001 is expected to do in those edge cases.
+
+**How to improve:** When grep shows a fixture matching the suspected area, open it immediately and compare the “bad” vs “good” versions to see what the rule is supposed to catch.
+
+---
+
+### 6) Confusing “Include” schema override with CloudFormation “AWS::Include” transform
+The agent read `test/unit/module/override/test_include.py` and `test/fixtures/templates/override_spec/include.json` and then chased `AWS::Include`.
+
+But in this codebase:
+- `IncludeResourceTypes` / `ExcludeResourceTypes` are schema patch controls (provider schema filtering), not the CFN `AWS::Include` macro/transform.
+- The fixture `bad/override/include.yaml` is about **spec override filtering**, not template transforms.
+
+**Impact:** It’s unrelated to W2001, and the time spent here indicates the agent did not separate “include” concepts (schema include vs CFN include transform).
+
+**How to improve:** Keep a clear taxonomy:
+- Template-level transforms: `Transform: AWS::LanguageExtensions`, `Transform: AWS::Serverless-2016-10-31`
+- Intrinsic function: `Fn::Transform`
+- Schema patch configuration: `IncludeResourceTypes`
+They are different layers.
+
+---
+
+### 7) Tooling misuse: overly broad greps / globs and truncated outputs
+The agent repeatedly used huge `Glob("**/*.py")` and broad greps returning 100+ files, often truncated. This makes it harder to converge.
+
+**How to improve:** Narrow scope:
+- Search within `/testbed/src/cfnlint/rules/parameters` and `/testbed/test` first.
+- Use `output_mode="content"` for pinpointing lines; use `files_with_matches` only after you know the query is tight.
+
+---
+
+## What the agent should have done to pass tests (practical debugging plan)
+
+1) **Confirm failing tests** (run tests or identify them). If execution isn’t possible, then:
+   - search `test/**` for `W2001` references (`Grep pattern="W2001" path="/testbed/test"`).
+   - open the test file(s) and understand expected matches/paths/messages.
+
+2) **Inspect the fixtures driving those tests**, especially:
+   - `/testbed/test/fixtures/templates/bad/parameters/used_transform_removed.yaml`
+   - `/testbed/test/fixtures/templates/good/parameters/used_transform_removed.yaml`
+
+3) **Trace runtime order**:
+   - Does `Runner` call `Template.transform()` before running rules? (read `/testbed/src/cfnlint/runner.py` and/or `/testbed/src/cfnlint/core.py`).
+   - Is `cfn.template` already transformed when W2001 runs? If yes, relying on `transform_pre` is suspicious.
+
+4) **Evaluate W2001’s detection logic against fixtures**:
+   - If a parameter is used only inside a section that a transform removes, should it count as “used”? The fixture names suggest “transform removed usage” is important.
+   - If transforms rewrite `Fn::Sub` strings or inline `Ref`s, W2001 must search appropriately (likely against pre-transform or post-transform template consistently).
+
+5) **Fix should align with tests**:
+   - If tests expect “pre-transform usage counts”, then W2001 must *only* examine `transform_pre` and never the post-transform template.
+   - If tests expect “post-transform final template counts”, then W2001 must examine `cfn.template` after transform and not use stale `transform_pre` (or must recompute it after transform).
+   - If tests mix both, then it must combine sources carefully and deterministically.
+
+The trace shows the agent partially uncovered the mechanics (`transform_pre` is created in `Template.__init__`, cache cleared after transform), but it never connected that to an asserted expected behavior from tests—so it couldn’t land on the correct fix.
+
+---
+
+## Summary of key failure modes
+- No grounding in actual failing test output.
+- Repeated wrong-path reads (`/workspace/...`) delaying progress.
+- Large exploratory detours (schema include, AWS::Include, mappings) unrelated to W2001.
+- Missed the most relevant fixtures that likely define the failure.
+- Didn’t reconcile `transform_pre` vs transformed `template` timing, which is a prime suspect for “used_transform_removed” scenarios.
+
+If you incorporate these insights into the prompt for a new attempt, the next agent should focus on the W2001 tests + `used_transform_removed.yaml` fixtures and decide whether W2001 should evaluate pre- or post-transform usage consistently, matching the test suite’s intent.

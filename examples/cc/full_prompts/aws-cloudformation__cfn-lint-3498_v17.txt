@@ -1,0 +1,137 @@
+You are an expert software engineer working on the **cfn-lint** repository in the current directory.
+
+## Goal (resolve ambiguity first)
+There is a contradiction between:
+- Task header: **“don't honor the condition when checking the type availabilitiy”**
+- Issue narrative: “Expected: cfn-lint honors the condition…”
+
+For this task, treat the **task header as authoritative**.
+
+## Required behavior change (authoritative)
+**Do NOT honor (do not use) a resource’s `Condition` to suppress/skip regional resource type availability checks (E3006).**
+
+Concretely: if a resource type is not available in the selected region(s), **E3006 must be reported even if the resource has a `Condition` that would evaluate to false in those regions.**
+
+This change is scoped to **E3006 / resource type regional availability only**.
+
+---
+
+## Non-goals / constraints
+- Do not add a new CLI option unless there is strong evidence it already exists/required.
+- Avoid performance regressions: do not enumerate condition scenarios; avoid `list(generator)` and any full scenario expansion.
+- Do not change how conditions work for other rules; only remove condition-based suppression for E3006.
+
+---
+
+## Critical pitfalls from previous failures (must avoid)
+1. **Your reproduction test must include a real `Conditions:` section** that uses `AWS::Region` checks (e.g., `Fn::Equals`, `Fn::Or`, `Fn::Not`) and the resource must reference that condition.
+2. The reproduction test must run through the **standard cfn-lint test harness path** (e.g., `TemplateRunner`, `Runner`, or the repo’s established mechanism).  
+   **Do not** directly call `ResourceType.validate()` with a hand-built resource dict; that bypasses template/condition plumbing and does not reproduce the bug.
+3. Assertions should check **rule id `E3006`** and the **resource logical ID / path**, not just message substrings.
+4. Search broadly for other tests encoding old “condition suppresses E3006” semantics and update them all.
+
+---
+
+## Required workflow (follow exactly)
+
+### 1) Establish baseline and locate current intent
+1. Run a small relevant unit-test subset first (not the entire suite) to confirm current behavior around E3006 and conditions.
+2. Locate the rule implementation for E3006:
+   - Search for `E3006`
+   - Search for message text like `Resource type` and `does not exist in`
+
+Record what you ran and what you found.
+
+---
+
+### 2) Add a correct reproduction test (must match the reported scenario)
+Create a new unit test (or extend an existing one) that **minimally reproduces**:
+
+- region set to **`cn-north-1`**
+- a resource of type **`AWS::GlobalAccelerator::Listener`** (as in the issue) with:
+  - `Condition: NotChina`
+- and a real condition definition that excludes China regions using `AWS::Region` equality checks, e.g.:
+
+```yaml
+Conditions:
+  NotChina:
+    Fn::Not:
+      - Fn::Or:
+          - Fn::Equals: [ { Ref: "AWS::Region" }, "cn-north-1" ]
+          - Fn::Equals: [ { Ref: "AWS::Region" }, "cn-northwest-1" ]
+Resources:
+  GAListener:
+    Type: AWS::GlobalAccelerator::Listener
+    Condition: NotChina
+```
+
+**Important requirements for this test:**
+- It must be executed via the repo’s normal template linting path (use `TemplateRunner` / `Runner` / whatever is standard in existing tests for resource rules).
+- The test should set the region context to `cn-north-1` using the same mechanism other tests use (e.g., passing regions into `Template`/runner).
+- Expected result **after change**: `E3006` is emitted for `Resources/GAListener` (or whichever path format the harness uses), **despite** the condition evaluating to false in `cn-north-1`.
+
+**Stability requirement:**  
+If feasible in this codebase, make the test robust by:
+- asserting on `match.rule.id == "E3006"` and match path includes the logical ID, rather than only message text.
+- optionally (if easy and already used elsewhere) verifying the type is unavailable in `cn-north-1` using the provider/schema manager; if not easy, keep the type as specified and focus on the condition/runner reproduction.
+
+Before implementing the fix, ensure this reproduction test **fails under current behavior** in a way that demonstrates the old behavior (i.e., E3006 suppressed when Condition is false). Then proceed.
+
+---
+
+### 3) Update existing tests that encoded “honor condition” suppression
+Search broadly for tests that currently expect E3006 to be skipped because of conditions. Do **not** rely on a single filename guess.
+
+Use at least these searches:
+- grep for `E3006` in tests
+- grep for `does not exist in` in tests
+- grep for `build_scenerios_on_region` usage
+- grep for `Condition` in tests near E3006 assertions
+
+Update all such tests so that under the new behavior **E3006 is still raised** even when the resource has a condition that can be false.
+
+Do not delete tests unless clearly redundant; prefer rewriting them to assert the new semantics.
+
+---
+
+### 4) Implement the fix (minimal targeted change)
+In the E3006/type availability validation path:
+- Remove/disable any logic that inspects a resource’s `Condition` to decide whether to skip availability checks.
+- Ensure the rule checks availability purely based on:
+  - resource type
+  - selected region(s)
+- Do **not** evaluate conditions or enumerate condition scenarios for E3006 at all.
+
+Keep code changes tightly scoped.
+
+---
+
+### 5) Validate
+Run:
+- the new reproduction test
+- the modified existing E3006-related unit tests
+
+Do not attempt to fix unrelated failing tests outside this scope. Provide the exact commands and outcomes.
+
+---
+
+### 6) Cleanup
+- Remove any temporary files.
+- Do not commit changes.
+
+---
+
+## Deliverables
+When finished, provide:
+1) A brief summary of the code change (file(s) + what logic changed).
+2) A list of tests added/modified (file names + test names).
+3) The exact test commands you ran and their results.
+
+---
+
+## Reminder (must comply)
+- This task is explicitly **“do not honor Condition for E3006”**. Do not implement the opposite.
+- The reproduction test must include **real condition evaluation** (`Conditions:` using `AWS::Region`) and must run through the **standard runner/harness**—no direct `ResourceType.validate()` calls with ad-hoc dicts.
+- Keep assertions primarily on `E3006` id + logical resource path.
+
+Proceed now.

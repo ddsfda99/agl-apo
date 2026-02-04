@@ -1,0 +1,118 @@
+You are an expert Sphinx core developer fixing a regression. You are given a Sphinx code repository in the current directory.
+
+## Task
+Fix the regression described below **correctly for the real-world scenario** (e.g. `nbsphinx`) and add a regression test that would have failed before your fix and passes after.
+
+### Bug summary
+After Sphinx commit `ae206694e68bea074aca633ea0d32e9ed882a95f` (first released in 7.1.0), a CSS file provided by an extension via `app.add_css_file('name.css')` can no longer be overridden by a user who places a file with the **same basename** into their own `html_static_path`.
+
+This is expected to work in `nbsphinx` where the extension registers `nbsphinx-gallery.css`, and users override it by placing their own `nbsphinx-gallery.css` into their project static directory.
+
+### What “override” means here (be precise)
+This is **not** about CSS inclusion order in HTML. It is about **asset copy precedence** when multiple sources would copy to the same `_static/<filename>` destination. The user’s file should be the one that ends up in `_static/…` (or at minimum the one referenced/hashed if hashing/manifesting is involved).
+
+### Key constraints (must follow)
+1. Do **not** assume the extension’s asset comes only from user-configured `html_static_path`. Extensions may add their own static dirs *later* (commonly by appending to `config.html_static_path` during `config-inited`) or copy assets via other mechanisms. Your fix must cover this concrete scenario:
+
+   - user `conf.py`: `html_static_path = ['user_static']`
+   - extension `myext` during `config-inited`: appends its own static dir: `config.html_static_path.append('ext_static')`
+   - extension also calls: `app.add_css_file('custom.css')`
+   - both `user_static/custom.css` and `ext_static/custom.css` exist
+   - final built `_static/custom.css` must contain the **user** content
+
+2. Avoid “blunt instrument” fixes like reversing the entire `html_static_path` processing order. That can change established semantics among user-provided paths. The fix must be **narrowly scoped** to ensure “user overrides extension-added assets”, without inverting precedence among user dirs themselves.
+
+3. You must investigate and understand what changed around the cited regression commit (`ae206694…`) and how it relates to #11415. Use `git show`, `git blame`, and code search to find the exact behavior change (static copy pipeline, asset collection order, hashing/manifesting, overwrite policy). Do not guess.
+
+4. Add a regression test that matches the real scenario above. A test that simply sets `html_static_path = ['user', 'ext']` in `conf.py` is **not sufficient**.
+
+5. The extension’s static asset might be delivered in multiple ways in the real world. Your fix should at least solve the **extension-appends-to-html_static_path** case (which is common) and should not break other asset mechanisms (e.g. `copy_asset`, theme static copying, hashed assets). Be explicit about what you verified.
+
+---
+
+## Required workflow (do these steps in order and keep them explicit)
+### 1) Reproduce with a focused failing test first
+Create a minimal test root using Sphinx’s test framework that demonstrates the regression exactly: extension appends to `html_static_path` *after* user config.
+
+**Test must:**
+- Create a test root under `tests/roots/` (or repo equivalent).
+- Include `conf.py` with:
+  - `extensions = ['myext']`
+  - `html_static_path = ['user_static']`
+- Provide a local extension module `myext.py` in the test root that:
+  - connects to `config-inited`
+  - in the handler: `config.html_static_path.append('ext_static')`
+  - also calls `app.add_css_file('custom.css')` (either in `setup()` or in the event handler; prefer realistic timing)
+- Provide two distinct files:
+  - `user_static/custom.css` containing a unique marker, e.g. `/* USER */`
+  - `ext_static/custom.css` containing `/* EXT */`
+- Build HTML with the test app.
+- Assert that `_build/html/_static/custom.css` exists and contains the **user marker** and not the extension marker.
+
+**Important:** If Sphinx uses hashed/manifested assets in this codepath, assert on the *actual served file*. Minimally:
+- verify the physical file in `_static/` that ends up being referenced
+- optionally verify the HTML points to the correct (hashed/non-hashed) filename, but the primary assertion is about copy precedence.
+
+Confirm this test fails on current code before your fix.
+
+### 2) Locate the regression (must be tied to ae206694…)
+Identify where the relevant behavior changed:
+- Inspect `git show ae206694e68bea074aca633ea0d32e9ed882a95f` (and related commits in #11415).
+- Use `git blame` on the function(s) involved in copying HTML static assets.
+- Find where Sphinx determines:
+  - which static directories are copied
+  - in what order they are copied
+  - whether file overwrites are allowed/blocked
+  - how CSS/JS assets added by `app.add_css_file` interact with copying and hashing
+
+Write down (in brief comments in your final response) what changed and why it broke “user overrides extension asset”.
+
+### 3) Implement a minimal, safe fix (narrow scope)
+Your fix must ensure:
+- User-provided static files (from the user’s `html_static_path` as defined in `conf.py`) take precedence over extension-added static directories appended later during `config-inited`.
+- **Do not** invert precedence among multiple user-provided `html_static_path` entries. Preserve user semantics as much as possible.
+- Do not change unrelated copy order (e.g. theme static vs user static) unless you can justify it and keep compatibility.
+
+**Strongly preferred approach:**
+- Track which `html_static_path` entries are “initial/user” vs “added later by extensions”.
+  - e.g. snapshot `config.html_static_path` before `config-inited` runs (or at earliest safe time) and later compute “added paths”.
+  - or record mutations via events if needed.
+- Copy static assets in a way that results in:
+  - extension-added static dirs copied first
+  - then user-initial static dirs copied after (so user wins on collisions)
+  - while preserving ordering *within* user-initial dirs
+  - while preserving ordering *within* extension-added dirs
+
+**Do not** just reverse the entire list.
+
+Also consider:
+- If Sphinx has a copy routine that refuses overwrites or changes overwrite semantics since 7.1, adjust overwrite policy only in the narrow case needed to restore user override behavior.
+- Ensure the behavior is stable with asset hashing/manifesting if used.
+
+Add a short code comment explaining the rationale and compatibility constraints.
+
+### 4) Validate
+Run:
+- the new targeted regression test (or the relevant subset)
+- `pytest -q` (at least) to ensure no breakage
+
+### 5) Cleanup
+Only keep the new regression test root/files required for the test. No ad-hoc temp files.
+
+---
+
+## Deliverables
+- Code change implementing the fix in the correct Sphinx component(s).
+- A regression test matching the extension-appends-static-dir scenario above.
+- Brief evidence of tests run (commands + outcome).
+- Do **not** commit.
+
+---
+
+## Additional guidance (to avoid previous failure modes)
+- Do not assume the extension asset is only handled by `html_static_path`; first *confirm* the actual copy pipeline that affects `add_css_file()` assets and static dirs.
+- The regression is known to be introduced in `ae206694…` (#11415). Your patch must clearly relate to the behavior introduced/changed there.
+- The test must include the extension mutating `config.html_static_path` during `config-inited`. A test where both paths are specified directly in `conf.py` is invalid for this task.
+- The goal is not to change CSS inclusion order in HTML; it is to ensure the file copied into `_static/` (or referenced/hashed file) is the user’s version when basenames collide.
+
+Now proceed: inspect the repo, write the failing test first, identify the regression mechanism, implement a narrowly-scoped fix, and make the test pass.

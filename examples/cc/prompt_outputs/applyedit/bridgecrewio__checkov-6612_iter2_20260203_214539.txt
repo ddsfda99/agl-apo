@@ -1,0 +1,126 @@
+You are given a code repository in the current directory.
+
+## Task
+Fix a crash in Checkov when scanning Terraform `aws_wafv2_web_acl` resources that contain **multiple** `dynamic "rule"` blocks.
+
+### Reported issue
+When 2 dynamic WAF `rule` blocks are defined, Checkov crashes with:
+
+`AttributeError: 'int' object has no attribute 'get'`
+
+The debug output shows the parsed entity configuration includes placeholder integers inside `rule` / `statement` lists, e.g.:
+
+- `conf["rule"]` contains entries like `{'action': [1], 'name': [1], 'priority': [1], 'statement': [1], ...}`
+- and then also real dict rules coming from the dynamic blocks.
+
+This causes checks such as:
+- `CKV_AWS_192` (WAFACLCVE202144228)
+- `CKV_AWS_342` (WAFRuleHasAnyActions)
+
+to do `statement.get(...)` on an `int`.
+
+### Critical constraints (learn from previous failures)
+1. **You must actually run tests in this environment.**  
+   `pytest` is not available here, so do NOT depend on pytest to execute tests. Use the repo’s existing test approach:
+   - Prefer `python -m unittest discover -s tests -p "test*.py"` (or the repo’s documented runner).
+   - First inspect the repo to confirm how tests are structured before writing any test.
+
+2. **Do not “fix” the crash by skipping invalid items in a way that changes PASS/FAIL semantics.**  
+   Prior attempts incorrectly returned `PASSED` when all rules were placeholders. Your fix must:
+   - Prevent the exception
+   - Preserve intended results, especially the difference between `UNKNOWN` vs `FAILED` vs `PASSED` in ambiguous/dynamic cases.
+
+3. **Preserve known behavior noted in the issue:**
+   - With **one** dynamic `rule`, CKV_AWS_192 previously produced **UNKNOWN** (no crash).
+   - With **two** dynamic `rule`s, it crashed.
+   Your fix should stop the crash and keep “not reliably scannable due to placeholders” cases as **UNKNOWN**, not silently PASS/FAIL.
+
+4. **Reproduction test must be robust and deterministic.**  
+   Do **not** rely on Terraform parsing of `.tf` files to generate the same placeholder `int` structure during unit tests.  
+   Instead, create a unit test that **directly calls** `scan_resource_conf()` with a crafted `conf` dict that includes the placeholder ints exactly like the debug output. This must reproduce the former crash deterministically.
+
+5. **No temporary files left behind.**  
+   If you create any scratch `.tf` or debug files, remove them before finishing. New unit tests are fine and should remain, but they must be stable and executed by `unittest`.
+
+---
+
+## Required workflow
+Follow these steps exactly:
+
+### (1) Understand the failing code paths
+- Locate the implementation for checks:
+  - `checkov/terraform/checks/resource/aws/WAFACLCVE202144228.py` (CKV_AWS_192)
+  - `checkov/terraform/checks/resource/aws/WAFRuleHasAnyActions.py` (CKV_AWS_342)
+- Identify where they assume list entries are dicts and call `.get()`.
+
+Also consider whether there is a shared helper/normalizer for Terraform confs where a broader fix could live.  
+However, if a broader parser-level change is risky, implement minimal defensive logic in these checks **without changing their semantics**.
+
+### (2) Add a deterministic reproduction test (unittest)
+- Add a `unittest` test module under the existing tests structure.
+- The test must:
+  - Build a `conf` dict representing an `aws_wafv2_web_acl` with:
+    - `conf["rule"]` containing at least one placeholder entry (e.g., `{'statement': [1]}` or `{'statement': [1], 'action': [1]}`), plus at least one real rule dict.
+    - `statement` lists that include `int` items where the checks previously did `statement.get(...)`.
+  - Call the relevant check class’ `scan_resource_conf(conf)` directly (unit-level).
+  - Assert **no exception occurs**.
+  - Assert the returned `CheckResult` is what we expect for ambiguous parsing:
+    - If the structure is not reliably interpretable due to placeholders and no definitive conclusion can be made, assert `UNKNOWN` (this is important).
+  - Include separate tests for CKV_AWS_192 and CKV_AWS_342.
+
+Make the assertions strong:
+- Explicitly assert `result == CheckResult.UNKNOWN` (or PASSED/FAILED if the crafted conf is definitively compliant/noncompliant), and document why.
+
+### (3) Run the test (must be executed)
+Run:
+- `python -m unittest discover -s tests -p "test*.py" -q`
+
+If the repo uses a different pattern, adapt accordingly—but you must run tests successfully in this environment.
+
+### (4) Implement the fix
+Implement defensive parsing with semantic preservation:
+
+#### For both checks, follow this logic pattern
+- Extract rules: `rules = conf.get("rule")`
+- If `rules` is missing/empty: behave as the check currently intends (likely `UNKNOWN` or `PASSED`; confirm existing behavior).
+- Compute:
+  - `real_rules = [r for r in rules if isinstance(r, dict)]`
+  - `has_placeholders = any(not isinstance(r, dict) for r in rules)`
+- If `rules` exists but `real_rules` is empty:
+  - Return `UNKNOWN` (cannot evaluate).
+- When iterating statements inside a rule:
+  - If `statement` is expected to be a list but contains non-dicts (ints/placeholders), treat this as “cannot fully evaluate”:
+    - If those placeholders prevent determining pass/fail, return `UNKNOWN` rather than `PASSED` or `FAILED`.
+  - Never call `.get()` on non-dicts.
+- Ensure you do not create a behavior where “all rules are placeholders” leads to `PASSED`.
+
+#### CKV_AWS_342 specific semantic caution
+This check validates rules have actions. If rules are unparseable (placeholders), the correct outcome should be `UNKNOWN`, not `PASSED`.  
+So:
+- If there are some real rules, evaluate them.
+- If any evaluated real rule definitively violates policy → `FAILED`.
+- If evaluation is blocked by placeholders such that you cannot confirm compliance → `UNKNOWN`.
+- Only return `PASSED` when you have enough real rule data to confirm compliance.
+
+#### CKV_AWS_192 specific semantic caution
+This check looks for a specific managed rule group statement (Log4j mitigation). If dynamic/placeholder structure prevents determining presence/absence, return `UNKNOWN` (matching prior behavior with 1 dynamic block).  
+Only return `FAILED` if you can confidently determine the relevant rule group is missing/noncompliant from well-formed data.
+
+### (5) Re-run tests and confirm
+- Re-run `python -m unittest ...`
+- Ensure the new tests pass and no other tests fail.
+
+### (6) Keep changes minimal and clean
+- No unrelated refactors.
+- No new dependencies.
+- No temporary files at the end.
+
+---
+
+## Deliverable
+Implement the fix and add the deterministic unit tests so that:
+- The crash is eliminated for configurations containing multiple dynamic `rule` blocks that produce placeholder ints in the parsed conf.
+- CKV_AWS_192 and CKV_AWS_342 return **UNKNOWN** (not crash, not incorrect PASS/FAIL) when placeholder data prevents reliable evaluation.
+- All unit tests run and pass via `python -m unittest discover ...`.
+
+Do not commit your edits.

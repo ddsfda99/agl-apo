@@ -1,0 +1,130 @@
+You are an expert software engineer working inside an existing Matplotlib code repository (current directory). Your goal is to fix a reported Matplotlib bug and **demonstrate** the fix with (1) a reliable reproducer script, (2) a regression test that would fail pre-fix and pass post-fix, and (3) appropriate test runs.
+
+## Task: Fix nondeterministic subplot spacing with constrained layout (inline/Jupyter-like behavior)
+
+### Bug summary (what must be fixed)
+With `constrained_layout` enabled and *all constrained-layout spacing rcParams set to zero*, the spacing between subplots is **nondeterministic** in “inline/Jupyter-like display” unless a *full* draw occurs (e.g. `fig.canvas.draw()` or saving). This suggests the constrained-layout result depends on renderer/draw side effects and is not stable for “display without rendering”.
+
+Expected: **deterministic inter-axes spacing** (i.e., the gap between adjacent axes should be consistently ~0 when rcParams say no spacing), and results should be stable across repeated figure creation.
+
+Important nuance: “no explicit draw” in inline contexts often still triggers a **layout-only draw path** (e.g. `Figure.draw_without_rendering()`), so you must compare that path vs a full draw and ensure determinism.
+
+---
+
+## Non-negotiable constraints (graders check these)
+1. You **must** create a local reproduction script file (temporary is fine) named `repro_constrained_layout.py` and run it.
+2. You **must** add/adjust a regression test in the existing constrained-layout test module (prefer `lib/matplotlib/tests/test_constrainedlayout.py` unless there is a compelling reason).
+3. The regression test must exercise the **inline-like path** correctly. Merely calling `ax.get_position()` without any draw/layout run is **invalid** (it returns default positions and cannot expose the bug).
+4. You must identify and implement a **real root-cause fix**, not a redundant wrapper around code that is already run under `_draw_disabled()`.
+5. You must run tests and report exact commands + outcomes.
+6. At the end, show `git diff` and `git status` and explicitly state what you changed (code/tests/both).
+7. No commits. Remove any temporary artifacts and ensure no stray directories (e.g. `.claude/`) remain.
+
+---
+
+## Required workflow (follow in order)
+
+### Step 1 — Inspect repo & find relevant codepaths
+- Use `rg`/`grep` to locate:
+  - `Figure.draw_without_rendering`
+  - constrained layout engine (`ConstrainedLayoutEngine`, `do_constrained_layout`, `layout_engine.execute`)
+  - renderer acquisition (`_get_renderer`, `fig._get_renderer`)
+  - any caching/state that could be nondeterministic (text metrics, font cache, layoutgrid state, stale flags)
+- Write down (in your final summary) the exact functions/files involved in:
+  - inline-like layout computation
+  - full draw computation
+
+### Step 2 — Create a *real* reproduction script file and run it
+Create `repro_constrained_layout.py` that does the following:
+
+**Reproducer requirements**
+- Use a headless backend available in CI, e.g. `matplotlib.use("Agg")`.
+- In a loop (20–50 iterations), create a fresh figure with:
+  - `constrained_layout=True`
+  - a 1x2 or 2x2 subplot arrangement (something that has an obvious inter-axes gap)
+  - rcParams set so constrained-layout spacing is zero (use `plt.rc_context` and set the relevant `figure.constrained_layout.*` params to 0; include `w_pad`, `h_pad`, `wspace`, `hspace` at least).
+- For each iteration compute axis positions **after**:
+  1) the inline-like path: `fig.draw_without_rendering()` (or whatever the inline path uses in this version)
+  2) the full draw path: `fig.canvas.draw()`
+- Compute a simple numeric “gap” metric, e.g. for a 1x2 layout:
+  - `gap = ax2.get_position().x0 - ax1.get_position().x1`
+- Print:
+  - min/max gap across iterations for each mode
+  - whether gaps vary across iterations (nondeterminism)
+  - optionally: whether `draw_without_rendering()` differs from `canvas.draw()` systematically
+- **Key**: do not query positions before a draw/layout run and call that “inline”. That is invalid.
+
+Run it from the command line (`python repro_constrained_layout.py`) and include its output in your work notes.
+
+If you cannot reproduce nondeterminism headless on Agg:
+- Say so explicitly.
+- Then pivot: design the regression test to target the suspected unstable function/state directly (e.g., by forcing the same renderer and calling `draw_without_rendering()` repeatedly, or by isolating state leakage between figures). But do not skip the reproducer script.
+
+### Step 3 — Design a regression test that actually matches the bug
+Add/modify a test in `lib/matplotlib/tests/test_constrainedlayout.py`.
+
+**Test must:**
+- Set rcParams for constrained-layout spacing to zero using `plt.rc_context`.
+- Use a deterministic backend for tests (Matplotlib test infra typically uses Agg).
+- Trigger the inline-like path properly:
+  - Prefer `fig.draw_without_rendering()` if that is the “inline display without full render” path.
+  - The test should NOT “do nothing” and read positions.
+- Repeat figure creation multiple times (e.g. 10–30) and assert:
+  1) **Determinism**: measured gap/positions are the same within tolerance across iterations.
+     - Use `np.testing.assert_allclose` (not `==`) with a sane tolerance (e.g. `rtol=0`, `atol=1e-6` or similar).
+  2) **Near-zero inter-axes gap**: assert the measured inter-axes gap is close to 0 within tolerance.
+     - Do not require outer margins to be zero; check *inter-axes spacing*, not figure edge padding.
+  3) Optionally (recommended): the inline-like layout result matches the full draw result within tolerance for the same figure.
+
+**Important**: The regression test should be written such that it would plausibly fail on the buggy behavior (nondeterministic gaps), and pass after the fix. Avoid over-tight tolerances like `1e-12`.
+
+### Step 4 — Find the root cause (don’t guess; prove)
+Based on the reproducer and code inspection, identify why layout differs between layout-only draw and full draw, or why it varies between runs.
+
+Common suspects you must investigate (use code references):
+- Renderer selection inconsistency: `_get_renderer(fig)` vs `fig._get_renderer()` producing different renderer instances or different initialization.
+- Text/layout metrics state not finalized in `draw_without_rendering()` path (font caching, mathtext parsing, DPI differences, etc.).
+- Constrained-layout state leakage: layoutgrid margins not being reset, stale flags, or order-dependent updates.
+- Any randomness/order dependence from iterating over dicts/sets or artist lists.
+
+**Do not implement a “fix” that is redundant**:
+- Example of redundant: wrapping constrained layout inside `_draw_disabled()` inside `execute()` when `draw_without_rendering()` already runs the whole draw under `_draw_disabled()`. If you consider a change like this, you must explain why it changes behavior (it likely won’t).
+
+### Step 5 — Implement minimal safe code change(s)
+- Make the smallest change that addresses the proven root cause.
+- Keep API stable.
+- Update or add comments if necessary to explain why the fix is needed for determinism.
+- Ensure your change affects the inline-like path (layout-only) in the same way as the full draw path, or stabilizes the internal state so both are deterministic.
+
+### Step 6 — Run tests (required)
+Run at minimum:
+
+1) The new/updated regression test:
+- e.g. `pytest -q lib/matplotlib/tests/test_constrainedlayout.py -k <your_test_name>`
+
+2) The whole constrained layout test module:
+- `pytest -q lib/matplotlib/tests/test_constrainedlayout.py`
+
+3) One broader relevant subset:
+- `pytest -q lib/matplotlib/tests/test_figure.py -k layout`
+  (or another clearly related subset; state which and why)
+
+Include command outputs (pass/fail summary). If failures occur, fix them; don’t leave the suite broken.
+
+### Step 7 — Cleanup & final proof
+- Remove `repro_constrained_layout.py` if it is not meant to remain in the repo (recommended). If you keep it, justify why.
+- Ensure no stray tool artifacts (e.g., `.claude/`) remain. `git status` should only show intentional changes.
+- Show:
+  - `git diff`
+  - `git status`
+
+### Final report format (must include)
+- Reproducer: how it works + the output summary (min/max gaps; whether nondeterminism was observed).
+- Root cause: file(s) + function(s) + explanation of why it was nondeterministic.
+- Fix: what code changed and why it solves the determinism issue.
+- Regression test: what it asserts and why it matches the bug description.
+- Tests run: exact commands + results.
+- `git diff` and `git status`.
+- Explicitly state whether you changed code, tests, or both.
+
+Proceed now: inspect the repo, create and run the reproducer script, write a regression test that targets the inline-like path correctly, locate and fix the true root cause, run the required tests, clean up, and provide the final proof.
