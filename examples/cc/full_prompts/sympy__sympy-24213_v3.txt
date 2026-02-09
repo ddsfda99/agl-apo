@@ -1,0 +1,27 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- In units/dimensions addition logic, don’t compare `Dimension` objects by structural equality; use the dimension system’s equivalence relation (`DimensionSystem.equivalent_dims`) so `velocity` and `acceleration*time` can add.
+- When switching to `equivalent_dims`, preserve prior exception behavior: guard `dimension_system is None` and catch `TypeError` from dependency computation; fall back to the old “treat as mismatch” behavior rather than raising new error types.
+- Consider stability of the returned dimension: if addends are equivalent-but-not-equal, prefer a canonical/named representative (e.g., `velocity` when present) or otherwise normalize so downstream comparisons/simplifications don’t regress.
+- Tests for this bug should assert the original symptom (pre-fix raises) and the post-fix behavior (no raise), plus dimension *equivalence* to the expected dimension; avoid fragile float factors by using `Rational`.
+- Validate negative cases too: genuinely mismatched dimensions (e.g., `acceleration + time`) must still raise; also check both operand orders and nested `Add`s.
+
+Repo-Specific:
+- Don’t mutate global singletons like `SI` in tests (`SI.set_quantity_dimension/scale_factor`); create a fresh/local `UnitSystem` (or safe copy/extend) to avoid cross-test pollution.
+- Use SymPy’s own test harness when `pytest` isn’t available (e.g., `python -m sympy.testing.runtests`), and run the relevant existing test modules around `physics/units`.
+- Keep fixes tightly scoped: avoid unrelated edits (e.g., changing the `Function` branch of `_collect_factor_and_dimension`) unless you also add coverage and understand the contract (must return exactly `(factor, dimension)` and not silently accept incompatible argument dimensions).
+- Don’t leave debugging artifacts (helper scripts, ad-hoc runners) in the repo; remove them before final output.
+
+General:
+- Write regression tests that (1) fail on the buggy version and (2) pass after the fix; don’t weaken assertions just to match observed output—fix the understanding or the code.
+- Prefer exact arithmetic/types in symbolic code tests (use `Integer/Rational`); if floats are unavoidable, assert with SymPy-safe predicates (`equals`, `nsimplify`, tolerances) rather than raw equality.
+- When changing a condition from “simple comparison” to “computed predicate,” anticipate new failure modes (extra exceptions, missing dependencies) and explicitly handle them to avoid API/behavior regressions.
+- Minimize blast radius: implement the smallest change that fixes the reported issue, then add targeted tests and run the real suite before considering refactors or adjacent “cleanups.”

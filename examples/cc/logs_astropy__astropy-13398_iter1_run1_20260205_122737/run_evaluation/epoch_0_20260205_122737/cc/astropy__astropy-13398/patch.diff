@@ -1,0 +1,77 @@
+diff --git a/astropy/convolution/convolve.py b/astropy/convolution/convolve.py
+index 0d9b25755..946e7101c 100644
+--- a/astropy/convolution/convolve.py
++++ b/astropy/convolution/convolve.py
+@@ -684,7 +684,7 @@ def convolve_fft(array, kernel, boundary='fill', fill_value=0.,
+     arrayshape = array.shape
+     kernshape = kernel.shape
+ 
+-    array_size_B = (np.product(arrayshape, dtype=np.int64) *
++    array_size_B = (np.prod(arrayshape, dtype=np.int64) *
+                     np.dtype(complex_dtype).itemsize) * u.byte
+     if array_size_B > 1 * u.GB and not allow_huge:
+         raise ValueError(f"Size Error: Arrays will be {human_file_size(array_size_B)}.  "
+@@ -777,7 +777,7 @@ def convolve_fft(array, kernel, boundary='fill', fill_value=0.,
+         newshape = _next_fast_lengths(newshape)
+ 
+     # perform a second check after padding
+-    array_size_C = (np.product(newshape, dtype=np.int64) *
++    array_size_C = (np.prod(newshape, dtype=np.int64) *
+                     np.dtype(complex_dtype).itemsize) * u.byte
+     if array_size_C > 1 * u.GB and not allow_huge:
+         raise ValueError(f"Size Error: Arrays will be {human_file_size(array_size_C)}.  "
+@@ -789,12 +789,12 @@ def convolve_fft(array, kernel, boundary='fill', fill_value=0.,
+     #         (kernel*array)fft +
+     #         optional(weight image + weight_fft + weight_ifft) +
+     #         optional(returned_fft))
+-    # total_memory_used_GB = (np.product(newshape)*np.dtype(complex_dtype).itemsize
++    # total_memory_used_GB = (np.prod(newshape)*np.dtype(complex_dtype).itemsize
+     #                        * (5 + 3*((interpolate_nan or ) and kernel_is_normalized))
+     #                        + (1 + (not return_fft)) *
+-    #                          np.product(arrayshape)*np.dtype(complex_dtype).itemsize
+-    #                        + np.product(arrayshape)*np.dtype(bool).itemsize
+-    #                        + np.product(kernshape)*np.dtype(bool).itemsize)
++    #                          np.prod(arrayshape)*np.dtype(complex_dtype).itemsize
++    #                        + np.prod(arrayshape)*np.dtype(bool).itemsize
++    #                        + np.prod(kernshape)*np.dtype(bool).itemsize)
+     #                        ) / 1024.**3
+ 
+     # separate each dimension by the padding size...  this is to determine the
+diff --git a/astropy/convolution/utils.py b/astropy/convolution/utils.py
+index c6f2332c4..ef298580c 100644
+--- a/astropy/convolution/utils.py
++++ b/astropy/convolution/utils.py
+@@ -159,14 +159,25 @@ def discretize_model(model, x_range, y_range=None, mode='center', factor=10):
+     if ndim > 2:
+         raise ValueError('discretize_model only supports 1-d and 2-d models.')
+ 
+-    if not float(np.diff(x_range)).is_integer():
+-        raise ValueError("The difference between the upper and lower limit of"
+-                         " 'x_range' must be a whole number.")
+-
+-    if y_range:
+-        if not float(np.diff(y_range)).is_integer():
+-            raise ValueError("The difference between the upper and lower limit of"
+-                             " 'y_range' must be a whole number.")
++    # Ensure the range differences are scalars and whole numbers. Using np.diff
++    # returns a 1-element array, and converting that to float is deprecated in
++    # recent NumPy versions. Extract the scalar explicitly to avoid the warning.
++    dx = np.asarray(x_range)[1] - np.asarray(x_range)[0]
++    dx_arr = np.asarray(dx)
++    if dx_arr.size != 1:
++        raise ValueError("The difference between the upper and lower limit of 'x_range' must be a scalar.")
++    dx_val = float(dx_arr)
++    if not dx_val.is_integer():
++        raise ValueError("The difference between the upper and lower limit of 'x_range' must be a whole number.")
++
++    if y_range is not None:
++        dy = np.asarray(y_range)[1] - np.asarray(y_range)[0]
++        dy_arr = np.asarray(dy)
++        if dy_arr.size != 1:
++            raise ValueError("The difference between the upper and lower limit of 'y_range' must be a scalar.")
++        dy_val = float(dy_arr)
++        if not dy_val.is_integer():
++            raise ValueError("The difference between the upper and lower limit of 'y_range' must be a whole number.")
+ 
+     if ndim == 2 and y_range is None:
+         raise ValueError("y range not specified, but model is 2-d")

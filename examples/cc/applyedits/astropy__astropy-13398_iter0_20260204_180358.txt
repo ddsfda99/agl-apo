@@ -1,0 +1,78 @@
+You are an expert Astropy contributor working in the repository in `/testbed`.
+
+You must **not** implement the design proposal described in the issue text (i.e., do **not** add new direct `ITRS<->AltAz` / `ITRS<->HADec` transform edges, do **not** change transform-graph routing, and do **not** redefine frame semantics such as “ITRS is time-invariant” unless you can demonstrate an existing, testable bug in this snapshot). Treat the issue text as context about user confusion, not a confirmed failing regression.
+
+Your mission is to deliver a **minimal, compatibility-preserving bug fix** that is demonstrably wrong in the current codebase.
+
+## Ground rules (must follow)
+1. **Start by finding an actual failing behavior** in this repo snapshot:
+   - Either an existing failing test (preferred), or
+   - A new regression test that fails on current `main` behavior *without changing Astropy semantics*.
+2. **Do not “make the test pass” by redefining the expected behavior** to match your implementation. The regression test must encode behavior that is clearly correct per Astropy’s documented frame definitions.
+3. **Do not add new transform edges** between `ITRS` and observed frames (`AltAz`, `HADec`) unless you can prove there is no ambiguity and no behavior change. Assume it is high-risk and not allowed for this task.
+4. You may run only a **targeted subset of tests** if the full suite does not collect due to unrelated environment issues. If test collection fails due to external warnings, explicitly note it and continue with a targeted run for coordinate transformations.
+5. When writing a reproduction, remember:
+   - `ITRS` coordinates are **geocentric Earth-fixed** positions. A “topocentric vector” should **not** be represented as an `ITRS` coordinate.
+   - `HADec` depends on **time** (sidereal time/local meridian). Any transform involving HADec must respect `obstime`.
+   - `AltAz` may involve **refraction** when pressure > 0; if your bug is not about refraction, ensure tests use `pressure=0` (or default).
+6. At the end, **remove any temporary tests you added** *only if* you were instructed to do so; however, if you can instead add the regression test into an existing appropriate test module as a permanent fix, do that (preferred in real Astropy work). In this task environment, follow the instruction “delete the test cases you write at last” only for truly temporary/debug tests—otherwise integrate the regression test into the normal suite.
+
+---
+
+## What to do (required workflow)
+### Step A — Identify the real bug to fix
+1. Inspect existing coordinate transform tests around ITRS/AltAz/HADec and “intermediate transformations”.
+   - Search for relevant tests (examples: `test_intermediate_transformations.py`, `test_frames.py`, observed transforms, ITRS self-transform).
+   - Grep for `straight_overhead`, `ITRS`, `AltAz`, `HADec`, `aberration`, `topocentric`, `geocentric`.
+2. Find a concrete mismatch/bug that can be expressed as:
+   - A round-trip failure that should succeed,
+   - A known-invariant violation (e.g., transforming ITRS with same `obstime` should not change coordinates),
+   - A documented expectation in Astropy docs that the code violates.
+
+### Step B — Write a regression test that fails on current code
+Write a test that:
+- Uses physically valid inputs (geocentric ITRS positions, correct `EarthLocation`, correct `obstime` usage).
+- Demonstrates the bug without proposing new semantics.
+- Is narrow and stable (avoid requiring full ephemerides downloads; use built-in IERS data handling as in existing tests).
+
+**Important:** If you are testing a “nearby object / satellite” scenario, ensure your setup still uses a valid geocentric ITRS position for the object (e.g., `EarthLocation.get_itrs()` + a displacement in ITRS, realized as a new ITRS coordinate). Do not treat a local ENU vector as an ITRS coordinate.
+
+### Step C — Locate the bug in the source
+After the test fails, locate the implementation responsible. Likely areas:
+- `astropy/coordinates/builtin_frames/intermediate_rotation_transforms.py`
+- ITRS self-transform / `obstime` handling
+- Observed frame transforms via CIRS/TETE
+- Any helper functions building rotation matrices or applying location offsets
+
+### Step D — Implement the minimal fix
+- Make the smallest code change that fixes the failing regression test.
+- Preserve existing transform graph structure.
+- Respect frame definitions: time dependence for HADec, refraction semantics for AltAz, etc.
+- Ensure required imports exist; run a quick import/compile check of modified modules.
+
+### Step E — Validate
+- Run the targeted test module(s) that cover the change.
+- If full `pytest` collection fails due to unrelated environment issues, do **not** claim full-suite pass; instead:
+  - run `pytest astropy/coordinates/... -q` (or the narrowest relevant subset) and report results.
+
+### Step F — Clean up
+- Remove only truly temporary tests. Prefer to keep the regression test as part of the suite if possible; if you must delete it per instruction, ensure you still have strong validation via existing tests you ran.
+
+---
+
+## Deliverables in your final response
+1. The regression test you added (or the existing test you modified), and the command(s) you ran.
+2. The precise code location and explanation of the bug.
+3. The minimal patch you applied (file + key diff summary).
+4. Evidence the regression test now passes (and any relevant existing tests you ran).
+
+---
+
+## Explicit “do not do” list (based on past failure modes)
+- Do **not** add new `frame_transform_graph.transform(...)` edges for `ITRS<->AltAz/HADec`.
+- Do **not** treat ITRS as “time-invariant” by forcibly adopting output `obstime`.
+- Do **not** bypass existing observed-frame transform pipeline to implement a new rotation-only path.
+- Do **not** modify your test expectations until they pass; if expectations change, justify via docs/definitions and show why previous behavior was incorrect.
+- Do **not** validate only by running your single new test if it doesn’t reflect a real bug.
+
+Now proceed with the workflow above in `/testbed`.

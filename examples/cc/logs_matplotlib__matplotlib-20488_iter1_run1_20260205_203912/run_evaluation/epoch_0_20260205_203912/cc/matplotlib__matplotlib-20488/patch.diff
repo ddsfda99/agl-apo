@@ -1,0 +1,21 @@
+diff --git a/lib/matplotlib/image.py b/lib/matplotlib/image.py
+index 95bb42d75..1a8f3d25c 100644
+--- a/lib/matplotlib/image.py
++++ b/lib/matplotlib/image.py
+@@ -533,8 +533,14 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):
+                 # that may have moved input values in/out of range
+                 s_vmin, s_vmax = vrange
+                 if isinstance(self.norm, mcolors.LogNorm):
+-                    if s_vmin < 0:
+-                        s_vmin = max(s_vmin, np.finfo(scaled_dtype).eps)
++                    # Ensure effective vmin remains strictly positive and finite
++                    # after the rescale/resample/unscale pipeline. Roundoff can
++                    # drive a small positive vmin to 0, which is invalid for LogNorm.
++                    orig_vmin = self.norm.vmin
++                    if (orig_vmin is not np.ma.masked
++                            and np.isfinite(orig_vmin) and orig_vmin > 0):
++                        if not np.isfinite(s_vmin) or s_vmin <= 0:
++                            s_vmin = np.nextafter(0, 1, dtype=scaled_dtype)
+                 with cbook._setattr_cm(self.norm,
+                                        vmin=s_vmin,
+                                        vmax=s_vmax,

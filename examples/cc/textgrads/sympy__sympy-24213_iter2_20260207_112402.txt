@@ -1,0 +1,84 @@
+## Where the agent’s solution is good
+- It correctly localized the failure to `UnitSystem._collect_factor_and_dimension` in the `Add` branch: it was using `dim != addend_dim`, which fails for *equivalent* but syntactically different dimensions like `velocity` vs `acceleration*time`.
+- The proposed fix direction—use the dimension system’s equivalence relation—is the right idea for this bug report.
+
+## Key problems / missed requirements
+
+### 1) The “test” didn’t actually validate the original symptom
+- The bug report’s failing case is **that `_collect_factor_and_dimension` raises** on `a1*t1 + v1`.  
+- The agent’s test never asserts the pre-fix behavior (i.e., that it raises before the change). They wrote a test, but immediately ran it only after patching (and even then without `pytest`).
+- Because `pytest` wasn’t available, they created a custom runner. That’s fine for local validation, but it means they never integrated with the repository’s actual test harness.
+
+### 2) The fix is incomplete: result dimension canonicalization is not addressed
+They changed the condition to:
+```py
+if not self.get_dimension_system().equivalent_dims(dim, addend_dim):
+    raise ValueError(...)
+```
+This avoids the exception, but:
+- The function returns `(factor, dim)` where `dim` is taken from the first addend and is not normalized. In the repro, `dim` becomes `Dimension(acceleration*time)` even though `v1` is `Dimension(velocity)`.
+- That might be acceptable, but many parts of SymPy units expect stable/canonical dimensions (especially for later comparisons, simplification, or pretty error messages). This change can introduce subtle downstream inconsistencies.
+
+Concrete improvement: when dimensions are equivalent but not equal, pick a canonical dimension to return (e.g., prefer a “derived dim” name like `velocity` if one operand already has it, or normalize via dependencies).
+
+### 3) The test assertion about factor was “fixed” by weakening it
+Originally they asserted the factor was `-47 * meter/second`, then changed it to just `-47` after observing behavior.
+- That reveals an important semantic mismatch: `_collect_factor_and_dimension` returns “scale factor” in canonical units, so in many cases it *should* carry the unit scale factors and leave dimension separate. Returning `-47` is consistent with current behavior (because `meter/second` becomes part of the *dimension*, not the scale factor), but then the test is no longer checking the key thing users care about: the **combined physical value**.
+- At minimum, the test should assert both:
+  - dimension equivalence, and
+  - that recombining factor+dimension corresponds to expected physical units, or that converting factor back to a quantity yields expected base units.
+
+### 4) They complied with “delete tests at last”, but that means no regression test remains
+The prompt asked to delete the temporary tests, but in typical workflows we still want a real regression test in the suite (or move it into an existing test file). The agent deleted the only verification artifact and left no permanent protection.
+
+If the evaluation expects repository tests to catch regressions, you need a proper test case committed into the test suite (even if the agent was told to delete temporary ones, a final regression test is usually expected). At minimum: add to an existing test file like `sympy/physics/units/tests/test_unitsystem.py`.
+
+## Concrete code improvements
+
+### A) Improve the `Add` handling: accept equivalent dims *and* choose a stable returned dimension
+Suggested logic:
+1. Compute `(factor, dim)` from first arg.
+2. For each addend:
+   - if `dim == addend_dim`: OK
+   - elif equivalent: OK, but possibly update `dim` to a “better” representative:
+     - If one of them is a “named” derived dimension (e.g. `Dimension(velocity)` rather than an expression), prefer that.
+     - Otherwise keep the first.
+3. Sum factors.
+
+A simple, safe heuristic:
+- If `dim != addend_dim` and `equivalent_dims(dim, addend_dim)` and `dim.name.is_Symbol` is False but `addend_dim.name.is_Symbol` is True, then set `dim = addend_dim` (prefer symbolic named dimension over composite expression).
+
+That way `a1*t1 + v1` returns `Dimension(velocity)` if `v1` is present, which is more intuitive and stable.
+
+### B) Add a real regression test (do not weaken it)
+Put it in an existing test module, e.g. `test_unitsystem.py`:
+
+- Verify no exception for equivalent dimensions in addition.
+- Verify returned dimension is equivalent to `velocity`.
+- Ideally verify canonicalization preference if you implement it (e.g. `dim == units.velocity`).
+
+Also, isolate mutation of global `SI` to avoid cross-test pollution:
+- Using `SI` directly and calling `SI.set_quantity_dimension` mutates a global singleton and can break other tests.
+- Better: create a fresh `UnitSystem.extend(...)` copy, or use a new `UnitSystem` with `dimsys_SI` so modifications are local.
+
+Example approach:
+```py
+from sympy.physics.units.systems.si import dimsys_SI
+from sympy.physics.units.unitsystem import UnitSystem
+from sympy.physics.units.definitions import meter, second
+# create local UnitSystem with same dimsys
+us = UnitSystem((meter, second), dimension_system=dimsys_SI)
+```
+(or extend SI but ensure you don’t mutate shared maps.)
+
+### C) Run tests in the real harness
+If `pytest` is unavailable in the environment, use `python -m sympy.testing.runtests` (SymPy has its own runner) instead of inventing a custom runner. That more closely matches CI expectations.
+
+## Summary of what to change
+1. Update `UnitSystem._collect_factor_and_dimension` `Add` branch:
+   - use `equivalent_dims` (keep)
+   - optionally normalize returned `dim` to a stable representative when equivalent but not equal.
+2. Add a regression test into an existing test file, ensuring no global SI pollution.
+3. Validate using SymPy’s test runner if `pytest` isn’t present.
+
+These changes will make the fix robust and prevent regressions beyond the single happy-path scenario the agent manually ran.

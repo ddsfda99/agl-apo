@@ -1,0 +1,58 @@
+diff --git a/sympy/physics/units/tests/test_quantities.py b/sympy/physics/units/tests/test_quantities.py
+index 25a68c7be5..af46ac0d7e 100644
+--- a/sympy/physics/units/tests/test_quantities.py
++++ b/sympy/physics/units/tests/test_quantities.py
+@@ -541,6 +541,29 @@ def test_issue_20288():
+     assert SI._collect_factor_and_dimension(expr) == (1 + E, Dimension(1))
+ 
+ 
++def test_function_collect_factor_and_dimension_tuple_shape_and_semantics():
++    # Ensure Function branch returns exactly a 2-tuple (factor, Dimension)
++    from sympy.core.function import Function
++    f = Function('f')
++    u = Quantity('u')
++    v = Quantity('v')
++    SI.set_quantity_dimension(u, energy)
++    SI.set_quantity_dimension(v, energy)
++    u.set_global_relative_scale_factor(2, joule)
++    v.set_global_relative_scale_factor(3, joule)
++    factor_dim = SI._collect_factor_and_dimension(f(u, v))
++    assert isinstance(factor_dim, tuple) and len(factor_dim) == 2
++    sf, dim = factor_dim
++    assert isinstance(dim, Dimension)
++    # The scale factor is the function applied to argument scale factors
++    assert sf == f(2, 3)
++    # Dimension is derived from the function's dimensional expression
++    # For generic functions with dimensionful args, it is not dimensionless
++    # and combining with dimensionless numbers should raise
++    from sympy.testing.pytest import raises
++    raises(ValueError, lambda: SI._collect_factor_and_dimension(1 + f(u, v)))
++
++
+ def test_prefixed_property():
+     assert not meter.is_prefixed
+     assert not joule.is_prefixed
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..fb066f6e1d 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -190,10 +190,15 @@ def _collect_factor_and_dimension(self, expr):
+                 dim /= idim**count
+             return factor, dim
+         elif isinstance(expr, Function):
+-            fds = [self._collect_factor_and_dimension(
+-                arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            # Collect factor and dimension for all arguments
++            fds = [self._collect_factor_and_dimension(arg) for arg in expr.args]
++            # Scale factor is the function applied to the argument scale factors
++            factor = expr.func(*(f for f, _ in fds))
++            # Dimension should always be a single Dimension. Use the full
++            # dimensional expression of the function (captures simplifications
++            # like exp(-log(x)) -> 1/x) and wrap it as a Dimension.
++            dim_expr = self.get_dimensional_expr(expr)
++            return factor, Dimension(dim_expr)
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:

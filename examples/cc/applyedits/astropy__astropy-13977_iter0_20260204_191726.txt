@@ -1,0 +1,83 @@
+You are an expert Python maintainer working in the code repository located at `/testbed` (Astropy). Your goal is to fix a specific bug in `astropy.units.Quantity.__array_ufunc__` related to duck-array interoperability.
+
+## Bug to fix
+When a foreign “duck” object (not a `Quantity`) is involved in a ufunc/op and unit conversion is attempted, `Quantity.__array_ufunc__` can raise a `ValueError` while trying to coerce/convert that foreign object to a numeric array. This prevents NumPy’s ufunc protocol from falling back to the reflected operation (`__radd__`-style behavior) implemented by the duck type.
+
+Expected behavior: in this specific incompatibility/dispatch situation, `Quantity.__array_ufunc__` should return `NotImplemented` (so NumPy can try the other operand’s `__array_ufunc__` / reflected op), rather than raising.
+
+## Key constraints (must follow)
+1. **Do not “fix” by catching broad exceptions.**  
+   - Do **not** use `except Exception:`.  
+   - Only intercept the narrow failure mode that corresponds to “foreign duck object is not convertible to numeric array during unit converter application” and only when it’s appropriate to allow ufunc negotiation.
+2. **Prefer principled dispatch checks over exception masking.**  
+   - Ideally detect foreign `__array_ufunc__` implementers before attempting conversion, or narrowly catch `TypeError`/`ValueError` from converter application and only then return `NotImplemented` when the failing input is a non-Quantity object that participates in ufunc dispatch.
+3. **Testing must be targeted and compatible with repo realities.**  
+   - Run only relevant tests (e.g. `pytest astropy/units/tests/...`) to avoid unrelated collection failures elsewhere in the repository.
+4. **Temporary tests must be deleted at the end.**  
+   - You must remove the test(s) you add after validating the fix.  
+   - Also ensure you don’t leave stray artifacts/directories (e.g., `.claude/`). The working tree should be clean except for the source fix.
+5. **No commits.** Do not commit changes.
+
+---
+
+## Work plan you must execute
+
+### Step 1 — Add a minimal failing test (repro)
+Create a temporary test in the most appropriate existing units test module (search for existing `__array_ufunc__` or operator/ufunc tests in `astropy/units/tests/` and extend one of them if possible; only create a new test file if truly necessary).
+
+The test must:
+- Define a minimal duck array similar to the user’s example: a dataclass wrapping a `Quantity`, implementing `NDArrayOperatorsMixin` and `__array_ufunc__`.
+- Reproduce the failure:
+  - `(1 * u.m) + DuckArray(1 * u.mm)` used to raise `ValueError`; after the fix it should succeed.
+- Assert **correct type and value**:
+  - The result should be a `DuckArray` (or whatever is appropriate given your duck implementation).
+  - Validate the numeric value is correct (e.g., equals `1.001 * u.m` or equivalent, depending on the duck’s return behavior).
+- (Optional but preferred) Instrument the duck’s `__array_ufunc__` to prove it was called (e.g., set a flag), so the test verifies negotiation happened rather than “Quantity swallowed it”.
+
+Run only this test module first:
+- `pytest -q astropy/units/tests/<relevant_file>.py -k <your_test_name>`
+
+### Step 2 — Locate the bug in the source
+Find `Quantity.__array_ufunc__` implementation (likely in `astropy/units/quantity.py`). Identify where it applies unit converters to inputs and triggers the `ValueError` via `_condition_arg` in `astropy/units/core.py`.
+
+### Step 3 — Implement a safe, narrow fix
+Implement behavior such that **when a non-Quantity input that participates in ufunc dispatch cannot be converted by Quantity’s converter**, `Quantity.__array_ufunc__` returns `NotImplemented` instead of raising.
+
+Guidance for an acceptable fix (choose one, or combine carefully):
+
+**Option A (preferred): Pre-check for foreign ufunc implementers**
+- If an input is not a `Quantity` and has an `__array_ufunc__` attribute (and is not a plain ndarray/numpy scalar), consider returning `NotImplemented` early so NumPy gives the other operand a chance.
+
+**Option B: Narrow exception handling around converter application**
+- When applying `converter(input_)`, catch only `TypeError` and `ValueError`.
+- Only return `NotImplemented` if:
+  - the failing input is **not** a `Quantity`, and
+  - it looks like a foreign array-like that wants to handle ufuncs (e.g., has `__array_ufunc__`), and
+  - the error corresponds to “not convertible to numeric array” (don’t overfit to message text if avoidable; keep the logic conservative).
+- Otherwise re-raise.
+
+**Do not**:
+- Catch all exceptions.
+- Return `NotImplemented` for normal invalid numeric inputs where Quantity should raise.
+- Add type checks that exclude many valid numpy-like objects incorrectly.
+
+### Step 4 — Validate with tests
+Re-run:
+- `pytest -q astropy/units/tests/<relevant_file>.py -k <your_test_name>`
+
+If your change could affect other unit/ufunc behavior, also run:
+- `pytest -q astropy/units/tests -k ufunc` (or similar small subset), but do not run the entire suite if it is known to have unrelated collection issues.
+
+### Step 5 — Cleanup
+- Delete the temporary test(s) you added.
+- Remove any stray artifacts/directories you created.
+- Ensure `git status --porcelain` is clean except for the intended source-code modification.
+
+---
+
+## Deliverables in your final response
+1. The exact source file(s) you modified and the patch summary (what logic changed and why it is narrowly scoped).
+2. The exact test command(s) you ran and their output summary.
+3. Confirmation that temporary tests were deleted and the working tree is clean.
+
+Proceed now: add the targeted failing test first, run it to see the failure, then implement the narrow fix in `Quantity.__array_ufunc__`, re-run the targeted tests, and finally delete the test(s).

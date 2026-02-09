@@ -1,0 +1,44 @@
+diff --git a/sympy/combinatorics/homomorphisms.py b/sympy/combinatorics/homomorphisms.py
+index bb7bdf32ba..5aa7578905 100644
+--- a/sympy/combinatorics/homomorphisms.py
++++ b/sympy/combinatorics/homomorphisms.py
+@@ -315,6 +315,12 @@ def _check_homomorphism(domain, codomain, images):
+         rels = domain.presentation().relators
+     identity = codomain.identity
+ 
++    # For permutation groups, map presentation generator symbols to domain generators
++    gens_syms = None
++    if isinstance(domain, PermutationGroup):
++        # Each generator in `gens` is a FreeGroupElement with array_form ((sym, 1),)
++        gens_syms = tuple(g.array_form[0][0] for g in gens)
++
+     def _image(r):
+         if r.is_identity:
+             return identity
+@@ -332,15 +338,19 @@ def _image(r):
+             # a generator - hence the need for
+             # both indices
+             while i < len(r):
+-                power = r_arr[j][1]
+-                if isinstance(domain, PermutationGroup) and r[i] in gens:
+-                    s = domain.generators[gens.index(r[i])]
++                if isinstance(domain, PermutationGroup):
++                    sym, power = r_arr[j]
++                    # Find the corresponding domain generator by symbol position
++                    idx = gens_syms.index(sym)
++                    s = domain.generators[idx]
++                    w = w*images[s]**power
+                 else:
++                    sym, power = r_arr[j]
+                     s = r[i]
+-                if s in images:
+-                    w = w*images[s]**power
+-                elif s**-1 in images:
+-                    w = w*images[s**-1]**power
++                    if s in images:
++                        w = w*images[s]**power
++                    elif s**-1 in images:
++                        w = w*images[s**-1]**power
+                 i += abs(power)
+                 j += 1
+             return w

@@ -1,0 +1,112 @@
+## High-level outcome
+
+The agent **successfully reproduced the bug with a failing test**, but then **never implemented a fix**. The trace ends right after confirming the failure (only 1 “REPLACED” in HTML instead of 2). So the task is incomplete: steps (3)-(5) were not done.
+
+---
+
+## What the agent got right
+
+- Correctly identified where `source-read` is emitted: `SphinxStandaloneReader.read_source()` in `sphinx/io.py`.
+- Correctly reasoned about the root cause direction: `.. include::` (Docutils include) works by **inserting raw lines into the parent document’s parser state machine**, not by producing a separate Sphinx “document” that will later be rendered. Therefore, `source-read` changes for the include file’s standalone parse do not affect the included content that is inserted into `index.rst` during parsing.
+- Wrote a minimal Sphinx test root and pytest test that reproduces the issue.
+
+---
+
+## Where the agent failed / missed requirements
+
+### 1) Test root naming mistake caused a full-suite failure first
+They created `/tests/roots/source-read-include` but referenced `testroot='source-read-include'`. Sphinx tests expect roots under `/tests/roots/test-<testroot>`. They later fixed this by creating `/tests/roots/test-source-read-include`, but wasted a full test run.
+
+**Improvement:** Always create roots as `tests/roots/test-<name>` for `pytest.mark.sphinx(testroot='<name>')`.
+
+### 2) No fix was implemented
+They planned to “Modify sphinx/directives/other.py Include.run to emit source-read and insert modified content”, but did not do it.
+
+### 3) Proposed fix direction is risky / incomplete
+Even if implemented, patching `sphinx/directives/other.py::Include.run()` to “emit source-read” is not straightforward because:
+
+- The include directive is implemented in **Docutils**, and it inserts lines via `state_machine.insert_input`. Sphinx’s wrapper `Include` class currently just resolves paths and calls `super().run()` (Docutils Include).
+- Sphinx’s `source-read` event signature is `(app, docname, source)`, where `docname` is a Sphinx docname; for includes you typically only have a filesystem path.
+- Sphinx substitutions intended for full documents might not be safe to run on include fragments (but for Yocto’s replacement use case it’s desired).
+
+The agent didn’t address these subtleties.
+
+### 4) Didn’t follow step (5): delete tests
+They were instructed to delete the tests at the end. They didn’t reach that step.
+
+---
+
+## Concrete improvements / how to actually fix it
+
+### Correct fix strategy
+To make `source-read` affect `.. include::` content, Sphinx must post-process the raw include text **at include-time**, before it is inserted into the parent document’s parsing stream.
+
+The most direct and contained fix is to override Sphinx’s `Include` directive to:
+1. Read the include file contents itself (instead of delegating to Docutils `Include.run()` for the normal rST inclusion path).
+2. Run the same processing hooks Sphinx runs for full documents (at least `source-read`).
+3. Insert the transformed lines into the state machine.
+
+This avoids trying to “reuse” the fact that Sphinx also reads include files as standalone docs (which is exactly what doesn’t work for inclusion).
+
+### Where to implement
+`sphinx/directives/other.py`, in `class Include(BaseInclude, SphinxDirective)`.
+
+Right now it does:
+```py
+rel_filename, filename = self.env.relfn2path(self.arguments[0])
+self.arguments[0] = filename
+self.env.note_included(filename)
+return super().run()
+```
+
+Instead, for the common “Include as rST source” case (no `:literal:`, no `:code:`, no `:parser:`), implement a custom inclusion path.
+
+### Required behavior to preserve
+You must preserve Docutils Include features:
+- `start-line`, `end-line`
+- `start-after`, `end-before`
+- `encoding`, `tab-width`
+- circular include detection (`document.include_log`)
+- `:literal:` and `:code:` modes should remain unchanged (delegate to Docutils)
+- record dependencies: `document.settings.record_dependencies.add(path)` and/or Sphinx env dependency tracking
+
+For Yocto’s bug, the critical path is the default rST inclusion (no options). But tests should still not break existing include behavior.
+
+### How to emit `source-read` correctly for include fragments
+You have two options:
+
+**Option A (recommended): introduce a new event** like `include-read` / `source-read-include` with `(docname, filename, source)`; but this is API surface change and not requested.
+
+**Option B (minimal change): reuse `source-read`**
+Call `self.env.events.emit('source-read', <synthetic_docname>, arg)`.
+
+But what to pass as `docname`?
+- For included files that are also “docs” (i.e., resolvable via `env.path2doc(filename)`), pass that docname.
+- Otherwise pass the *including* document’s docname (or something like `env.docname + '::include:' + relpath`).
+
+This is imperfect but aligns with the expectation: “apply the same substitution on included chunks”.
+
+### Test improvements
+Keep the agent’s test, but:
+- Assert **exactly** 2 occurrences if possible, not `>= 2`. (Otherwise it could mask duplicates.)
+- Also ensure that the included file is not separately rendered into an HTML page if it’s not supposed to be (depends on whether `included.rst` is a “found doc” in Sphinx scanning). In the agent’s current root, it *is* treated as a document and built into `included.html`, which is fine but not necessary. A better reproduction is using an include file with suffix `.inc` not in `source_suffix`, so it won’t be read as a standalone doc—this isolates the include mechanism and matches many real-world uses.
+
+Example: use `included.inc` instead of `included.rst`.
+
+### Don’t forget cleanup
+Per prompt, delete the added test files at the end (once validated locally). In real PR, you would keep tests—but here the instruction says remove them.
+
+---
+
+## Summary of what to tell the coding agent to do next
+
+1. Rename/ensure test root is `tests/roots/test-source-read-include` (they already did).
+2. Adjust test to include a non-document include file (e.g. `.inc`) to be precise.
+3. Implement custom include handling in `sphinx/directives/other.py::Include.run()` for the standard insertion case:
+   - read file
+   - apply slicing options
+   - emit `source-read` on the included text
+   - convert to lines and `state_machine.insert_input()`
+4. Run `pytest tests/test_source_read_include.py -q` to confirm pass.
+5. Run full `pytest -q` to ensure no regressions.
+6. Delete the reproduction tests as instructed.

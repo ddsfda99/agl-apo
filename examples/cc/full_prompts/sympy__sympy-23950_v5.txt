@@ -1,0 +1,27 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Reproduce the *exact* reported symptom first (e.g., does `Contains.as_set()` return `self` or raise `NotImplementedError` in this checkout?) and write a regression test around the observable requirement (e.g., `Piecewise(...Contains...)` must not crash and `Contains(x, S.Reals).as_set()` must return a `Set`).
+- Implement `Contains.as_set` (preferably via `_eval_as_set`) to return a **Set**, not a Boolean, and only in cases where the “solution set” meaning is sound (typically univariate, direct membership).
+- Make the implementation defensive: return the RHS set only when the LHS is exactly the sole free symbol (`len(free_symbols)==1` and `elem==that_symbol`); otherwise raise `NotImplementedError` to avoid incorrect semantics for multivariate or transformed expressions (`x+y`, `-x`, `f(x)`, etc.).
+- Avoid gating on `kind is NumberKind`; SymPy assumptions (`is_real`, `is_integer`, etc.) are the right mechanism if you do any refinement. A minimal correct fix can just return the RHS set in the supported case.
+- Tests should assert “no exception” and correct type/return value, not over-aggressive simplifications (e.g., don’t assume `Piecewise(...).rewrite(ITE) == 6` unless verified).
+
+Repo-Specific:
+- Put regression tests in canonical SymPy test modules (e.g., `sympy/sets/tests/test_contains.py`, and possibly an existing `test_piecewise.py`) rather than ad-hoc new files.
+- If the task instructions require deleting temporary tests, treat only standalone scratch test files/scripts as temporary; migrate the real assertions into existing test files before deleting the scratch files.
+- Don’t change unrelated logic/comments (e.g., confusing notes in `Contains.eval` or returning a `Set` from a Boolean evaluator); keep the patch tightly scoped.
+- If `pytest` CLI isn’t on PATH, try `python -m pytest`. If that’s unavailable, run a minimal Python snippet that constructs the failing `Piecewise` and calls the relevant methods to sanity-check.
+
+General:
+- Align fixes to the API contract: if callers expect a `Set` with methods like `.as_relational`/`.intersect`, ensure your method returns that type (or cleanly raises) rather than returning `self`.
+- Prefer general structural checks (free symbols, exact expression match) over narrow type checks (`isinstance(Symbol)`) to cover `Dummy` and other symbol-like objects, while still avoiding unsound generalization.
+- Keep regression coverage: deleting all new tests removes future protection; instead, integrate durable tests into the proper suite location.
+- Avoid brittle tests that depend on internal call paths (`as_relational` appearing in a specific file) or on optional simplification behavior; assert stable external behavior (no crash, correct returned set/type).

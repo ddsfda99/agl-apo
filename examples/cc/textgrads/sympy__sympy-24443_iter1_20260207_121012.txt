@@ -1,0 +1,104 @@
+## What the agent got right
+
+- **Reproduced the failure** using `DihedralGroup(3)` and `homomorphism(D3, D3, D3.generators, D3.generators)`, matching the prompt’s example.
+- **Located the bug** in `sympy/combinatorics/homomorphisms.py` inside `_check_homomorphism()` → `_image()`, at the `PermutationGroup` special-casing.
+- **Identified the root cause** correctly: the code was trying to match *elements* (`r[i]`) against the presentation generator list (`gens`), but `r[i]` can be an inverse or otherwise not comparable, so membership/indexing breaks.
+- **Implemented a plausible fix direction**: use the relator’s `array_form` symbols/powers instead of `r[i]` membership tests.
+- **Cleaned up temporary tests** per instruction.
+
+## Where the agent failed / missed requirements
+
+### 1) The “tests” were not real SymPy tests
+- They initially wrote pytest-based tests, but **pytest wasn’t installed**, so they switched to “manual execution” of test functions.
+- SymPy’s test suite expects tests to run under its existing harness (normally `pytest`), but the repo’s CI will have pytest. The important problem is:
+  - They **deleted the tests** at the end (as instructed), so there’s no lasting regression protection.
+  - The prompt asks to delete temporary tests at the end, but in practice for SymPy you should convert them into **proper permanent tests** (or move them into an existing test file) and only delete ad-hoc scratch files. The agent deleted everything, leaving no regression test.
+
+### 2) The fix is brittle and likely to break other cases
+They introduced:
+
+```python
+gens_syms = tuple(g.array_form[0][0] for g in gens)
+...
+idx = gens_syms.index(sym)
+s = domain.generators[idx]
+w = w*images[s]**power
+```
+
+Issues:
+- **Assumes** each `g` in `gens` has `array_form` like `((sym, 1),)`. That’s true for simple presentation generators, but not guaranteed across variations of `presentation()` (e.g. after simplification/elimination, or if `presentation()` caching returns a modified structure).
+- **Uses `.index` in a loop**: O(n²) over relator length; not huge, but avoidable with a dict.
+- **Potential mismatch between presentation generators and `domain.generators`**:
+  - The presentation returned by `PermutationGroup.presentation()` can have generators not in 1-to-1 positional correspondence with `domain.generators` (especially with `eliminate_gens=True`, or depending on internal choices). The original code tried to translate, but also assumed correspondence. The new code *still* assumes positional alignment, just via symbol extraction. That may be wrong for some groups/presentations.
+- The code now has **duplicated unpacking** (`sym, power = r_arr[j]`) inside both branches and retains the unused `i` concept even for the permgroup branch (where `r[i]` is no longer used). This is messy and error-prone.
+
+### 3) The fix changes behavior for non-permutation groups subtly
+They preserved the old `else` branch mostly, but they now unpack `sym, power = r_arr[j]` while still using `s = r[i]`. That’s odd but probably harmless; still, it suggests the code structure wasn’t carefully re-thought.
+
+### 4) They did not re-run the actual test suite
+They couldn’t run pytest, but they also didn’t run SymPy’s own test runner (SymPy has `python -m sympy`-style internal testing helpers in some setups) nor even `python -m compileall` to ensure syntax validity broadly.
+
+## Concrete improvements to make this correct and robust
+
+### A) Fix `_image()` properly for `PermutationGroup` using a symbol→generator map
+
+The simplest robust approach:
+
+1. For perm groups, work purely from the presentation relator `r.array_form`:
+   - Each entry is `(sym, power)` where `sym` is a free group symbol.
+2. Build a mapping from `sym` to the *corresponding domain generator element*.
+
+But you must get the correspondence right. The safe relationship is between:
+- `domain.presentation().generators` (these are free group elements) and
+- `domain.generators` (permutations)
+
+Those are produced together in `PermutationGroup.presentation()` and are intended to correspond. So build mapping like:
+
+```python
+# gens is presentation.generators (FreeGroupElements)
+# domain.generators is tuple of actual perms used in presentation construction
+sym_to_domgen = {g.array_form[0][0]: domain.generators[k] for k, g in enumerate(gens)}
+```
+
+Then relator evaluation:
+
+```python
+for sym, power in r.array_form:
+    domgen = sym_to_domgen[sym]
+    w *= images[domgen]**power
+```
+
+This avoids:
+- checking `r[i] in gens`
+- dealing with inverses as separate generators
+- `.index()` calls
+
+Also, once you do this, you **do not need** `i` at all for perm groups.
+
+### B) Keep non-permutation behavior unchanged (or simplify safely)
+For non-perm groups, the existing logic is awkward but historically motivated. Don’t change it unnecessarily.
+
+### C) Add a real regression test in the proper test module
+Instead of temporary test files, add to the existing SymPy combinatorics test suite, e.g.:
+- `sympy/combinatorics/tests/test_homomorphisms.py` (or wherever homomorphisms tests live)
+
+Test should cover:
+1. The reported minimal reproducer:
+   ```python
+   D3 = DihedralGroup(3)
+   homomorphism(D3, D3, D3.generators, D3.generators)
+   ```
+   and assert it doesn’t raise, and is iso.
+2. A relator that includes inverses is implicitly exercised, but you can also directly assert that the check passes by constructing the homomorphism with `check=True` (default).
+3. Optionally, a second group to avoid overfitting (e.g. `DihedralGroup(4)` or `SymmetricGroup(3)`).
+
+Even though the prompt said “delete tests”, in real contribution you should **not delete regression tests**. If you must follow the prompt literally, then at least ensure you can run them before deletion; but for passing upstream CI, permanent tests are required.
+
+### D) Ensure the fix does not crash when presentation generators aren’t length-matched
+Defensive check:
+- If `len(presentation.generators) != len(domain.generators)`, fall back to a different method or raise a clearer error. But likely they should match; still, asserting helps catch future breakage.
+
+---
+
+## Summary
+The agent’s core idea (use `array_form` symbol/power to handle inverses) is correct, but their implementation is brittle and they failed to leave a proper regression test. Implement a symbol→domain-generator dict derived from `presentation().generators`, evaluate relators using only `r.array_form`, and add a real test in the standard SymPy test suite.

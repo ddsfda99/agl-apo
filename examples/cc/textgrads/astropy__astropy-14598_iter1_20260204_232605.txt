@@ -1,0 +1,65 @@
+The agent actually fixed the reported bug correctly and got the new regression tests to pass. The “failure” in this trace is procedural/repo-hygiene: it left an unexpected untracked directory (`?? .claude/`) in the working tree at the end. Many evaluation harnesses treat *any* untracked/extra files as a failure (even if the functional fix is correct), because it violates “fix only that bug / don’t touch anything else”.
+
+Below are the specific issues and how to improve:
+
+## What the agent did well (core debugging)
+- **Wrote minimal, diagnostic tests** that reproduce the bug and verified that failing lengths (65, 67–69, etc.) actually produce `CONTINUE` output.
+- **Located the real root cause** in `Card._split()` long-string reconstruction:
+  - It was doing `value.rstrip().replace("''", "'")` **per segment**, which loses quote pairs when `''` is split across segment boundaries.
+- **Implemented the correct minimal fix** localized to long-string reconstruction (no regex changes), following the invariant: *concatenate raw segments first, then unescape once*.
+- **Validated** with targeted tests and some manual sanity checks.
+- **Deleted the temporary test file** per instructions.
+
+Functionally, the patch is aligned with the prompt’s constraints and is likely correct.
+
+## Why the agent still “failed” (process / repository cleanliness)
+### 1) Left untracked `.claude/` directory behind
+At the end:
+```
+ M astropy/io/fits/card.py
+?? .claude/
+```
+That untracked directory is unrelated to the requested bug fix. In many grading setups, leaving artifacts causes the run to be marked as failed.
+
+**How to improve**
+- Before finishing, always run:
+  - `git status --porcelain`
+  - remove any unrelated files/dirs you created (e.g., `rm -rf .claude/`)
+- If tooling auto-creates directories, the agent should detect and remove them unless explicitly allowed.
+
+### 2) The temporary test contained an incorrect assertion strategy (would be brittle post-fix)
+The “boundary split search” test ended with:
+```python
+assert failing_found is None, f"Found failing boundary-split..."
+```
+This asserts that **no failing case exists**, which is the opposite of what you want for a regression test. It happened to fail pre-fix (good) but would become a no-op post-fix and provides no positive guarantee of correctness besides “we didn’t find a failure”.
+
+Even though the agent deleted the temp test per instructions, during development this is a sign of shaky test design and could waste time.
+
+**How to improve**
+- For a regression test, either:
+  - hardcode a known failing `n` once you find it (e.g., `n=65`), and assert equality, or
+  - if searching, **assert that you found a case that uses `CONTINUE`** and then assert round-trip correctness for that `n`.
+  Example pattern:
+  - find `n` such that `"CONTINUE" in img` (not “fails”), then `assert c1.value == c2.value`
+  This ensures the test exercises the code path deterministically.
+
+## Minor review notes on the patch (not necessarily failing, but worth tightening)
+- The fix re-escapes quotes after unescaping:
+  ```python
+  unescaped = combined_raw.replace("''", "'")
+  escaped = unescaped.replace("'", "''")
+  valuecomment = f"'{escaped}' / {' '.join(comments)}"
+  ```
+  This is logically consistent, but a bit roundabout: you could also just use `combined_raw` directly (since it should already be FITS-escaped) *if you’re confident it always is*. The chosen approach is safer against malformed intermediate state, but it’s good to reason about potential double-escaping. (The agent’s approach is fine given the intent to standardize through logical value.)
+
+- It always includes `" / "` even if `comments` is empty, producing `"'<value>' / "`. That might already have been the behavior, but if not, it could be a subtle formatting change. (Doesn’t appear to break tests here, but it’s something to check against upstream expectations.)
+
+## Concrete steps to make this agent reliably pass
+1. Keep the code change in `astropy/io/fits/card.py` (it’s the right fix).
+2. Ensure *no* unrelated files remain:
+   - `rm -rf .claude/` (or whatever created it)
+   - verify `git status --porcelain` shows only the intended modification(s).
+3. (During development) improve the temporary search test logic as described, though the file is deleted at the end anyway.
+
+Net: the functional fix is good; the likely reason it “failed” is leftover repository artifacts (`.claude/`).

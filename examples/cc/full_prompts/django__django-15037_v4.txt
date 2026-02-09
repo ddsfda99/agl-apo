@@ -1,0 +1,29 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Fix the root cause before adding logic: if `inspectdb` decides “is_relation” from `get_relations()`, then any solution that only tweaks `inspectdb.py` won’t work when `relations` is missing the FK (e.g., SQLite table-level FK constraints).
+- For SQLite FK introspection, avoid parsing `sqlite_master.sql`; use authoritative metadata (`PRAGMA foreign_key_list(table)`), returning `{local_col: (remote_col, remote_table)}` so `inspectdb` actually emits a `ForeignKey`.
+- Add `to_field` only after you can reliably identify the referenced column: set `to_field` when `referenced_column != referenced_table_pk`. Cache PK lookups to avoid N+1 introspection.
+- Keep FK handling scoped/consistent with existing behavior: single-column FKs are the common supported path; don’t assume multi-column FKs work unless you explicitly implement them.
+- Temporary regression tests must be (a) backend-appropriate (vendor skips / feature guards, backend-neutral SQL if possible) and (b) assertion-robust (don’t overfit to quoting, ordering, or exact field-name normalization like `other` vs `other_id`).
+- Required workflow hygiene: if instructed to delete tests, delete the *entire method/file block* cleanly and verify the repo still imports/parses afterward.
+
+Repo-Specific:
+- Django `inspectdb` currently hinges on `connection.introspection.get_relations()` for relation detection; if that’s wrong/incomplete on a backend, `inspectdb` won’t emit relations at all (you’ll get `IntegerField`, etc.).
+- SQLite backend: current `get_relations()` logic is fragile if it parses CREATE TABLE SQL; prefer PRAGMA-based introspection (the repo already uses PRAGMA in `_get_foreign_key_constraints()`/constraints machinery—reuse that approach).
+- Don’t “merge” constraints into `relations` in `inspectdb.py` as a workaround; it risks overriding backend behavior and causing unrelated `inspectdb` test regressions (e.g., `test_custom_fields`).
+- Test execution in this repo commonly needs the specific harness/settings (e.g., `python -m tests.runtests --settings=tests.test_sqlite inspectdb` with proper `PYTHONPATH`). Run the whole relevant app (`inspectdb`) suite, not just the new test.
+
+General:
+- Never declare a failing test “flaky” without proving nondeterminism; treat it as a regression introduced by your changes until root-caused and fixed.
+- After any “cleanup” edit (especially deleting tests), run a fast parse check (`python -m py_compile …`) or a small test subset to ensure no syntax/indentation breakage.
+- Prefer the simplest correct data source and minimal surface-area changes: fix backend introspection where the metadata is produced, then keep `inspectdb` logic small (consume `relations` + PK comparison, with caching).
+- Avoid expensive repeated introspection inside loops; memoize results (PKs, referenced-table metadata) and build per-table maps once.
+- When writing transient tests for validation, design assertions around invariants (presence of `ForeignKey` + `to_field`) and allow acceptable variations (field naming/`db_column`) to reduce brittleness.

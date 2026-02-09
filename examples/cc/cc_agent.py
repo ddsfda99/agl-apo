@@ -2,8 +2,10 @@ import asyncio
 import json
 import os
 import platform
+import random
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import yaml
@@ -46,10 +48,55 @@ def load_dataset(path: str = "swe_debug.jsonl", epoch: int = 0, limit: Optional[
     return instances
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "rate limit" in text or "ratelimit" in text or "429" in text
+
+
+def _extract_retry_after_seconds(text: str) -> Optional[float]:
+    match = re.search(r"retry after\\s*(\\d+(?:\\.\\d+)?)", text, flags=re.IGNORECASE)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _rate_limit_sleep_seconds(exc: Exception, attempt: int, base_wait: float, max_wait: float) -> float:
+    retry_after = _extract_retry_after_seconds(str(exc))
+    if retry_after is not None:
+        return min(max_wait, retry_after)
+    delay = min(max_wait, base_wait * (2 ** min(attempt, 6)))
+    jitter = random.uniform(0, delay * 0.2)
+    return delay + jitter
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "authenticationerror" in text
+        or "unauthorized" in text
+        or "access token is missing or invalid" in text
+        or "invalid token" in text
+        or "http 401" in text
+        or "status code: 401" in text
+    )
+
+
+def _auth_sleep_seconds(exc: Exception, attempt: int, base_wait: float, max_wait: float) -> float:
+    retry_after = _extract_retry_after_seconds(str(exc))
+    if retry_after is not None:
+        return min(max_wait, retry_after)
+    delay = min(max_wait, base_wait * (2 ** min(attempt, 6)))
+    jitter = random.uniform(0, delay * 0.2)
+    return delay + jitter
+
+
 class CodingAgent(LitAgent):
     def __init__(
         self,
-        namespace: Literal["swebench", "starryzhang"] = "swebench",
+        namespace: Literal["swebench", "starryzhang"] = "starryzhang",
         full_set: Literal["princeton-nlp/SWE-bench", "SWE-bench-Live/SWE-bench-Live"] = "princeton-nlp/SWE-bench",
         split: str = "test",
         max_step: int = 5,
@@ -132,8 +179,8 @@ class CodingAgent(LitAgent):
             _logging.warning(f"⚠️  Falling back to default user_prompt: {self.user_prompt}")
             user_prompt_str = self.user_prompt
 
-        base_prompt_dir = os.path.join("examples", "cc", "full_prompts")
-        os.makedirs(base_prompt_dir, exist_ok=True)
+        base_prompt_dir = Path(__file__).resolve().parent / "full_prompts"
+        base_prompt_dir.mkdir(parents=True, exist_ok=True)
         safe_description = task.get("problem_statement", "").replace('"""', "'''")
         try:
             full_prompt = user_prompt_str.format(description=safe_description)
@@ -144,25 +191,25 @@ class CodingAgent(LitAgent):
         safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
         prefix = f"{safe_id}_v"
         next_version = 0
-        try:
-            for name in os.listdir(base_prompt_dir):
-                if not name.startswith(prefix) or not name.endswith(".txt"):
-                    continue
-                suffix = name[len(prefix):-4]
-                if suffix.isdigit():
-                    next_version = max(next_version, int(suffix) + 1)
-        except FileNotFoundError:
-            pass
+        for path in base_prompt_dir.iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            if not name.startswith(prefix) or not name.endswith(".txt"):
+                continue
+            suffix = name[len(prefix):-4]
+            if suffix.isdigit():
+                next_version = max(next_version, int(suffix) + 1)
 
-        prompt_dump_path = os.path.join(base_prompt_dir, f"{safe_id}_v{next_version}.txt")
+        prompt_dump_path = base_prompt_dir / f"{safe_id}_v{next_version}.txt"
         try:
-            with open(prompt_dump_path, "w", encoding="utf-8") as f:
-                f.write(full_prompt)
+            prompt_dump_path.write_text(full_prompt, encoding="utf-8")
             _logging.info(f"✅ Saved full prompt to {prompt_dump_path}")
         except Exception as e:
             _logging.warning(f"⚠️  Failed to save full prompt to {prompt_dump_path}: {e}")
 
         prediction: Optional[AgentResult] = None
+        controller: Optional[ClaudeController] = None
         try:
             # 1. init container
             controller = ClaudeController(
@@ -175,25 +222,64 @@ class CodingAgent(LitAgent):
                 llm.api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN", "dummy"),
             )
             # 2. execute task
-            prediction: AgentResult = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
+            prediction = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
             logger(run_id, task["instance_id"], json.dumps(prediction, indent=4))
-            del controller
         except Exception as e:
-            logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
-            _logging.error(f"❌ Rollout failed with exception: {e}", exc_info=True)
-            return 0.0  # Return zero reward on exception
+            error_msg = str(e).lower()
+            # Check for rate limit errors
+            is_rate_limit = any(
+                marker in error_msg
+                for marker in ["rate limit", "429", "too many requests", "quota", "throttle"]
+            )
+            if is_rate_limit:
+                wait_time = random.randint(30, 90)  # Random wait 30-90 seconds
+                _logging.warning(
+                    f"Rate limit detected, waiting {wait_time}s before retry. Error: {e}"
+                )
+                logger(run_id, task["instance_id"], f"Rate limit hit, waiting {wait_time}s")
+                time.sleep(wait_time)
+                # Retry once
+                try:
+                    prediction = controller.run_instance(task, max_step=self.max_step, run_method=self.run_method)
+                    logger(run_id, task["instance_id"], json.dumps(prediction, indent=4))
+                except Exception as retry_err:
+                    logger(run_id, task["instance_id"], f"Retry failed: {retry_err}")
+                    _logging.error(f"Retry failed with exception: {retry_err}", exc_info=True)
+                    return 0.0
+            else:
+                logger(run_id, task["instance_id"], f"Exception during rollout: {e}")
+                _logging.error(f"Rollout failed with exception: {e}", exc_info=True)
+                return 0.0  # Return zero reward on exception
+        finally:
+            if controller is not None:
+                try:
+                    controller.container.cleanup()
+                except Exception as cleanup_err:
+                    _logging.warning(f"Failed to cleanup container: {cleanup_err}")
 
         # 3. obtain rewards (evaluation result)
         reward = 0.0
         # empty patch
         if prediction["model_patch"] in ["", None]:
             return reward
+        if os.getenv("CC_SKIP_EVAL", "").lower() in {"1", "true", "yes"}:
+            _logging.info("CC_SKIP_EVAL enabled; skipping evaluation.")
+            return reward
 
         instance_id = prediction["instance_id"]
+        instance = self.dataset.get(instance_id)
+        if instance is None:
+            _logging.warning(
+                "Instance %s not found in dataset %s/%s; falling back to task payload.",
+                instance_id,
+                self.full_set,
+                self.split,
+            )
+            instance = task
 
         result = evaluate(
             prediction,
-            self.dataset[instance_id],
+            instance,
             self.cache_level,
             self.clean,
             self.force_rebuild,
@@ -410,6 +496,18 @@ async def gold_cc_agent_run_dataset(
     llm_proxy = LLMProxy(
         port=12358,
         store=store,
+        num_retries=30,  # 最多重试30次，够撑过速率限制
+        litellm_config={
+            "litellm_settings": {
+                "num_retries": 30,
+                "retry": {
+                    "timeout": 120,      # 每次请求2分钟超时
+                    "max_retries": 30,
+                    "min_wait": 15,      # 至少等15秒
+                    "max_wait": 300,     # 最多等5分钟
+                }
+            }
+        },
         callbacks=[
             "opentelemetry",
         ],
@@ -417,34 +515,44 @@ async def gold_cc_agent_run_dataset(
 
     await store.start()
     sleep_seconds = config.get("runtime", {}).get("sleep_seconds", 6)
+    rate_limit_max_retries = int(os.getenv("CC_RATE_LIMIT_MAX_RETRIES", "0"))  # 0 means unlimited
+    rate_limit_base_wait = float(os.getenv("CC_RATE_LIMIT_BASE_WAIT", "10"))
+    rate_limit_max_wait = float(os.getenv("CC_RATE_LIMIT_MAX_WAIT", "300"))
+    auth_max_retries = int(os.getenv("CC_AUTH_REFRESH_MAX_RETRIES", "0"))  # 0 means unlimited
+    auth_base_wait = float(os.getenv("CC_AUTH_REFRESH_BASE_WAIT", "10"))
+    auth_max_wait = float(os.getenv("CC_AUTH_REFRESH_MAX_WAIT", "120"))
 
     # Use CloudGPT configuration (same as cc_apo_algo.py)
     from utils.cloudgpt_aoai import get_openai_token_provider
     token_provider = get_openai_token_provider()
-    
-    llm_proxy.update_model_list(
-        [
-            ModelConfig(
-                model_name=f"{sonnet_name}",
-                litellm_params={
-                    "model": "azure/gpt-5-20250807",
-                    "api_base": "https://cloudgpt-openai.azure-api.net/",
-                    "api_version": "2025-04-01-preview",
-                    "azure_ad_token": token_provider(),
-                },
-            ),
-            ModelConfig(
-                model_name=f"{haiku_name}",
-                litellm_params={
-                    "model": "azure/gpt-5-nano-20250807",
-                    "api_base": "https://cloudgpt-openai.azure-api.net/",
-                    "api_version": "2025-04-01-preview",
-                    "azure_ad_token": token_provider(),
-                },
-            ),
-        ]
-    )
-    await llm_proxy.restart()
+
+    async def _refresh_llm_proxy_tokens() -> None:
+        token = token_provider()
+        llm_proxy.update_model_list(
+            [
+                ModelConfig(
+                    model_name=f"{sonnet_name}",
+                    litellm_params={
+                        "model": "azure/gpt-5-20250807",
+                        "api_base": "https://cloudgpt-openai.azure-api.net/",
+                        "api_version": "2025-04-01-preview",
+                        "azure_ad_token": token,
+                    },
+                ),
+                ModelConfig(
+                    model_name=f"{haiku_name}",
+                    litellm_params={
+                        "model": "azure/gpt-5-nano-20250807",
+                        "api_base": "https://cloudgpt-openai.azure-api.net/",
+                        "api_version": "2025-04-01-preview",
+                        "azure_ad_token": token,
+                    },
+                ),
+            ]
+        )
+        await llm_proxy.restart()
+
+    await _refresh_llm_proxy_tokens()
 
     # Put the LLM proxy address into the store as an address
     await store.add_resources(
@@ -464,7 +572,49 @@ async def gold_cc_agent_run_dataset(
             user_prompt=config["agent"]["user_prompt"],
         )
         with runner.run_context(agent=agent, store=store):
-            rollout = await runner.step(each)
+            rate_limit_retries = 0
+            auth_retries = 0
+            while True:
+                try:
+                    rollout = await runner.step(each)
+                    break
+                except Exception as exc:
+                    if _is_rate_limit_error(exc):
+                        rate_limit_retries += 1
+                        if rate_limit_max_retries and rate_limit_retries > rate_limit_max_retries:
+                            logging.error(
+                                f"Rate limit persisted after {rate_limit_max_retries} retries. Giving up on {each['instance_id']}."
+                            )
+                            raise
+                        sleep_for = _rate_limit_sleep_seconds(
+                            exc, rate_limit_retries, rate_limit_base_wait, rate_limit_max_wait
+                        )
+                        logging.warning(
+                            f"Rate limit encountered. Waiting {sleep_for:.1f}s before retry {rate_limit_retries} for {each['instance_id']}."
+                        )
+                        await asyncio.sleep(sleep_for)
+                        continue
+
+                    if _is_auth_error(exc):
+                        auth_retries += 1
+                        if auth_max_retries and auth_retries > auth_max_retries:
+                            logging.error(
+                                f"Auth refresh failed after {auth_max_retries} retries. Giving up on {each['instance_id']}."
+                            )
+                            raise
+                        logging.warning(
+                            f"Auth error encountered. Refreshing token before retry {auth_retries} for {each['instance_id']}."
+                        )
+                        await _refresh_llm_proxy_tokens()
+                        sleep_for = _auth_sleep_seconds(exc, auth_retries, auth_base_wait, auth_max_wait)
+                        logging.warning(
+                            f"Waiting {sleep_for:.1f}s after auth refresh before retrying {each['instance_id']}."
+                        )
+                        await asyncio.sleep(sleep_for)
+                        continue
+
+                    raise
+
             spans = await store.query_spans(rollout.rollout_id)
 
         if output_dir is None:
@@ -477,7 +627,11 @@ async def gold_cc_agent_run_dataset(
                 for span in spans:
                     f.write(json.dumps(span.model_dump()) + "\n")
 
-        time.sleep(sleep_seconds)
+        # Add jitter: sleep ± 30% to prevent synchronized requests
+        jitter = random.uniform(-0.3, 0.3)
+        actual_sleep = sleep_seconds * (1 + jitter)
+        logging.info(f"Sleeping {actual_sleep:.1f}s before next instance (jitter: {jitter*100:.1f}%)")
+        time.sleep(actual_sleep)
 
 
 if __name__ == "__main__":
@@ -513,7 +667,7 @@ if __name__ == "__main__":
         config = yaml.safe_load(f)
 
     if args.output_dir is not None:
-        args.output_dir = f"{args.output_dir}_{run_ts}"
+        # Use output directory as temporary storage for raw traces (will be deleted after extraction)
         os.makedirs(args.output_dir, exist_ok=True)
 
     if not args.official:

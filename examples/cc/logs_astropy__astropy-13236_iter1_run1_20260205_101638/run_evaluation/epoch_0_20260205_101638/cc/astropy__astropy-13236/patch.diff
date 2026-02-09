@@ -1,0 +1,96 @@
+diff --git a/astropy/table/table.py b/astropy/table/table.py
+index 5afe2127a..f7ac6d006 100644
+--- a/astropy/table/table.py
++++ b/astropy/table/table.py
+@@ -33,6 +33,7 @@ from .info import TableInfo
+ from .index import Index, _IndexModeContext, get_index
+ from .connect import TableRead, TableWrite
+ from .ndarray_mixin import NdarrayMixin
++from astropy.utils.exceptions import AstropyDeprecationWarning
+ from .mixins.registry import get_mixin_handler
+ from . import conf
+ 
+@@ -1242,7 +1243,19 @@ class Table:
+         # Structured ndarray gets viewed as a mixin unless already a valid
+         # mixin class
+         if (not isinstance(data, Column) and not data_is_mixin
+-                and isinstance(data, np.ndarray) and len(data.dtype) > 1):
++                and isinstance(data, np.ndarray) and data.dtype.names is not None):
++            # Adding a structured ndarray as a single table column currently wraps
++            # it as an NdarrayMixin. This behavior is deprecated: in 5.2 structured
++            # arrays will be added as Column instead of NdarrayMixin. To adopt the
++            # future behavior now, wrap `data` in `Column`.
++            import warnings as _warnings
++            _warnings.warn(
++                "Passing a structured ndarray as a single table column is deprecated; "
++                "in 5.2 structured arrays will be added as `Column` instead of `NdarrayMixin`. "
++                "Wrap `data` in `Column` to adopt the future behavior.",
++                AstropyDeprecationWarning,
++                stacklevel=3,
++            )
+             data = data.view(NdarrayMixin)
+             data_is_mixin = True
+ 
+diff --git a/astropy/table/tests/test_init_table.py b/astropy/table/tests/test_init_table.py
+index 370030143..34113ed63 100644
+--- a/astropy/table/tests/test_init_table.py
++++ b/astropy/table/tests/test_init_table.py
+@@ -7,6 +7,7 @@ import pytest
+ import numpy as np
+ 
+ from astropy.table import Column, TableColumns, Table, MaskedColumn
++from astropy.utils.exceptions import AstropyDeprecationWarning
+ import astropy.units as u
+ 
+ 
+@@ -284,7 +285,9 @@ class TestInitFromNdarrayStruct(BaseInitFromDictLike):
+         """Init with ndarray and copy=False and show that table uses reference
+         to input ndarray"""
+         self._setup(table_type)
+-        t = table_type(self.data, copy=False)
++        import pytest
++        with pytest.warns(AstropyDeprecationWarning, match=r"structured arrays will be added as `Column` instead of `NdarrayMixin`"):
++            t = table_type(self.data, copy=False)
+ 
+         t['x'][1] = 0  # Column-wise assignment
+         t[0]['y'] = 0  # Row-wise assignment
+diff --git a/astropy/table/tests/test_mixin.py b/astropy/table/tests/test_mixin.py
+index 2fdcd20d8..0b4b259f0 100644
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -14,6 +14,7 @@ from astropy.utils.data_info import ParentDtypeInfo
+ from astropy.table.table_helpers import ArrayWrapper
+ from astropy.coordinates import EarthLocation, SkyCoord
+ from astropy.table import Table, QTable, join, hstack, vstack, Column, NdarrayMixin
++from astropy.utils.exceptions import AstropyDeprecationWarning
+ from astropy.table import serialize
+ from astropy import time
+ from astropy import coordinates
+@@ -698,6 +699,11 @@ def test_skycoord_representation():
+ 
+ 
+ def test_ndarray_mixin():
++    # Expect a deprecation when passing a structured ndarray as a single column
++    import warnings
++    warnings.filterwarnings('error')
++    warnings.filterwarnings('default', category=AstropyDeprecationWarning)
++
+     """
+     Test directly adding a plain structured array into a table instead of the
+     view as an NdarrayMixin.  Once added as an NdarrayMixin then all the previous
+@@ -712,9 +718,12 @@ def test_ndarray_mixin():
+     d = np.arange(8, dtype='i8').reshape(4, 2).view(NdarrayMixin)
+ 
+     # Add one during initialization and the next as a new column.
+-    t = Table([a], names=['a'])
+-    t['b'] = b
+-    t['c'] = c
++    with pytest.warns(AstropyDeprecationWarning, match=r"structured arrays will be added as `Column` instead of `NdarrayMixin`"):
++        t = Table([a], names=['a'])
++    with pytest.warns(AstropyDeprecationWarning, match=r"structured arrays will be added as `Column` instead of `NdarrayMixin`"):
++        t['b'] = b
++    with pytest.warns(AstropyDeprecationWarning, match=r"structured arrays will be added as `Column` instead of `NdarrayMixin`"):
++        t['c'] = c
+     t['d'] = d
+ 
+     assert isinstance(t['a'], NdarrayMixin)

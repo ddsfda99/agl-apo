@@ -1,0 +1,57 @@
+diff --git a/astropy/table/table.py b/astropy/table/table.py
+index 5afe2127a..8e3689712 100644
+--- a/astropy/table/table.py
++++ b/astropy/table/table.py
+@@ -17,7 +17,7 @@ from astropy import log
+ from astropy.units import Quantity, QuantityInfo
+ from astropy.utils import isiterable, ShapedLikeNDArray
+ from astropy.utils.console import color_print
+-from astropy.utils.exceptions import AstropyUserWarning
++from astropy.utils.exceptions import AstropyUserWarning, AstropyDeprecationWarning
+ from astropy.utils.masked import Masked
+ from astropy.utils.metadata import MetaData, MetaAttribute
+ from astropy.utils.data_info import BaseColumnInfo, MixinInfo, DataInfo
+@@ -1240,9 +1240,18 @@ class Table:
+                                 'did not return a valid mixin column')
+ 
+         # Structured ndarray gets viewed as a mixin unless already a valid
+-        # mixin class
++        # mixin class. This implicit behavior is deprecated and will change
++        # in a future release; emit a deprecation warning guiding users to
++        # be explicit about intent.
+         if (not isinstance(data, Column) and not data_is_mixin
+                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):
++            warnings.warn(
++                "Passing a structured ndarray as a single Table column is deprecated; "
++                "wrap `data` in `Column(...)` to explicitly get an `NdarrayMixin`. "
++                "In astropy 5.2 structured arrays will be added as `Column` instead of `NdarrayMixin`.",
++                AstropyDeprecationWarning,
++                stacklevel=4,
++            )
+             data = data.view(NdarrayMixin)
+             data_is_mixin = True
+ 
+diff --git a/astropy/table/tests/test_mixin.py b/astropy/table/tests/test_mixin.py
+index 2fdcd20d8..6f0faad3b 100644
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -712,9 +712,16 @@ def test_ndarray_mixin():
+     d = np.arange(8, dtype='i8').reshape(4, 2).view(NdarrayMixin)
+ 
+     # Add one during initialization and the next as a new column.
+-    t = Table([a], names=['a'])
+-    t['b'] = b
+-    t['c'] = c
++    from astropy.utils.exceptions import AstropyDeprecationWarning
++    warn_match = (r"Passing a structured ndarray as a single Table column is deprecated;.*"
++                  r"In astropy 5\.2 structured arrays will be added as `Column` instead of `NdarrayMixin`\.")
++    with pytest.warns(AstropyDeprecationWarning, match=warn_match):
++        t = Table([a], names=['a'])
++    with pytest.warns(AstropyDeprecationWarning, match=warn_match):
++        t['b'] = b
++    with pytest.warns(AstropyDeprecationWarning, match=warn_match):
++        t['c'] = c
++    # Already an NdarrayMixin view: no warning expected
+     t['d'] = d
+ 
+     assert isinstance(t['a'], NdarrayMixin)

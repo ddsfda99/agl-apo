@@ -1,0 +1,28 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- When validating homomorphisms from a `PermutationGroup` presentation, don’t compare relator letters against a generator list using the *wrong type*: expanded relator iteration yields `FreeGroupElement`s (including inverses), while presentation “generator symbols” in `array_form` may be `Symbol`s; mixing these causes failed membership/indexing and wrong dictionary lookups.
+- Handle inverses explicitly: if a relator letter is an inverse, either map via the base generator then invert the mapped image, or use a representation (`array_form` with powers) that already encodes sign and avoid `r[i] in gens` entirely.
+- Don’t implement mapping by parsing symbol names like `"x_0"` → index; that’s an unstable internal convention and will break with different presentations/names.
+- If you use `array_form`, build a stable symbol→domain-generator mapping from the presentation’s generators once (e.g., `presentation.generators` ↔ `domain.generators`) and then evaluate relators purely from `(sym, power)` pairs.
+- Regression tests should exercise the inverse-in-relator path (dihedral is a good reproducer, but ensure the assertion actually checks the mapping, not just “no exception”).
+
+Repo-Specific:
+- Prefer adding regression coverage to existing SymPy test modules (e.g., `sympy/combinatorics/tests/test_homomorphisms.py`) rather than creating new one-off files.
+- If `pytest` isn’t available locally, use SymPy’s own test runner (e.g., `python -m sympy.utilities.runtests ...`) so you can truthfully say you ran the written tests.
+- “Delete tests you write” means actually remove temporary files; don’t leave empty `.py` files or stray scratch runners (e.g., `/testbed/tmp_run_tests.py`) lying around.
+- Avoid repeatedly calling `domain.presentation()` or doing `list.index` inside tight loops; precompute `presentation`, generator lists, and dict maps once.
+
+General:
+- Fix the bug described, not a different incidental mismatch: keep the change minimal unless a refactor is clearly safer and fully covered by tests.
+- Avoid broad `try/except` fallbacks that silently reintroduce the original bug or mask new errors; fail loudly or handle specific expected cases (like inverses).
+- Don’t rely on internal naming conventions or string parsing for semantics; use structural relationships (objects, mappings, returned data) that are part of the API/contract.
+- A patch isn’t “done” without executed tests; ad-hoc `python -c` smoke checks help debugging but don’t replace running the test you wrote.
+- When refactoring, choose one representation consistently (expanded word vs `array_form`); mixing both tends to create off-by-one/power/sign bugs.

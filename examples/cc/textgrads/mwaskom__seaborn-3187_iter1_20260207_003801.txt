@@ -1,0 +1,141 @@
+## High-level outcome
+
+The agent identified the correct area (`seaborn/_core/scales.py`, legend label generation via `ScalarFormatter`) but the **fix is incorrect/incomplete** and would likely **fail real-world expectations** even if the agent’s temporary test passed.
+
+It also didn’t satisfy the prompt requirement to “rerun your written test cases to validate that the bug is fixed” in a meaningful way (they ran a weak/indirect unit test, then deleted it; and the full suite was failing and left unresolved).
+
+---
+
+## Where the agent’s solution fails
+
+### 1) The fix produces *wrong formatting* (appending offset to each label)
+Matplotlib’s `ScalarFormatter` offset mechanism is not “multiply by this text”. It’s generally:
+
+- labels are formatted for `(value - offset) / 10**orderOfMagnitude`
+- offset text represents **additive** offset and/or scientific factor, displayed separately (e.g. `+1e6` or `×1e6`)
+
+By doing:
+
+```py
+labels = [f"{lab} {offset_text}" ...]
+```
+
+you get labels like `"2 1e6"` (or `"2 +1e6"`), which is **not equivalent** to `2e6`. In many cases it’s ambiguous or plainly wrong.
+
+What users typically want for a legend is:
+- either fully expanded numbers (`2000000`)
+- or scientific notation per label (`2×10^6`)
+- or a legend title that indicates the factor (e.g. title `"body_mass_mg (×10^6)"`) while keeping labels `2,4,6`
+
+The bug report specifically: “formatted without their multiplicative offset value”. That points to **order-of-magnitude scaling** (`formatter.orderOfMagnitude`) rather than additive offsets.
+
+### 2) `get_offset()` is the wrong API for this use
+`Formatter.get_offset()` returns a *rendered string*, intended for axis offset text, and is highly dependent on:
+- `axes.formatter.useoffset`
+- `axes.formatter.offset_threshold`
+- `axes.formatter.use_mathtext`
+- locale/minus sign settings, etc.
+
+It is not stable to parse/append to labels. Worse, it can be additive offset (`+1e6`) which is not a multiplicative factor at all.
+
+If you want the multiplicative part, you should use formatter internals that reflect magnitude scaling, e.g. for `ScalarFormatter`:
+- `formatter.orderOfMagnitude` (power of 10 factor)
+- and/or `formatter.get_useOffset()` / `formatter.offset` (additive)
+- and you must ensure the formatter has been “primed” by calling `formatter.format_ticks(...)` first (because those attributes are set during formatting).
+
+### 3) The temporary test is too weak and doesn’t validate correctness
+The test only checks that some substring like `e+`, `10^`, or `1e` appears somewhere in the labels. That would pass with lots of wrong behaviors (including additive offsets). It also does not validate that legend values correspond to the original data scale.
+
+A correct test should verify one of:
+- numeric equivalence: labels represent actual magnitudes (e.g. include `1e6` *and* show numbers that match the tick values after applying orderOfMagnitude), or
+- formatting contract: factor is communicated once (legend title) and labels are scaled appropriately.
+
+### 4) It doesn’t cover the reported reproduction path
+The bug report mentions seaborn objects API and `scatterplot`. The agent’s test directly instantiates `Continuous()._setup(...)` with `IntervalProperty()`; it doesn’t verify the actual legend output produced by `Plot(... pointsize=...)` or `scatterplot(... size=...)`.
+
+This is important because seaborn may post-process legend labels/titles elsewhere; a unit test at `Scale` level might not catch integration issues.
+
+### 5) “Full test suite had failures” left unaddressed
+The agent ran `pytest -q` and it showed multiple failures (`F...FFF...`). They didn’t inspect them. You can’t conclude the patch is safe without verifying these failures are unrelated.
+
+---
+
+## Concrete improvements to make it correct and robust
+
+### A) Fix strategy: incorporate *multiplicative scaling* correctly
+
+A robust approach in `ContinuousBase._setup` where legend labels are computed:
+
+1. Generate labels as seaborn currently does:
+```py
+labels = axis.major.formatter.format_ticks(locs)
+```
+
+2. If formatter is `ScalarFormatter`, after `format_ticks` it will have computed scaling state. Then:
+
+- Determine multiplicative scale factor from `orderOfMagnitude`.
+  - If `orderOfMagnitude != 0`, then the true value is `label * 10**orderOfMagnitude` (subject to whether it’s using mathtext/scientific).
+- Decide how to present it:
+  - Option 1 (recommended): **put factor in legend title** (clean, avoids per-label noise)
+  - Option 2: rewrite each label into full scientific notation (`2×10^6`)
+
+Since seaborn’s `_legend` tuple currently only stores `(values, labels)` and the legend title is resolved elsewhere from the variable name, the simplest minimally invasive change is Option 2: rewrite labels to include the multiplicative factor per-label in a clear way.
+
+However, the best UX is Option 1 (factor in title) but that requires plumbing title metadata through `_legend` or the legend-building code.
+
+**Minimal correct fix** (per-label scientific notation):
+- For each tick location `v` in `locs`, format it without using offset mechanics, e.g. using a formatter configured to not use offset, or use `ScalarFormatter(useOffset=False)` (varies by mpl version). Another approach: use `mpl.ticker.FuncFormatter(lambda x,pos: f"{x:g}")` for full values, but you’d lose nice formatting.
+- Or compute “display value” = `v / 10**orderOfMagnitude` and append `×10^{orderOfMagnitude}` (mathtext optional).
+
+Also account for additive offset (`formatter.offset`): if present and relevant, either expand fully or indicate `+offset` separately. But the bug report is about missing multiplicative factor, so focus on `orderOfMagnitude`.
+
+### B) Add a real integration test (and keep it while validating, delete at end)
+Write a test that exercises the reported path:
+
+- objects API:
+  - build a plot with `pointsize` mapped to large numbers
+  - call `p.plot()` to create figure
+  - inspect `fig.legends[0]` texts and verify they reflect `1e6` magnitude correctly (either in title or labels)
+
+- classic API (`scatterplot`):
+  - `sns.scatterplot(..., size=large_values)` and inspect legend texts
+
+The assertion should validate meaning, e.g.:
+- labels must include `10^6`/`1e6` and also the numeric part corresponds to millions, **or**
+- if you choose title-factor approach, title contains `×1e6` and labels are reduced accordingly.
+
+### C) Don’t use regex “contains e+”
+Instead, validate that the legend text corresponds to numeric magnitude. Example:
+- If locs include `2_000_000`, then legend label should parse to about `2e6` (or contain `2` plus `10^6` factor).
+- Or compare the string against expected patterns per rcParams.
+
+### D) Re-run full suite or at least verify failures are unrelated
+After patching, rerun:
+- `pytest tests/_core/test_plot.py::...` where legend creation happens
+- and the full suite if possible. If failures remain, inspect them; they may be caused by your new formatting.
+
+---
+
+## Specific code location and why it’s buggy
+
+The root cause is indeed here in `seaborn/_core/scales.py`:
+
+```py
+labels = axis.major.formatter.format_ticks(locs)
+new._legend = list(locs), list(labels)
+```
+
+For `ScalarFormatter`, `format_ticks` returns labels that are scaled by order-of-magnitude/offset, while the “offset text” that explains scaling is stored separately on the axis in normal plots. In legend context, seaborn never renders that offset text, so the scaling context is lost.
+
+But the agent’s attempt to “append `get_offset()`” is not semantically correct.
+
+---
+
+## Summary of recommended changes
+
+1. Replace the `get_offset()` append hack with correct handling of `ScalarFormatter` scaling (use `orderOfMagnitude`, and possibly disable offsets for legend formatting).
+2. Add integration tests for both objects API and `scatterplot`.
+3. Validate correctness by checking legend text meaning, not mere presence of `e+`.
+4. Re-run tests and ensure no new failures are introduced; if suite failures preexist in this environment, at least confirm your new test fails before fix and passes after fix.
+
+These changes will align with the bug description and produce legends that correctly communicate large magnitudes.

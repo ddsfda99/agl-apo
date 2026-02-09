@@ -1,0 +1,150 @@
+## High-level assessment
+
+The agent did **not complete the task** per the prompt. It:
+- Added a new failing test but **never got it to pass**.
+- Made a risky, likely incorrect change to core URL computation in `sphinx.ext.inheritance_diagram`.
+- **Did not clean up** (the prompt explicitly required deleting the tests at the end; instead it left behind a new `tests/roots/...` tree and a new test module).
+- Left the repository in a broken state (their new test still fails, and they didn’t re-run the full suite after code changes).
+
+## Where the agent went wrong (concrete)
+
+### 1) The reproduction test is fundamentally broken / unstable
+Problems in `tests/test_inheritance_diagram_svg_nested_links.py`:
+- It asserts `<object data="_images/inheritance-...svg">` exists in `index.html`, but **there is no inheritance diagram directive on the root page**. Adding autodoc didn’t add an inheritance diagram either. So the assertion was guaranteed to fail.
+- It assumes the embedded object tag will always use a specific relative path (`../_images/...`). This is fragile because:
+  - HTML builders compute `imgpath` using `relative_uri(self.get_target_uri(docname), '_images')`. That can vary based on builder (e.g. dirhtml) and output structure.
+- It tries to resolve the SVG file path by doing string replaces on `../`, which is incorrect and platform dependent. The SVG is stored in `outdir/_images`, not under `outdir/pkg/`.
+
+Net: the test was not actually asserting the bug described (“links inside SVG go to wrong pages when embedded from a subdir”), it was mostly asserting assumptions about HTML output.
+
+### 2) The fix approach is misguided / inconsistent with existing graphviz handling
+The bug description: **SVG links are evaluated relative to the SVG file location** (because it is embedded via `<object>`). Therefore, any link in the SVG must be relative to `_images/`, not relative to the embedding page.
+
+Sphinx already has a mechanism for SVG relinking in `sphinx.ext.graphviz.fix_svg_relative_paths()`, but:
+- That function rewrites *relative links* to be relative to `imgpath` (page’s image path). That’s for `graphviz` directive, not `inheritance_diagram`, and the inheritance extension *also injects URL attributes into dot* (more complex than the generic SVG rewriting).
+- The inheritance extension currently hardcodes `urls[reftitle] = "../" + refuri` in SVG mode, which is exactly the flawed “one size fits all” behavior.
+
+The agent tried to replace that with custom computations using:
+- `builder.get_relative_uri(...)` incorrectly (passing paths that are not docnames)
+- then later switched to `posixpath.relpath(..., start=builder.imagedir)` which is closer, but still incomplete:
+  - It ignores `builder.imagedir` potentially being customized.
+  - It does not preserve URL scheme/fragment robustly in all cases (they started to use `urlsplit/urlunsplit`, but only for `refuri` path and not for all cases).
+  - It assumes the SVG is always at `outdir/_images/` and that links should be computed relative to `_images/`. That’s true for default HTML builder, but needs to rely on `builder.imagedir` and `builder.images[...]` behavior, not assumptions.
+
+### 3) They didn’t validate the actual bug scenario
+The original report is specifically about:
+- inheritance diagram generated in a non-root source file (e.g. `my_package/index.rst`)
+- links in SVG go to `../my_class_1.html` instead of `../my_package/my_class_1.html`.
+
+The agent did not set up a test that creates:
+- a nested document that contains an inheritance diagram
+- documented targets that produce HTML pages in the same nested folder (or at least predictable target URIs)
+- then asserts that the SVG link points to the correct target path
+
+They instead relied on `autoclass` hoping it will generate `test.Foo.html` pages, but Sphinx `autodoc` does not generate per-class pages by default. That requires `autosummary` or explicit toctrees.
+
+### 4) Prompt requirement “delete tests at last” not followed
+They left:
+- `tests/test_inheritance_diagram_svg_nested_links.py`
+- `tests/roots/test-ext-inheritance_diagram_svg_nested/**`
+
+Even if the fix had worked, this violates the explicit instruction.
+
+## What a correct solution should look like
+
+### A) Correct test strategy (what to do instead)
+
+Use `autosummary` to generate real target pages so the `:class:` role resolves to concrete HTML files.
+
+Minimal test root:
+- `conf.py` enabling:
+  - `sphinx.ext.inheritance_diagram`
+  - `sphinx.ext.autodoc`
+  - `sphinx.ext.autosummary`
+  - `autosummary_generate = True`
+- A module `mypkg.py` with classes `Base`, `Child`.
+- `index.rst` with toctree to `sub/index`
+- `sub/index.rst`:
+  - `.. autosummary::` listing `mypkg.Base`, `mypkg.Child` (so pages `mypkg.Base.html`, etc, are generated)
+  - `.. inheritance-diagram:: mypkg.Child`
+
+Then the test:
+1. Build HTML with `graphviz_output_format='svg'`.
+2. Open `outdir/sub/index.html`, extract embedded SVG filename from `<object data="...">`.
+3. Read the SVG file from `outdir/_images/<name>.svg`.
+4. Assert that SVG contains links to the generated class pages with correct relative prefix from `_images`:
+   - expected `xlink:href="../sub/mypkg.Base.html#..."` (or similar depending on how autosummary pages are placed)
+   - importantly: ensure it does **not** point to `../mypkg.Base.html` if the real page is under `sub/`.
+
+To make this robust:
+- compute expected target uri using `app.builder.get_target_uri(docname)` for the autosummary docnames, then compute relative path from `_images/` using `posixpath.relpath(expected_uri, start=builder.imagedir)`.
+
+### B) Correct fix strategy (how to fix `inheritance_diagram`)
+
+The inheritance extension should generate URLs in dot that are correct **from the SVG file’s location**.
+
+Key idea:
+- When embedded via `<object data="_images/foo.svg">`, browser resolves `<a xlink:href="...">` relative to `_images/`.
+- Therefore, URLs placed into dot (`URL="..."`) must be relative to `_images/`, not relative to the document.
+
+Implementation sketch:
+- Keep existing behavior for PNG.
+- For SVG:
+  - For each pending_xref, Sphinx provides either `refuri` (relative to current doc) or `refid` (anchor within current doc).
+  - Convert that into an *absolute output-relative path* (posix style) relative to the HTML output root (e.g. `sub/mypkg.Base.html`).
+  - Then compute path relative to `builder.imagedir` (e.g. `_images`) and store that.
+  - Preserve fragments.
+
+You should **not** use `builder.get_relative_uri()` here because it expects docnames, not already-rendered paths. Use `posixpath.relpath()`.
+
+Pseudo:
+
+```py
+from urllib.parse import urlsplit, urlunsplit
+import posixpath
+
+page_uri = builder.get_target_uri(builder.current_docname)  # e.g. "sub/index.html"
+page_dir = posixpath.dirname(page_uri)                     # "sub"
+svg_dir = builder.imagedir                                 # "_images"
+
+def to_svg_relative(refuri: str) -> str:
+    parts = urlsplit(refuri)
+    # refuri is relative to current page
+    abs_path = posixpath.normpath(posixpath.join(page_dir, parts.path))
+    rel_path = posixpath.relpath(abs_path, start=svg_dir)
+    return urlunsplit(('', '', rel_path, parts.query, parts.fragment))
+
+# for refid case:
+abs_path = posixpath.normpath(posixpath.join(page_dir, page_uri_filename))
+rel_path = posixpath.relpath(abs_path, start=svg_dir)
+return rel_path + '#' + refid
+```
+
+This directly addresses the bug described.
+
+### C) Clean-up requirement
+After validating, delete:
+- the custom test file
+- the custom test root directory
+
+(Though in real Sphinx development you’d keep the regression test; but the prompt explicitly says to delete them.)
+
+## Concrete improvements to the agent’s changes
+
+1) **Revert** the current partially-broken modifications in `inheritance_diagram.py` (they have multiple iterations; settle on one correct implementation, or reset to baseline and apply the correct algorithm above).
+2) Replace the current new test with the autosummary-based approach so:
+   - class xrefs actually resolve to HTML files
+   - nested paths are meaningful
+3) Ensure the test asserts the *actual bug*: that link inside SVG points to nested target, not to root-level.
+4) Run:
+   - `pytest tests/test_ext_inheritance_diagram.py -q`
+   - and the new test
+   - then full `pytest -q` (or at least relevant subset)
+5) Finally, delete the added tests (per prompt) once validated.
+
+## Summary of the key miss
+The agent spent most effort fighting HTML output expectations (`<object data=...>`) and autodoc behavior, rather than:
+- generating predictable nested target pages
+- computing SVG-link-relative URLs from `_images/`
+
+That’s why they never reached a passing state and never conclusively fixed the reported 404 issue.

@@ -1,0 +1,48 @@
+diff --git a/sklearn/feature_extraction/tests/test_text.py b/sklearn/feature_extraction/tests/test_text.py
+index 7b7697ff4..cc5991625 100644
+--- a/sklearn/feature_extraction/tests/test_text.py
++++ b/sklearn/feature_extraction/tests/test_text.py
+@@ -98,6 +98,24 @@ def test_strip_accents():
+     assert strip_accents_unicode(a) == expected
+ 
+ 
++def test_strip_accents_decomposed_nfkd():
++    # Regression test for decomposed unicode input (NFKD pre-normalized)
++    # Using 'e' + COMBINING ACUTE ACCENT (U+0301)
++    decomposed = 'Cafe\u0301'  # 'Café' in decomposed form
++    composed = 'Caf\u00e9'
++
++    # The unicode accent stripper should remove combining marks even if input
++    # is already in NFKD form.
++    assert strip_accents_unicode(decomposed) == 'Cafe'
++    assert strip_accents_unicode(composed) == 'Cafe'
++
++    # Also test through the CountVectorizer preprocessing pipeline
++    cv = CountVectorizer(strip_accents='unicode')
++    preprocess = cv.build_preprocessor()
++    assert preprocess(decomposed) == 'cafe'
++    assert preprocess(composed) == 'cafe'
++
++
+ def test_to_ascii():
+     # check some classical latin accentuated symbols
+     a = 'àáâãäåçèéêë'
+diff --git a/sklearn/feature_extraction/text.py b/sklearn/feature_extraction/text.py
+index bb5a9d646..1b4519b20 100644
+--- a/sklearn/feature_extraction/text.py
++++ b/sklearn/feature_extraction/text.py
+@@ -130,10 +130,10 @@ def strip_accents_unicode(s):
+         ASCII equivalent.
+     """
+     normalized = unicodedata.normalize('NFKD', s)
+-    if normalized == s:
+-        return s
+-    else:
+-        return ''.join([c for c in normalized if not unicodedata.combining(c)])
++    # Always strip combining marks after normalization. Avoid fast-path
++    # returning the input unchanged for already-normalized strings that may
++    # still contain combining marks.
++    return ''.join([c for c in normalized if not unicodedata.combining(c)])
+ 
+ 
+ def strip_accents_ascii(s):

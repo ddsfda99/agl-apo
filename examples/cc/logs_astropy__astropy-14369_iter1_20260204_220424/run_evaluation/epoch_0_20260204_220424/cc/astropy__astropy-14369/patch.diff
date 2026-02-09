@@ -1,0 +1,31 @@
+diff --git a/astropy/units/format/cds.py b/astropy/units/format/cds.py
+index 307e987ed..608d4add9 100644
+--- a/astropy/units/format/cds.py
++++ b/astropy/units/format/cds.py
+@@ -182,11 +182,14 @@ class CDS(Base):
+         def p_division_of_units(p):
+             """
+             division_of_units : DIVISION unit_expression
+-                              | unit_expression DIVISION combined_units
++                              | unit_expression DIVISION unit_expression
++                              | division_of_units DIVISION unit_expression
+             """
+             if len(p) == 3:
++                # Leading division, e.g. "/s" -> s^-1
+                 p[0] = p[2] ** -1
+             else:
++                # Ensure left-associative chaining: (left / right)
+                 p[0] = p[1] / p[3]
+ 
+         def p_unit_expression(p):
+@@ -260,7 +263,9 @@ class CDS(Base):
+         def p_error(p):
+             raise ValueError()
+ 
+-        return parsing.yacc(tabmodule="cds_parsetab", package="astropy/units")
++        # Use a runtime-generated parser tables module name to ensure
++        # grammar updates take effect without relying on precompiled tables.
++        return parsing.yacc(tabmodule="cds_parsetab_runtime", package="astropy/units")
+ 
+     @classmethod
+     def _get_unit(cls, t):

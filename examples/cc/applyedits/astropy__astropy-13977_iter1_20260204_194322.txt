@@ -1,0 +1,191 @@
+You are an expert Python maintainer working in the Astropy repository at `/testbed`. Your goal is to fix a **specific, narrowly-scoped bug** in `astropy.units.Quantity.__array_ufunc__` involving duck-array interoperability and NumPy ufunc dispatch.
+
+You will be evaluated strictly on:
+- correctness and narrowness of the fix (no over-broad exception masking),
+- creating a repro that matches the *actual* reported failure mode,
+- running only targeted tests,
+- **removing temporary tests cleanly**, and
+- leaving **no stray artifacts** and a clean working tree (except the intended source fix).
+
+No commits.
+
+---
+
+# Bug to fix (precise)
+
+When a **foreign “duck” object** (not a `Quantity`) participates in a ufunc/op with a `Quantity`, and **unit conversion is attempted**, `Quantity.__array_ufunc__` may raise a `ValueError` (or `TypeError`) **while applying the unit converter to the foreign object** (i.e., during the `converter(input_)` step after converters are determined).  
+
+This exception prevents NumPy from falling back to the duck type’s reflected/override dispatch (`__array_ufunc__` on the duck).  
+
+**Expected behavior:** In this specific situation, `Quantity.__array_ufunc__` should return `NotImplemented` so NumPy can try the other operand’s ufunc implementation.
+
+**Critical nuance:** The bug is **NOT** about failures inside `converters_and_unit()` (or `can_have_arbitrary_unit()`); do not “fix” by catching exceptions around converter discovery. The fix must target failures during **converter application** only.
+
+---
+
+# Hard constraints (must follow)
+
+1. **No broad exception catching**
+   - Do **not** use `except Exception`.
+   - Only intercept the narrow failure mode: error raised from attempting to apply a unit converter to a **non-Quantity foreign ufunc-dispatching input**.
+
+2. **Do not catch around `converters_and_unit()`**
+   - Do not add a try/except around `converters_and_unit(...)`.
+   - If converter discovery fails, that’s generally a real unit/ufunc support error and should raise.
+
+3. **Return `NotImplemented` only when appropriate**
+   Return `NotImplemented` only when:
+   - the failing input is **not** a `Quantity`, AND
+   - it **participates in ufunc dispatch** (i.e., defines `__array_ufunc__` and is not opting out with `__array_ufunc__ = None`), AND
+   - the failure occurred when applying a converter (`converter(...)`) to that input’s `.value` (or input itself), i.e. “cannot coerce to numeric array” during conversion.
+   Otherwise, re-raise.
+
+4. **Targeted testing only**
+   - Run only the specific test you add first.
+   - Avoid running large subsets known to fail for unrelated reasons.
+   - If you run any extra tests, keep it to the same module.
+
+5. **Temporary tests must be deleted at the end**
+   - Add a failing test to reproduce.
+   - Use it to validate the fix.
+   - Then **delete it cleanly** without leaving formatting churn or stray comments/blanket rewrites.
+   - Do not rewrite entire test files.
+
+6. **No stray artifacts**
+   - Do not create `.claude/` or any tool directories.
+   - Final `git status --porcelain` must be clean except for the source change.
+
+---
+
+# Work plan (execute in order)
+
+## Step 1 — Add a minimal failing repro test that matches the *real* bug
+
+### Find the right test module
+Search in `astropy/units/tests/` for existing tests touching `__array_ufunc__` / ufunc/operator behavior (likely `test_quantity_ufuncs.py`). Prefer adding a small test there with a minimal insertion edit.
+
+### The duck type requirements (important to reproduce the *correct* failure path)
+Your repro must fail **during converter application**, not during `converters_and_unit()` discovery.
+
+To ensure that:
+- The duck object should look “quantity-like” enough that Astropy decides a unit conversion is needed, *but* its underlying numeric payload must be non-convertible to a numeric array so the converter raises.
+- Concretely, make the duck have:
+  - a `.unit` attribute (an actual `astropy.units.Unit`),
+  - a `.value` attribute that is **intentionally not convertible to a numeric array** (e.g., an object array containing a sentinel object, or a custom class instance), such that the unit conversion converter will choke when it tries to coerce to float/ndarray.
+- The duck must implement `NDArrayOperatorsMixin` and `__array_ufunc__` so it can handle the ufunc if it gets the chance.
+- Instrument the duck’s `__array_ufunc__` (e.g., a class attribute flag) so the test can assert it was called, proving negotiation happened.
+
+### What the repro should assert
+- Expression: `(1 * u.m) + DuckArray(1 * u.mm)`-like scenario, but crafted so that:
+  - `Quantity.__array_ufunc__` will attempt converter application on the duck (and currently raises),
+  - after your fix, `Quantity.__array_ufunc__` returns `NotImplemented`, and then duck’s `__array_ufunc__` is called and returns a `DuckArray`.
+- Assert:
+  - result is a `DuckArray` (or the duck’s chosen output),
+  - numeric/unit value is correct (e.g., `1.001 * u.m`),
+  - duck’s `__array_ufunc__` flag indicates it was called.
+
+### Run only this test first
+Example:
+```bash
+pytest -q astropy/units/tests/test_quantity_ufuncs.py -k test_quantity_duckarray_converter_failure_returns_notimplemented
+```
+Confirm it fails with a `ValueError`/`TypeError` originating from the converter-application path (inside `Quantity.__array_ufunc__` when applying `converter(...)`), not from `converters_and_unit()`.
+
+If the failure is instead from `can_have_arbitrary_unit()` or another earlier path, your test is wrong—adjust the duck to avoid that (e.g., ensure `.unit` is a proper Unit, avoid triggering equality comparisons, etc.).
+
+---
+
+## Step 2 — Locate the exact converter-application site in the source
+
+Open `astropy/units/quantity.py` and find `Quantity.__array_ufunc__`.
+
+Identify the loop/section that does something equivalent to:
+
+```python
+arrays = []
+for input_, converter in zip(inputs, converters):
+    input_ = getattr(input_, "value", input_)
+    arrays.append(converter(input_) if converter else input_)
+```
+
+This is the only place you should be handling the narrow failure.
+
+---
+
+## Step 3 — Implement the narrow fix (do NOT broaden scope)
+
+### Allowed approach
+Add **narrow exception handling around `converter(input_)` only**:
+
+- Catch only `TypeError` and `ValueError` originating from converter application.
+- Decide whether to return `NotImplemented` based on the original input object (or the `.value` extraction) and dispatch participation.
+
+### Dispatch participation criteria (be careful)
+Treat an object as a “foreign ufunc implementer” only if:
+- it has `__array_ufunc__` attribute, AND
+- `getattr(obj, "__array_ufunc__", None) is not None` (so you don’t treat opt-out objects as implementers), AND
+- it is not a plain `np.ndarray` or numpy scalar.
+
+Do **not** rely solely on `hasattr(x, "__array_ufunc__")` without the `is not None` check.
+
+### Required behavior
+- If converter application fails for a foreign ufunc implementer (non-Quantity), return `NotImplemented`.
+- Otherwise re-raise the error unchanged.
+
+### Explicit non-goals
+- Do not change behavior for genuine invalid unit operations between quantities.
+- Do not change behavior for unsupported ufuncs/methods.
+- Do not add try/except around converter discovery.
+
+---
+
+## Step 4 — Validate
+
+Re-run only your targeted test:
+```bash
+pytest -q astropy/units/tests/test_quantity_ufuncs.py -k test_quantity_duckarray_converter_failure_returns_notimplemented
+```
+
+If you run anything else, keep it to the same module only:
+```bash
+pytest -q astropy/units/tests/test_quantity_ufuncs.py
+```
+Do not run broad directories/subsets that may have unrelated failures.
+
+---
+
+## Step 5 — Cleanup (mandatory)
+
+1. Delete the temporary test you added.
+   - Remove only the added lines; do not rewrite the whole file.
+   - No leftover comments, whitespace churn, or formatting changes.
+
+2. Ensure no stray artifacts exist (e.g., `.claude/`).
+3. Confirm clean tree:
+   - `git status --porcelain` must show only the intended source change (and ideally nothing else if tests were removed).
+
+---
+
+# Deliverables (in your final response)
+
+1. **Exact source file(s) modified** and a brief patch summary explaining:
+   - where you added the narrow handling,
+   - why it returns `NotImplemented` only for the specific duck-converter failure case.
+
+2. **Exact test command(s)** you ran and a short summary of results.
+
+3. Confirmation:
+   - temporary tests deleted,
+   - no stray artifacts,
+   - working tree clean (`git status --porcelain` output summarized).
+
+---
+
+## Important reminders (based on prior failures to avoid)
+- Your repro must trigger failure **during converter application** (not `converters_and_unit` / `can_have_arbitrary_unit`).
+- Do **not** catch exceptions around `converters_and_unit()`.
+- Do **not** broaden dispatch checks; ensure `__array_ufunc__` is not `None`.
+- Do **not** rewrite whole test files; use minimal edits and delete cleanly.
+- Do **not** leave `.claude/` or any extra directories.
+
+Proceed now: add the temporary failing test first, run it to confirm it fails in the correct place, then implement the narrow fix in `Quantity.__array_ufunc__`, re-run the targeted test, and finally delete the temporary test and confirm a clean working tree.

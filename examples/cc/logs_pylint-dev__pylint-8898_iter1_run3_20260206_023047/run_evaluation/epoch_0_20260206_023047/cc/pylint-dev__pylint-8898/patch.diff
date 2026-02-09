@@ -1,0 +1,109 @@
+diff --git a/pylint/config/argument.py b/pylint/config/argument.py
+index 30a5fd175..b613ceddf 100644
+--- a/pylint/config/argument.py
++++ b/pylint/config/argument.py
+@@ -111,18 +111,77 @@ def _regex_transformer(value: str) -> Pattern[str]:
+         raise argparse.ArgumentTypeError(msg) from e
+ 
+ 
+-def _regexp_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions."""
++def _split_unescaped_commas(value: str) -> list[str]:
++    """Split a string on unescaped commas.
++
++    Commas preceded by a single backslash (e.g., '\\,') are treated as literal
++    commas and do not delimit a new entry. The escaping backslash is removed
++    from the resulting entries. Double backslashes before a comma ('\\\\,') will
++    escape the backslash itself and still split on the comma.
++    """
++    parts: list[str] = []
++    buf: list[str] = []
++    backslash_count = 0
++    for ch in value:
++        if ch == ",":
++            if backslash_count % 2 == 0:
++                # Unescaped comma: finalize current buffer
++                segment = "".join(buf).strip()
++                if segment:
++                    parts.append(segment)
++                buf = []
++                backslash_count = 0
++            else:
++                # Escaped comma: remove one escape and keep the comma
++                if buf and buf[-1] == "\\":
++                    buf.pop()
++                buf.append(",")
++                backslash_count = 0
++        else:
++            buf.append(ch)
++            if ch == "\\":
++                backslash_count += 1
++            else:
++                backslash_count = 0
++    last = "".join(buf).strip()
++    if last:
++        parts.append(last)
++    return parts
++
++
++def _regexp_csv_transfomer(value: str | Sequence[str]) -> Sequence[Pattern[str]]:
++    """Transforms a comma separated list of regular expressions.
++
++    Supports escaping commas with a backslash ('\\,') to allow regex quantifiers
++    like '{m,n}'. Also preserves native lists from configuration loaders (e.g., TOML).
++    """
++    # Preserve native lists/tuples (e.g., TOML arrays)
++    raw_values: Sequence[str]
++    if isinstance(value, (list, tuple)):
++        raw_values = value
++    else:
++        raw_values = _split_unescaped_commas(value)
++
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in raw_values:
+         patterns.append(_regex_transformer(pattern))
+     return patterns
+ 
+ 
+-def _regexp_paths_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions paths."""
++def _regexp_paths_csv_transfomer(value: str | Sequence[str]) -> Sequence[Pattern[str]]:
++    """Transforms a comma separated list of regular expressions paths.
++
++    Supports escaping commas with a backslash ('\\,') and preserves native lists
++    from configuration loaders.
++    """
++    raw_values: Sequence[str]
++    if isinstance(value, (list, tuple)):
++        raw_values = value
++    else:
++        raw_values = _split_unescaped_commas(value)
++
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in raw_values:
+         patterns.append(
+             re.compile(
+                 str(pathlib.PureWindowsPath(pattern)).replace("\\", "\\\\")
+@@ -133,7 +192,7 @@ def _regexp_paths_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+     return patterns
+ 
+ 
+-_TYPE_TRANSFORMERS: dict[str, Callable[[str], _ArgumentTypes]] = {
++_TYPE_TRANSFORMERS: dict[str, Callable[[str | Sequence[str]], _ArgumentTypes]] = {
+     "choice": str,
+     "csv": _csv_transformer,
+     "float": float,
+diff --git a/pylint/utils/utils.py b/pylint/utils/utils.py
+index fa7f7b92f..f6fb4b708 100644
+--- a/pylint/utils/utils.py
++++ b/pylint/utils/utils.py
+@@ -209,7 +209,7 @@ def register_plugins(linter: PyLinter, directory: str) -> None:
+                     imported[base] = 1
+ 
+ 
+-def _splitstrip(string: str, sep: str = ",") -> list[str]:
++def _splitstrip(string: str, sep: str = ",") -> list[str]:  # legacy CSV split; does not handle escaped commas
+     """Return a list of stripped string by splitting the string given as
+     argument on `sep` (',' by default), empty strings are discarded.

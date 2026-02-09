@@ -1,0 +1,66 @@
+diff --git a/sphinx/builders/gettext.py b/sphinx/builders/gettext.py
+index e8bc547b7..e12efc9b8 100644
+--- a/sphinx/builders/gettext.py
++++ b/sphinx/builders/gettext.py
+@@ -57,7 +57,15 @@ class Catalog:
+ 
+     def __iter__(self) -> Generator[Message, None, None]:
+         for message in self.messages:
+-            positions = [(source, line) for source, line, uuid in self.metadata[message]]
++            # Deduplicate positions while preserving first-seen order
++            seen: Set[Tuple[str, int]] = set()
++            positions: List[Tuple[str, int]] = []
++            for source, line, uuid in self.metadata[message]:
++                key = (source, line)
++                if key not in seen:
++                    positions.append(key)
++                    seen.add(key)
++            # Do not deduplicate uuids; they may intentionally repeat
+             uuids = [uuid for source, line, uuid in self.metadata[message]]
+             yield Message(message, positions, uuids)
+ 
+diff --git a/tests/test_build_gettext.py b/tests/test_build_gettext.py
+index 3c4617e84..d6574826a 100644
+--- a/tests/test_build_gettext.py
++++ b/tests/test_build_gettext.py
+@@ -184,3 +184,40 @@ def test_build_single_pot(app):
+          'msgid "Generated section".*'),
+         result,
+         flags=re.S)
++
++
++@pytest.mark.sphinx('gettext', testroot='intl', srcdir='gettext')
++def test_gettext_no_duplicate_locations(app):
++    # Build gettext catalogs and ensure no duplicate '#:' location lines
++    app.builder.build_all()
++
++    # iterate all generated .pot files in output directory
++    for name in os.listdir(str(app.outdir)):
++        if name.endswith('.pot'):
++            potfile = app.outdir / name
++            content = potfile.read_text(encoding='utf8')
++            lines = content.splitlines()
++            current_locations = []
++            seen_any_msgid = False
++
++            def assert_unique_locs(locs):
++                # Only assert if there were any location lines collected
++                if locs:
++                    assert len(locs) == len(set(locs)), (
++                        f"duplicate locations found in {potfile}")
++
++            for line in lines:
++                if line.startswith('msgid '):
++                    # starting a new msgid block; check previous block
++                    assert_unique_locs(current_locations)
++                    current_locations = []
++                    seen_any_msgid = True
++                elif line.startswith('#: '):
++                    # collect only source:line locations, not UUID-only lines
++                    entry = line[3:].strip()
++                    if ':' in entry:
++                        current_locations.append(entry)
++
++            # check last block
++            if seen_any_msgid:
++                assert_unique_locs(current_locations)

@@ -1,0 +1,29 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- When a writer bypasses the usual “string conversion” pipeline, ensure `formats=` is applied explicitly before producing string values (here: call `_set_col_formats()` before `col.info.iter_str_vals()`).
+- Do not swallow exceptions from format application; invalid `formats` should fail consistently with other writers.
+- Strengthen formatting assertions: verify the formatted `<td>...</td>` exists *and* the original unformatted representation does not, to avoid false positives.
+- Cover edge cases the writer supports (even if the bug report is 1D): multi-dimensional/`multicol=True` columns may require propagating the original column’s `info.format` to split-out `new_col`s.
+- Be careful with fill/mask handling when splitting 2D columns: apply `fill_values()` to the same column you’re iterating (`new_col`), and propagate fill metadata if needed.
+
+Repo-Specific:
+- Astropy ASCII writers typically apply `formats` via `BaseData._set_col_formats()` during `BaseData.str_vals()`; HTML is an exception and must mimic that behavior.
+- HTML writer sets `self.data.header.cols` but may not set `self.data.cols`; `_set_col_formats()` relies on `self.data.cols`, so ensure it’s set appropriately.
+- Add/keep regression coverage in the appropriate ASCII HTML/write test modules (e.g., `astropy/io/ascii/tests/test_html.py` or existing write tests). Prefer robust checks (parse cell text or match `<td>` fragments) over brittle full-string compares.
+- Keep the working tree clean; remove accidental untracked artifacts like `.claude/` that can break grading/CI.
+- If full `pytest` collection fails due to environment/warnings, run the most relevant module(s) (HTML/ascii tests) under the repo’s expected pytest configuration/warning filters to demonstrate local correctness.
+
+General:
+- Fixes should integrate with the project’s canonical pathways (reuse shared helpers like `_set_col_formats()` instead of ad-hoc formatting), but ensure all special branches (e.g., 2D split logic) follow the same contract.
+- Tests should be both specific (pin the exact behavior change) and resilient (avoid assumptions about casing/whitespace/serialization quirks); check presence and absence to prevent false passes.
+- Don’t introduce behavior changes that hide errors (e.g., blanket `try/except Exception: pass`); consistency with existing failure modes matters.
+- After refactors/cleanup steps, re-run a minimal sanity check to ensure no accidental breakage.
+- Always clean up incidental files and confirm `git status` is clean before finalizing.

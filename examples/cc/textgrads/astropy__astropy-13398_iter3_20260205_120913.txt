@@ -1,0 +1,97 @@
+## High-level assessment
+
+The agent implemented the *proposed feature* (direct ITRS↔AltAz/HADec transforms staying in ITRS) rather than clearly isolating a *bug fix* with minimal behavioral impact. The approach matches the issue description, but the implementation has several correctness, integration, and test-suite-compatibility gaps that would likely fail Astropy’s real CI and/or subtly break behavior.
+
+The agent also didn’t follow the workflow requirement to run the written reproduction tests against the **unmodified** code first (they *did* run them, but only after already adding the new transform module). They additionally ran `pytest -q` and hit unrelated failures, then scoped down—reasonable locally, but for review we must ensure the change won’t break the full suite.
+
+## Where it failed / missed key requirements
+
+### 1) Transform graph priority / refraction behavior change (likely API regression)
+By registering direct `ITRS -> AltAz` and `AltAz -> ITRS` transforms, the transform graph may now prefer this path over the existing path via CIRS/ICRS.
+
+That matters because:
+- **Refraction**: AltAz/HADec transforms currently incorporate ERFA refraction when `pressure > 0` (via `erfa_astrom.apio/apco` and `erfa.atioq/atoiq`). The new direct ITRS path does **no refraction**, so any user doing `itrs.transform_to(AltAz(... pressure=...))` may silently lose refraction.
+- **Polar motion / Earth orientation**: CIRS-based path accounts for Earth orientation parameters. The new direct path uses only site lon/lat. Even for topocentric vectors, orientation of the local horizon vs ITRS axes is not only a simple lon/lat rotation if polar motion is applied (CIRS path effectively includes it).
+
+**Concrete improvement**: If these transforms are meant only for “topocentric/no-refraction” use, they should either:
+- Be registered with **lower priority** than the existing high-fidelity path; or
+- Be conditioned: only use the direct path when `pressure == 0` and possibly when `get_polar_motion(obstime)` is effectively zero (or simply always defer to CIRS for non-zero pressure); or
+- Be implemented as a *new frame* or explicit helper API rather than overriding graph resolution for `ITRS<->AltAz`.
+
+Astropy supports transform priorities in the graph; you can set a lower priority to avoid hijacking default behavior.
+
+### 2) Incorrect time-handling justification + potential broadcast issues
+The agent’s code uses:
+```py
+observed_frame.location.get_itrs().cartesian
+```
+without passing `observed_frame.obstime`. While EarthLocation’s ITRS coordinates are time-independent in ITRS **numerically**, the method still accepts an `obstime` and has broadcasting logic. Not providing it risks shape mismatches when `observed_frame.obstime` is an array and location is scalar (or vice versa). EarthLocation.get_itrs has special-case broadcasting when `obstime` is provided.
+
+**Concrete improvement**:
+- Use `observed_frame.location.get_itrs(observed_frame.obstime)` in `itrs_to_observed`.
+- In `observed_to_itrs`, use `observed_coo.location.get_itrs(observed_coo.obstime)` (or `itrs_frame.obstime` if adopting output obstime).
+This ensures correct broadcasting for array-valued `obstime`.
+
+### 3) The test design initially encoded the wrong “overhead” concept
+Their first failing tests constructed “overhead” by moving along the **geocentric radial** direction, which is *not* local zenith for WGS84 (geodetic normal differs). They fixed the test to instead increase geodetic height at constant lon/lat. Good catch—but that means the tests no longer validate the originally described pain point: geocentric vs topocentric aberration when observing nearby targets.
+
+**Concrete improvement**:
+- Add a reproduction test that matches the complaint: e.g., a near-Earth ITRS object with differing ITRS/AltAz obstimes currently “flies off” due to ITRS→ITRS via SSB path. Your test should explicitly show the bad behavior *before* the fix and the stable behavior after.
+- Include a test for non-scalar obstime broadcasting (vector obstime + scalar location) to validate the broadcasting fix above.
+
+### 4) Suite-wide failures were ignored (and are not unrelated from CI perspective)
+They hit collection-time failures due to DeprecationWarnings treated as errors elsewhere. While likely environment-specific, the agent never re-ran the full suite after modifications. In real CI, you’d at least run the relevant coordinate tests (`astropy/coordinates/tests`) to ensure no regressions.
+
+**Concrete improvement**:
+- Run: `pytest astropy/coordinates/tests -q`
+- Optionally: `pytest astropy/coordinates/tests/test_intermediate_transformations.py -q` because that file contains the scenario motivating the issue.
+
+### 5) Missing packaging / import hygiene
+They added a new module and imported it in `builtin_frames/__init__.py`. That’s correct for registration, but they did not:
+- Add `__all__` exposure (not required for transforms, but standard hygiene).
+- Add any documentation / release note.
+- Consider whether this module name conflicts with expected package layout.
+
+Not critical, but worth doing for maintainability.
+
+### 6) “Delete tests at last” was followed, but reduces confidence
+They complied with the instruction to delete the tests, but in a real PR those tests should remain. Given your meta-process requires deletion, fine; but from a review standpoint the test coverage is essential to prevent regressions.
+
+**Concrete improvement**:
+- Keep the tests during development; delete only at the very end (they did), but ensure the final patch includes *some* existing test adjustments or additions elsewhere if allowed. If not allowed, at least ensure the fix is validated by existing upstream tests (e.g., `test_straight_overhead` variant for ITRS).
+
+## Specific code-level concerns in the new transform
+
+### A) Matrix correctness vs existing conventions
+The matrix is derived from lon/lat only. This ignores polar motion and Earth orientation differences between ITRS axes and the instantaneous local ENU axes implied by observed frames in high-precision mode.
+
+If this is intentional (a “pure ITRS geometry” mode), it should be explicitly limited or documented, not silently replace the standard path.
+
+### B) Differentials / velocities
+Using `FunctionTransformWithFiniteDifference` implies velocity propagation might be computed. But the transform is a simple subtraction + rotation; finite differencing will attempt to vary in time and may produce nonsense if the transform is time-invariant by design. This could break velocity handling or at least be inconsistent.
+
+**Concrete improvement**:
+- Consider using `FunctionTransform` (no finite difference) and explicitly handle differentials if needed, or define the transform’s behavior for differentials. If keeping finite difference, ensure time dependence is consistent (or explicitly adopt output obstime in a way finite differencing can use).
+
+## Proposed concrete improvements (action list)
+
+1) **Avoid overriding default ITRS↔AltAz/HADec behavior**
+   - Register with lower priority, or only activate direct transform when `pressure == 0` (and maybe require `observed_frame.obstime is None` or similar).
+   - Otherwise, keep existing accuracy/refraction path via CIRS.
+
+2) **Fix broadcasting + use correct obstime in location.get_itrs**
+   - Replace `location.get_itrs()` with `location.get_itrs(observed_frame.obstime)` / `... (observed_coo.obstime)`.
+
+3) **Add/adjust tests (while developing)**
+   - A test that demonstrates the original “ITRS at time t0 transformed to AltAz at time t1 should not depend on t0”.
+   - A test for array broadcasting: `AltAz(obstime=times[:,None], location=scalar_loc)` and transform an ITRS coordinate with scalar obstime, verifying shape correctness and no exceptions.
+
+4) **Run relevant existing test subsets**
+   - `pytest astropy/coordinates/tests -q` (or at minimum the intermediate transformation tests).
+
+5) **Decide and document semantics**
+   - If this is a new “topocentric ITRS geometric” transform, document it clearly and ensure users can still access the old high-precision refraction-capable path.
+
+## Summary
+
+The agent’s patch aligns with the issue’s proposed approach but likely introduces regressions (refraction/polar motion/graph path selection, broadcasting, and velocity handling). The fix should be made safer by constraining when the direct path is used and by ensuring broadcasting correctness via passing `obstime` into `EarthLocation.get_itrs`.

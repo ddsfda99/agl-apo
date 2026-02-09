@@ -1,0 +1,132 @@
+The agent “failed” in two ways:
+
+1) **Process-wise**: it did not follow the prompt’s workflow constraints (especially around running tests and removing them at the end) and left the repo in a broken state.
+2) **Technically**: it implemented a fragile fix that bypasses the real root cause (PLY grammar + precompiled parse tables), and it introduced a change that can subtly break valid CDS unit strings.
+
+Below are the concrete failure points and how to improve.
+
+---
+
+## 1) It ran the entire Astropy test suite and got derailed by unrelated failures
+
+### What happened
+The agent ran `pytest -q` at repo root. Test collection failed due to a **DeprecationWarning** being treated as an error in unrelated convolution tests (NumPy 1.25 behavior).
+
+### Why this is bad
+- The prompt asked to “rerun your written test cases”. Running the full suite is unnecessary and in this environment **impossible** due to unrelated upstream warnings.
+- This distracted the agent and wasted time, and it risks masking whether the new tests actually reproduce the reported bug.
+
+### How to improve
+- Run only targeted tests from the beginning:
+  - `pytest astropy/io/ascii/tests/test_cds*.py -q`
+  - or the specific new regression test file.
+- If collection warnings are fatal, set per-run options just for local validation, e.g. `-W ignore::DeprecationWarning` (only when needed), but ideally just run the focused tests.
+
+---
+
+## 2) It initially wrote a broken/invalid CDS/MRT input test
+
+### What happened
+The first reproduction test used `StringIO(s)` and `ascii.read(StringIO(s), format="cds")`, which failed with:
+- `TypeError: read() should return bytes` from `get_readable_fileobj`.
+
+Then the test still failed because the CDS header formatting had blank lines that the CDS parser didn’t tolerate:
+- `Line "   Bytes Format Units ... " not parsable`
+- then `Line "" not parsable as CDS header`
+
+### Why this matters
+- The test didn’t reproduce the actual bug; it reproduced *input handling quirks* of the CDS reader.
+- The agent had to spend several iterations tweaking whitespace instead of validating unit parsing.
+
+### How to improve
+- Use the same mechanism as the prompt reproduction: `Table.read(..., format="ascii.cds")` on a temp file, or pass the string directly (as it eventually did).
+- Copy a known-good minimal CDS header layout from existing tests (`astropy/io/ascii/tests/test_cds.py`) rather than inventing formatting.
+
+---
+
+## 3) It “fixed” the grammar but forgot the precompiled PLY tables make that change ineffective
+
+### What happened
+The agent edited `astropy/units/format/cds.py` to change the grammar for `division_of_units` to be left-associative.
+
+But Astropy ships with `cds_parsetab.py` (auto-generated). At runtime, `yacc(tabmodule="cds_parsetab")` uses that precompiled table, so **grammar edits don’t apply** unless the parsetab is regenerated.
+
+The agent later noticed this and worked around it.
+
+### Why this is a core failure
+- The “real” bug is in the CDS unit parsing behavior; changing grammar source without regenerating parse tables doesn’t fix anything in this repo.
+- In a normal PR, you’d regenerate the tables and commit them. Here the prompt explicitly says “do not commit”, but still you need the fix to work in-place.
+
+### How to improve
+- Either:
+  1) Regenerate `cds_parsetab.py` and `cds_lextab.py` locally (as Astropy docs describe) so tests pass in-place, **or**
+  2) Avoid relying on PLY table regeneration by fixing behavior in code that runs regardless of parse tables (but do it correctly—see next section).
+
+---
+
+## 4) The final “normalization” hack is fragile and can break valid CDS unit syntax
+
+### What it did
+In `CDS.parse()`, it added:
+
+```python
+if s.count("/") >= 2:
+    first = s.find("/")
+    prefix, suffix = s[:first], s[first + 1:]
+    suffix = suffix.replace("/", ".")
+    s = f"{prefix}/({suffix})"
+```
+
+This turns `a/b/c` into `a/(b.c)`.
+
+### Why this is risky / incomplete
+It blindly rewrites *everything after the first slash*:
+- It does **not respect parentheses** already present in the suffix.
+- It does **not respect bracketed dex forms** (`[ ... ]`) or other CDS constructs that might legally include `/` inside parentheses.
+- It can change meaning for expressions where right-associativity is intended via explicit parentheses.
+- It also changes the raw string before parsing, which can impact column unit *round-tripping* expectations (“units should be the same as in input MRT file”).
+
+### Correct direction
+The CDS grammar should handle chained division correctly **without rewriting the input string**.
+- Proper fix: adjust the grammar to be left-associative and **regenerate the parser tables**.
+- If you must avoid table regen in this environment, then implement a parser-side fix that is syntax-aware (tokenize and build AST correctly), not a string replace.
+
+---
+
+## 5) It violated “delete the test cases you write at last” in a destructive way
+
+### What happened
+At the end it “deleted tests” by overwriting the test files with empty content (`Write ... content: ""`), leaving empty files in the test directories.
+
+### Why this is failure
+- Leaving empty test modules is not equivalent to deleting; depending on tooling/plugins it can still be collected or cause style/tooling issues.
+- More importantly, **it removed the regression tests**, so there’s no proof the bug stays fixed. In actual development, you never remove regression tests.
+- The prompt asked to delete test cases only because this is a coding exercise environment, but the expected behavior is to **remove the files entirely**, not blank them.
+
+### How to improve
+- If the harness expects cleanup: actually remove the files (`rm ...`) rather than zeroing them.
+- Better: keep tests during iteration, and delete only at the very end as instructed.
+
+---
+
+## 6) It never validated the real user-facing requirement: “units in resulting Table should be same as input”
+
+The agent’s assertions compare semantic equality of units, not the *string* representation or exact CDS serialization. The bug report says “units do not come out correct; order of division jumbled” and shows output units with `s` moved into numerator.
+
+To be safe, the tests should check:
+- `tab['SBCONT'].unit.to_string('cds') == '10+3J/m/s/kpc2'` (or whatever canonical CDS output is expected),
+- or at least `str(tab['SBCONT'].unit)` matches expected generic grouping.
+
+Right now, the solution may “fix” semantics but still fail expected formatting/roundtrip expectations.
+
+---
+
+# Summary of required improvements to make the agent succeed reliably
+
+1) **Don’t run the whole suite**; run only new regression tests (and maybe existing CDS/units tests).
+2) **Write the reproduction test using a valid CDS header template** (borrow from existing tests) and avoid `StringIO` pitfalls in this repo.
+3) **Fix the CDS division associativity at the grammar level and regenerate PLY tables** (`cds_parsetab.py`), or implement a token-aware correction (not a raw string rewrite).
+4) **Ensure the regression test checks the user-visible behavior** (unit string/order), not only semantic equivalence.
+5) **Remove test files properly** at the end if required—don’t leave empty modules behind.
+
+These are the main reasons the agent’s attempt is considered a failure despite briefly getting a targeted test to pass mid-way.

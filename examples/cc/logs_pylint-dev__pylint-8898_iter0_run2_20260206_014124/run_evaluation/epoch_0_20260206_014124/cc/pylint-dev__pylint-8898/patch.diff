@@ -1,0 +1,119 @@
+diff --git a/pylint/config/argument.py b/pylint/config/argument.py
+index 30a5fd175..3d219f65b 100644
+--- a/pylint/config/argument.py
++++ b/pylint/config/argument.py
+@@ -112,17 +112,110 @@ def _regex_transformer(value: str) -> Pattern[str]:
+ 
+ 
+ def _regexp_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions."""
++    r"""Transforms a comma separated list of regular expressions.
++
++    Splits on top-level commas only, so commas inside regex constructs
++    like parentheses (), character classes [], or quantifier braces {}
++    are preserved. Escaped commas (\,) are also preserved.
++    """
++    # Fast path for empty string
++    if not value:
++        return []
++
++    def _split_regex_csv(v: str) -> list[str]:
++        parts: list[str] = []
++        buf: list[str] = []
++        stack: list[str] = []
++        escaped = False
++        for ch in v:
++            if escaped:
++                buf.append(ch)
++                escaped = False
++                continue
++            if ch == "\\":
++                buf.append(ch)
++                escaped = True
++                continue
++            if ch in "([{":
++                stack.append(ch)
++                buf.append(ch)
++                continue
++            if ch in ")]}":
++                if stack:
++                    top = stack[-1]
++                    if (top == "(" and ch == ")") or (top == "[" and ch == "]") or (
++                        top == "{" and ch == "}"
++                    ):
++                        stack.pop()
++                buf.append(ch)
++                continue
++            if ch == "," and not stack:
++                part = "".join(buf).strip()
++                if part:
++                    parts.append(pylint_utils._unquote(part))
++                buf = []
++                continue
++            buf.append(ch)
++        # Append final buffer
++        part = "".join(buf).strip()
++        if part:
++            parts.append(pylint_utils._unquote(part))
++        return parts
++
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in _split_regex_csv(value):
+         patterns.append(_regex_transformer(pattern))
+     return patterns
+ 
+ 
+ def _regexp_paths_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions paths."""
++    r"""Transforms a comma separated list of regular expressions paths.
++
++    Uses the same top-level comma splitter as _regexp_csv_transfomer so
++    commas inside path regex constructs are preserved.
++    """
++    # Reuse splitter from _regexp_csv_transfomer
++    def _split_regex_csv(v: str) -> list[str]:
++        parts: list[str] = []
++        buf: list[str] = []
++        stack: list[str] = []
++        escaped = False
++        for ch in v:
++            if escaped:
++                buf.append(ch)
++                escaped = False
++                continue
++            if ch == "\\":
++                buf.append(ch)
++                escaped = True
++                continue
++            if ch in "([{":
++                stack.append(ch)
++                buf.append(ch)
++                continue
++            if ch in ")]}":
++                if stack:
++                    top = stack[-1]
++                    if (top == "(" and ch == ")") or (top == "[" and ch == "]") or (
++                        top == "{" and ch == "}"
++                    ):
++                        stack.pop()
++                buf.append(ch)
++                continue
++            if ch == "," and not stack:
++                part = "".join(buf).strip()
++                if part:
++                    parts.append(pylint_utils._unquote(part))
++                buf = []
++                continue
++            buf.append(ch)
++        part = "".join(buf).strip()
++        if part:
++            parts.append(pylint_utils._unquote(part))
++        return parts
++
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in _split_regex_csv(value):
+         patterns.append(
+             re.compile(
+                 str(pathlib.PureWindowsPath(pattern)).replace("\\", "\\\\")

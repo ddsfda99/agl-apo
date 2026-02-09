@@ -1,0 +1,26 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- When CV-scoring LogisticRegression along a path, ensure the *scoring-only* temporary estimator is configured identically for prediction semantics; at minimum propagate `multi_class`, because `predict_proba()` differs (softmax vs OvR) and breaks probabilistic scorers like `neg_log_loss`.
+- Prefer a regression test that directly targets the mismatch: call `_log_reg_scoring_path(..., scoring="neg_log_loss", multi_class="multinomial")` and compare returned scores to `get_scorer("neg_log_loss")(lr, X_test, y_test)` using an estimator reconstructed from the returned coefficients with `multi_class="multinomial"`.
+- Keep tests minimal and robust: avoid manually re-implementing log-loss math/sign, avoid assumptions about coefficient shapes beyond what the helper returns, and rely on sklearn’s scorer/log_loss utilities.
+- Optional hardening: consider also propagating `solver` (and any other params that could affect prediction validation/behavior) into the scoring estimator, but don’t over-propagate parameters that require fitting.
+
+Repo-Specific:
+- Do not rewrite large existing test modules (e.g., `test_logistic.py`) with a full-file `Write`; make small, localized edits/inserts to avoid accidentally dropping unrelated tests/imports/markers.
+- When adding tests for private helpers, ensure correct imports (`_log_reg_scoring_path` from the right module) and set required estimator attributes for prediction (`classes_`, and possibly `n_features_in_` depending on sklearn version).
+- Use a multinomial-capable solver in tests (e.g., `lbfgs`/`newton-cg`) to avoid version/solver-support issues and flakiness.
+- Validate by running the narrowest relevant test target first (the specific test file / new test) rather than attempting full-suite runs that may be impractical in the environment.
+
+General:
+- Always run a new test immediately after writing it to catch missing imports/name errors before iterating further.
+- Avoid “cleanup” that deletes the only regression coverage unless the task explicitly requires ephemeral tests; if instructions conflict with normal project practice, prioritize leaving the repo protected and stable.
+- Don’t claim full correctness without a credible validation run; if the environment has tool/version mismatches, run focused tests and state limitations.
+- Ensure you can actually execute repository commands (auth/infra issues) before proceeding; otherwise no debugging, fixing, or validation can be trusted.

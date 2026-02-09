@@ -1,0 +1,117 @@
+diff --git a/pylint/config/argument.py b/pylint/config/argument.py
+index 30a5fd175..5bbc20049 100644
+--- a/pylint/config/argument.py
++++ b/pylint/config/argument.py
+@@ -111,18 +111,71 @@ def _regex_transformer(value: str) -> Pattern[str]:
+         raise argparse.ArgumentTypeError(msg) from e
+ 
+ 
++def _split_regex_csv(value: str) -> Sequence[str]:
++    r"""Split a comma-separated list of regexes on unescaped commas.
++
++    This avoids splitting on commas that are part of regex syntax, such as
++    quantifier ranges ("{m,n}") and character classes ("[a,b]"). A literal
++    comma can be included by escaping it as \\\,.
++    """
++    parts: list[str] = []
++    buf: list[str] = []
++    in_char_class = False
++    brace_depth = 0
++    i = 0
++    length = len(value)
++    while i < length:
++        ch = value[i]
++        # Determine if current character is escaped by an odd number of backslashes
++        j = i - 1
++        backslashes = 0
++        while j >= 0 and value[j] == "\\":
++            backslashes += 1
++            j -= 1
++        escaped = (backslashes % 2) == 1
++
++        if not escaped:
++            if ch == "[" and not in_char_class:
++                in_char_class = True
++            elif ch == "]" and in_char_class:
++                in_char_class = False
++            elif ch == "{" and not in_char_class:
++                brace_depth += 1
++            elif ch == "}" and brace_depth > 0 and not in_char_class:
++                brace_depth -= 1
++
++        if ch == "," and not escaped and not in_char_class and brace_depth == 0:
++            part = "".join(buf).strip()
++            if part:
++                parts.append(pylint_utils._unquote(part))
++            buf = []
++        else:
++            buf.append(ch)
++        i += 1
++
++    # Append last buffer
++    part = "".join(buf).strip()
++    if part:
++        parts.append(pylint_utils._unquote(part))
++    return parts
++
++
+ def _regexp_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions."""
++    """Transforms a comma separated list of regular expressions, respecting regex syntax."""
++    if not value:
++        return []
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in _split_regex_csv(value):
+         patterns.append(_regex_transformer(pattern))
+     return patterns
+ 
+ 
+ def _regexp_paths_csv_transfomer(value: str) -> Sequence[Pattern[str]]:
+-    """Transforms a comma separated list of regular expressions paths."""
++    """Transforms a comma separated list of regular expressions paths, respecting regex syntax."""
++    if not value:
++        return []
+     patterns: list[Pattern[str]] = []
+-    for pattern in _csv_transformer(value):
++    for pattern in _split_regex_csv(value):
+         patterns.append(
+             re.compile(
+                 str(pathlib.PureWindowsPath(pattern)).replace("\\", "\\\\")
+diff --git a/tests/config/test_argparse_config.py b/tests/config/test_argparse_config.py
+index dfa0fd4dd..7062e9321 100644
+--- a/tests/config/test_argparse_config.py
++++ b/tests/config/test_argparse_config.py
+@@ -80,3 +80,32 @@ class TestArguments:
+         with pytest.raises(UnrecognizedArgumentAction):
+             # We test with None as that is 'unrecognized'
+             manager._add_parser_option(group, None)  # type: ignore[arg-type]
++
++
++def test_bad_names_rgxs_quantifier_commas_parsed_as_one_pattern() -> None:
++    """Ensure commas inside regex quantifier ranges are not split.
++
++    This reproduces the real CLI path using Run and verifies that a pattern like
++    '(foo{1,3})' is treated as a single regex and combined with another pattern.
++    """
++    path = join(REGRTEST_DATA_DIR, "empty.py")
++    run = Run([path, "--bad-names-rgxs=(foo{1,3}),bar"], exit=False)
++    patterns = run.linter.config.bad_names_rgxs
++    # Should be two compiled patterns: (foo{1,3}) and bar
++    pattern_strings = {p.pattern for p in patterns}
++    assert pattern_strings == {"(foo{1,3})", "bar"}
++    # Sanity: they should match the intended names
++    assert any(p.match("foo") for p in patterns)
++    assert any(p.match("bar") for p in patterns)
++
++
++def test_bad_names_rgxs_escaped_comma_and_char_class_not_split() -> None:
++    """Ensure escaped commas and commas inside character classes are not split."""
++    path = join(REGRTEST_DATA_DIR, "empty.py")
++    run = Run([path, "--bad-names-rgxs=foo\\,bar,a[,]b"], exit=False)
++    patterns = run.linter.config.bad_names_rgxs
++    pattern_strings = {p.pattern for p in patterns}
++    # Single regex for literal comma and one for character class containing comma
++    assert pattern_strings == {"foo\\,bar", "a[,]b"}
++    # Sanity: literal comma pattern should match a name containing a comma
++    assert any(p.match("foo,bar") for p in patterns)

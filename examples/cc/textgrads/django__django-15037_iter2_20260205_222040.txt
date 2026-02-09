@@ -1,0 +1,105 @@
+## High-level outcome
+
+The agent **did not complete the task successfully** and left the repo in a broken/incorrect state relative to the prompt:
+
+1. It implemented a fix and made a test pass locally for SQLite.
+2. Then it **“cleaned up” by deleting the test case**, but did so incorrectly: it removed only the decorator + function header, leaving the test body at class indentation, which will cause a **SyntaxError/IndentationError** in `tests/inspectdb/tests.py`.
+3. The prompt requires deleting the test at the end, but also implies the repo must remain runnable. The final edit violates that.
+
+Additionally, the fix is likely **overly complex, inefficient, and potentially incorrect across backends**.
+
+---
+
+## Where it failed / missed requirements
+
+### 1) Botched test removal (repo is now broken)
+Final action:
+```diff
+-    @skipUnlessDBFeature('can_introspect_foreign_keys')
+-    def test_foreign_key_to_unique_field_uses_to_field(self):
++    (removed)
+```
+But the test body remains. That will leave indented statements directly under the class, not inside any method. This is invalid Python.
+
+**Concrete improvement**
+- When deleting a temporary test, remove the *entire* method block (decorator, signature, and indented body), not just the first line(s).
+- Run at least one python import or the test runner after deletion to ensure the file still parses:
+  - `python -m py_compile tests/inspectdb/tests.py` or run a small test subset.
+
+### 2) The fix is in the wrong layer (and expensive)
+The agent patched `django/core/management/commands/inspectdb.py` and then:
+- re-introspects the referenced table for every FK column
+- re-runs `get_table_description()` and `get_relations()` per FK
+- replays `normalize_col_name()` to infer the “to_field” attribute name
+
+This is:
+- **O(FKs × columns)** extra work
+- mixes concerns: backend introspection should ideally provide the needed info (it already does via constraints / key columns)
+
+**Concrete improvement**
+- Use `connection.introspection.get_constraints()` (already fetched per table as `constraints`) instead of `get_relations()` for deciding `to_field`.
+  - `get_constraints()` contains `foreign_key: (target_table, target_column)` on many backends, including SQLite (see `_get_foreign_key_constraints()`).
+  - This avoids re-introspecting another table entirely.
+- Alternatively use `get_key_columns()` which explicitly returns `(local_col, target_table, target_col)` on backends that implement it.
+
+### 3) Backend compatibility risk (especially multi-column FKs)
+The existing PostgreSQL `get_key_columns()` implementation in this repo only supports the first column (`conkey[1]`, `confkey[1]`). That means:
+- multi-column FKs aren’t handled well anyway
+- but the agent’s code assumes a single referenced column always, and may behave unpredictably when backends return different formats or incomplete info.
+
+**Concrete improvement**
+- Keep scope to single-column FKs (consistent with existing inspectdb behavior), but:
+  - derive the referenced column from constraints for that *local column*
+  - if multiple constraints match, prefer the FK constraint
+  - do not attempt to compute Django field names for the remote table by re-normalizing; `to_field` should be set to the **remote model field name**, which is generally the same as the column name unless that remote column itself normalizes/renames. That’s rare but possible (keywords, leading digits, etc.). If you can’t map reliably, it may be safer to set `to_field` to the remote *field name* only when you can determine it.
+
+### 4) Test design issues
+The temporary test was added under `InspectDBTransactionalTests` and used raw `CREATE TABLE` statements. That’s fine, but:
+- It wasn’t guarded for backend SQL differences (e.g., `INTEGER PRIMARY KEY` behaves differently across engines; `serial` etc. on Postgres).
+- The bug report is PostgreSQL-flavored; only validating on SQLite may miss regressions.
+
+**Concrete improvement**
+- If you were to keep tests (before deleting them), add backend-specific SQL or skip markers:
+  - e.g. `@skipUnless(connection.vendor == 'postgresql', ...)` for the original reported case.
+- Ensure the test asserts the important part only:
+  - `to_field='other_id'` is present
+  - and the field became a `ForeignKey(...)` rather than a plain `IntegerField`
+
+But since the prompt says delete the tests at the end, you still need them during development; just delete cleanly.
+
+---
+
+## What the correct fix should look like (conceptually)
+
+In `inspectdb` model generation, when processing a local FK column:
+1. Determine the referenced table and referenced column.
+2. Determine the referenced table’s PK column.
+3. If referenced column != PK column:
+   - emit `to_field='<referenced_column_field_name>'`
+
+Implementation approach that’s simpler and faster:
+- Build a mapping `{local_column: (target_table, target_column)}` from `constraints` once per table.
+- Build a PK cache `{table_name: pk_column}` (lazy, per referenced table).
+- Use that to decide whether to add `to_field`.
+
+This avoids:
+- repeatedly inspecting target table schema
+- trying to reproduce remote field naming
+
+---
+
+## Critical concrete steps to make the agent’s work pass
+
+1. **Fix `tests/inspectdb/tests.py` parsing immediately**
+   - Remove the leftover orphaned block created by the partial deletion.
+   - Verify with `python -m py_compile`.
+
+2. **Re-evaluate the patch in `inspectdb.py`**
+   - At minimum: ensure it doesn’t crash on backends where `get_table_description()` or `get_relations()` behave differently.
+   - Prefer rewriting it to use `constraints` rather than extra introspection, as described above.
+
+3. **Run the existing Django test suite subset**
+   - At least: `python tests/runtests.py inspectdb --settings=test_sqlite`
+   - And ideally `--settings=test_postgres` if available in the environment.
+
+Because the agent deleted the test (and did so incorrectly), the only way to validate the bug fix now is by running existing suites or re-adding a temporary test correctly during development, then removing it cleanly.

@@ -1,0 +1,30 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Make dtype preservation **opt-in** (e.g., `set_output(transform="pandas", preserve_dtypes=True)` or equivalent config). Do not change default pandas-output behavior.
+- Only preserve dtypes for transformers that **do not modify values**; gate via:
+  - an explicit estimator tag/hook (preferred), or
+  - a narrow initial scope (e.g., selectors/column-subset transformers) rather than “all transformers”.
+- Avoid “restoring” dtypes via blanket `astype` for outputs that may have been numerically converted (e.g., float64 intermediates); this can silently corrupt/lose precision (float64→float16) or misrepresent categories.
+- Never swallow casting failures with `try/except: pass`; if preservation is requested, failure should be deterministic (raise or warn with details).
+- Tests must reflect the real contract: use a truly passthrough/subset case (deterministic column selection) and add a negative test ensuring dtype preservation is **not** applied to value-changing transformers.
+
+Repo-Specific:
+- `set_output(transform="pandas")` wrapping happens centrally (e.g., `_wrap_data_with_container`, `_wrap_in_pandas_container`); preserve-dtype logic belongs there, but must be **carefully gated** to avoid impacting unrelated estimators.
+- Don’t eagerly call `get_feature_names_out()` in a way that changes existing lazy/error-handling behavior; keep wrapper semantics consistent.
+- If implementing dtype preservation, align dtype mapping to **output columns only** (intersection with `df_out.columns`) and consider feature renaming/mapping in meta-estimators (Pipeline/ColumnTransformer).
+- When a full `pytest -q` run shows failures, stop and inspect them; don’t proceed with only running the new test. Full-suite compatibility is critical in sklearn.
+
+General:
+- Treat “optionally” in requirements as a hard constraint: add a flag/config, preserve backward compatibility, and document/encode behavior in tests.
+- Prefer correctness-preserving mechanisms (returning pandas slices for selectors) over post-hoc coercion (`astype`) when metadata retention is the goal.
+- Don’t mask errors: silent exception handling makes debugging impossible and can hide regressions until later.
+- Validate broadly: reproduce → fix → run targeted tests → run full suite (or at least a representative subset) before finalizing.
+- Ensure the test you write truly reproduces the reported issue; avoid “passing” tests that succeed by enforcing an incorrect behavior.

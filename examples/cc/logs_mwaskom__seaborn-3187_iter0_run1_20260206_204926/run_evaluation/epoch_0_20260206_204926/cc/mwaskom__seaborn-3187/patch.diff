@@ -1,0 +1,41 @@
+diff --git a/seaborn/_core/scales.py b/seaborn/_core/scales.py
+index 55874bf2..6df1050d 100644
+--- a/seaborn/_core/scales.py
++++ b/seaborn/_core/scales.py
+@@ -379,6 +379,12 @@ class ContinuousBase(Scale):
+             locs = axis.major.locator()
+             locs = locs[(vmin <= locs) & (locs <= vmax)]
+             labels = axis.major.formatter.format_ticks(locs)
++            # Include ScalarFormatter offset/scientific scale in legend labels
++            get_off = getattr(axis.major.formatter, "get_offset", None)
++            if callable(get_off):
++                offset_text = get_off() or ""
++                if offset_text:
++                    labels = [f"{lab} {offset_text}".strip() if lab else offset_text for lab in labels]
+             new._legend = list(locs), list(labels)
+ 
+         return new
+diff --git a/tests/_core/test_scales.py b/tests/_core/test_scales.py
+index c4b39f5d..777e2d74 100644
+--- a/tests/_core/test_scales.py
++++ b/tests/_core/test_scales.py
+@@ -312,6 +312,20 @@ class TestContinuous:
+         with pytest.raises(TypeError, match="`like` must be"):
+             s.label(like=2)
+ 
++    def test_legend_labels_include_scalarformatter_offset(self):
++
++        class DummyFormatter(mpl.ticker.ScalarFormatter):
++            def get_offset(self):
++                return "×10^6"
++
++        x = pd.Series([1_000_000.0, 2_000_000.0, 3_000_000.0], name="x")
++        s = Continuous().label(formatter=DummyFormatter())._setup(x, Color())
++        locs, labels = s._legend
++        # Ensure every non-empty label includes the offset text from the formatter
++        for lab in labels:
++            if lab:
++                assert "×10^6" in lab
++
+ 
+ class TestNominal:

@@ -1,0 +1,99 @@
+## What the agent got right
+- Located the exact clause in `Table._convert_data_to_col()` that auto-views structured `np.ndarray` as `NdarrayMixin`.
+- Implemented the **first half** of the proposal: emit a `FutureWarning` when that conversion happens, and keep current behavior (still convert to `NdarrayMixin`).
+- Added targeted tests that initially failed (no warning) and passed after adding the warning.
+
+## Where the agent failed / missed requirements
+
+### 1) “Remember to delete the test cases you write at last” was not satisfied correctly
+They “deleted” the tests by writing an **empty file**:
+- `astropy/table/tests/test_structured_ndarray_warning.py` remains in the repo but empty.
+- An empty test module is usually harmless, but it’s sloppy and can still trip tooling (e.g., some test discovery configs, linting, packaging checks, or review expectations). The instruction explicitly says *delete the test cases*, not *leave an empty file*.
+
+**Improvement:** remove the file entirely (`git rm` equivalent) or at least delete it from disk in this environment, not blank it.
+
+### 2) Warning message does not match the original prompt’s intent precisely
+Prompt proposal:
+- “Add a FutureWarning here telling the user to wrap `data` in `Column` and that **in the future (5.2)** the structured array will be added as a `Column`.”
+
+Agent’s warning:
+- Says it “will not be auto-converted to NdarrayMixin in a future release” and “wrap the data in Column”.
+- Does **not** mention version 5.2 or that the future behavior will be “added as a `Column`”.
+
+This matters because Astropy is strict about deprecation messaging consistency and versioning.
+
+**Improvement:** adjust warning text to include:
+- the target version (5.2, per prompt),
+- the specific future behavior (“will be added as a Column instead of NdarrayMixin”),
+- and recommended fix (“wrap in `Column(...)` to preserve structured-column semantics / silence warning”).
+
+Example wording:
+> “Passing a structured numpy array to Table will currently create an NdarrayMixin column. In Astropy 5.2 this will instead create a Column with structured dtype. To keep the current behavior or to be explicit, wrap the input in `Column(data)`.”
+
+(Exact phrasing may need alignment with Astropy deprecation policy.)
+
+### 3) `stacklevel` is likely wrong / fragile
+They used `stacklevel=3` without verifying call depth. In Astropy, wrong stacklevels are a common test failure because tests often assert the warning points to user code.
+
+**Improvement:**
+- Determine the correct stacklevel for both `Table([arr])` and `t['x']=arr` paths.
+- Often `stacklevel=2` is used at leaf API boundary, but here `_convert_data_to_col` is fairly internal; it may need `stacklevel` 4+ depending on call chain.
+- Add/adjust tests to assert warning filename/lineno points to user call site if Astropy’s test style does that elsewhere.
+
+### 4) Tests were too narrow vs. real triggering conditions
+The code triggers when inserting a structured ndarray **as a single column**, i.e. `Table([arr])`, `t['x']=arr`, `add_column(arr)`. But there are other common paths:
+- `Table({'x': arr})` (dict init)
+- `Table(rows=..., dtype=structured?)` probably not
+- `Table(arr)` where `arr` is structured and used as a *table*, which should *not* warn because it’s handled by `_init_from_ndarray` and split into separate columns.
+
+The agent did not ensure the warning is only emitted for the “single column structured array” case and not for “structured array as table data”.
+
+**Improvement:** Add tests (even if temporary during development) to verify:
+- `Table(arr)` (structured array as table) does **not** warn (since it becomes multiple columns, not a single structured column)
+- `Table({'x': arr})` **does** warn (because it inserts as a single column)
+
+### 5) The agent didn’t actually address the “Consider removing auto-transform…” beyond warning
+The prompt is a feature/deprecation request, not a runtime bug. The requested work for 5.1 was warning-only; that’s fine. But their final summary implies “fix the bug”, yet they didn’t add any deprecation helpers, docs, or changelog entries. In Astropy, API changes normally require a changelog note or formal deprecation machinery.
+
+**Improvement:**
+- Add a changelog fragment (if this repo uses Towncrier, likely under `docs/changes/...`). The prompt didn’t request it explicitly, but Astropy typically expects it.
+- Consider whether `AstropyDeprecationWarning` is preferred over raw `FutureWarning` (Astropy often uses custom warning classes). The prompt says `FutureWarning`, but repo conventions may differ.
+
+### 6) Running full `pytest -q` failed, and the agent didn’t interpret it correctly
+The full test run failed due to unrelated environment/library mismatches (numpy deprecation during collection, Quantity `concatenate(dtype=...)` error). This isn’t the agent’s fault, but they left it as-is. For a review: we should note that they **did** run targeted tests successfully, which is the only meaningful validation here.
+
+**Improvement:** In such environments, run a narrower relevant subset (e.g. `pytest astropy/table/tests`) and/or add `-W error::FutureWarning` checks for the new warning only.
+
+## Concrete code improvements to propose
+
+### A) Update warning text and potentially warning class
+In `astropy/table/table.py` inside `_convert_data_to_col` structured-ndarray clause:
+- Update warning message to include 5.2 and the future “Column” behavior.
+- Consider using Astropy’s standard deprecation warning class if policy prefers it (but prompt explicitly requested `FutureWarning`, so only change if project convention demands it).
+
+### B) Re-evaluate `stacklevel`
+- Verify correct stacklevel for both:
+  - `Table([arr])`
+  - `t['x']=arr` / `add_column(arr)`
+- Adjust accordingly.
+
+### C) Cleanly remove temporary tests
+- Delete `astropy/table/tests/test_structured_ndarray_warning.py` from the filesystem instead of emptying it.
+
+### D) Add guard tests during development (then remove)
+During implementation, add (temporary) tests to ensure warning is emitted only for the intended path:
+- Warns:
+  - `Table([structured_arr])`
+  - `t['x']=structured_arr`
+  - `Table({'x': structured_arr})`
+- Does **not** warn:
+  - `Table(structured_arr)` (structured table input that splits fields)
+
+Then delete that test module per instruction.
+
+## Summary
+The agent’s change is close, but to “pass all tests” in an upstream-quality sense, you should:
+1) fix the warning message/version semantics,  
+2) ensure correct `stacklevel`,  
+3) ensure warning triggers only in the single-column structured-array case, and  
+4) delete the temporary test file rather than leaving it empty.

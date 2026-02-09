@@ -1,0 +1,27 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- When debugging Matplotlib `Axes.hist`, track how kwargs are accumulated: later assignments like `hist_kwargs = {...}` can silently drop earlier keys such as `range`.
+- Prefer minimal fixes that *preserve existing state*: update a dict (`hist_kwargs["density"] = density`) instead of overwriting it.
+- Regression tests for `hist(..., bins="auto", range=..., density=True)` should assert the **bin edges honor the provided range** (first/last edge).
+- Make histogram tests deterministic and non-flaky: use fixed input arrays or seeded RNG, and compare floats with `pytest.approx`/`assert_allclose` (not `==`).
+- Exercise the exact failing branch (`density=True` and `stacked=False`), since other code paths (e.g., multiple datasets) may behave differently.
+
+Repo-Specific:
+- Add histogram-related tests to the established location: `lib/matplotlib/tests/test_axes.py` near existing `hist` tests, rather than creating a one-off new test module.
+- Avoid pyplot global-state leakage in tests: use `fig, ax = plt.subplots()` + `ax.hist(...)` and ensure cleanup (`plt.close(fig)`), or use repo fixtures when available.
+- Don’t run the full Matplotlib suite in constrained environments (freetype/baseline image issues); run targeted tests only (`pytest -q path::testname` or `-k ...`).
+- Keep the working tree clean: remove unrelated/untracked directories (e.g., `.claude/`) before finalizing.
+
+General:
+- Preserve and submit regression tests; deleting them undermines verification and invites re-regressions (even if a prompt suggests deletion, reconcile with the evaluation expectation: final state should include coverage).
+- Write tests that fail before the fix and pass after, and keep them focused on the specific regression mechanism.
+- Prefer robust assertions: deterministic inputs, approximate float comparisons, explicit resource cleanup.
+- Optimize iteration speed and signal: run the smallest relevant test subset instead of “pytest all,” especially when known environmental failures will add noise.

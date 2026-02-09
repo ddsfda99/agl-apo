@@ -1,0 +1,39 @@
+diff --git a/sphinx/ext/inheritance_diagram.py b/sphinx/ext/inheritance_diagram.py
+index 6e3985512..823cfc6e5 100644
+--- a/sphinx/ext/inheritance_diagram.py
++++ b/sphinx/ext/inheritance_diagram.py
+@@ -409,16 +409,33 @@ def html_visit_inheritance_diagram(self: HTML5Translator, node: inheritance_diag
+     graphviz_output_format = self.builder.env.config.graphviz_output_format.upper()
+     current_filename = self.builder.current_docname + self.builder.out_suffix
+     urls = {}
++
++    # compute base paths to properly relativize links from the SVG's location
++    import posixpath as _pp
++    from urllib.parse import urlsplit as _urlsplit, urlunsplit as _urlunsplit
++
++    # e.g. 'pkg/index.html' or 'index.html'
++    page_baseuri = self.builder.get_target_uri(self.builder.current_docname)
++    page_dir = _pp.dirname(page_baseuri)
++    # directory in output where SVGs are stored (e.g. '_images')
++    svg_dir = self.builder.imagedir
++
+     pending_xrefs = cast(Iterable[addnodes.pending_xref], node)
+     for child in pending_xrefs:
+         if child.get('refuri') is not None:
+             if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = "../" + child.get('refuri')
++                parts = _urlsplit(child.get('refuri'))
++                # child['refuri'] is relative to the current page; make absolute (relative to outdir)
++                abs_path = _pp.normpath(_pp.join(page_dir or '.', parts.path))
++                rel_path = _pp.relpath(abs_path, start=svg_dir)
++                urls[child['reftitle']] = _urlunsplit(('', '', rel_path, parts.query, parts.fragment))
+             else:
+                 urls[child['reftitle']] = child.get('refuri')
+         elif child.get('refid') is not None:
+             if graphviz_output_format == 'SVG':
+-                urls[child['reftitle']] = '../' + current_filename + '#' + child.get('refid')
++                abs_path = _pp.normpath(_pp.join(page_dir or '.', current_filename))
++                rel_path = _pp.relpath(abs_path, start=svg_dir)
++                urls[child['reftitle']] = rel_path + '#' + child.get('refid')
+             else:
+                 urls[child['reftitle']] = '#' + child.get('refid')

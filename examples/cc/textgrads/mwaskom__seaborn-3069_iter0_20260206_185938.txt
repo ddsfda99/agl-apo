@@ -1,0 +1,151 @@
+## High-level outcome
+
+The agent did not fix the bug. It only:
+- inspected relevant code (`Nominal` scale, `Plotter._finalize_figure`)
+- made a single, incomplete edit: `from seaborn._core.scales import Scale` → `Scale, Nominal` in `seaborn/_core/plot.py`
+- then crashed due to an unrelated tool authentication error, without adding tests, implementing behavior, or validating anything.
+
+No part of the described behavior change (limits ±0.5, grid suppression, y-axis inversion) was implemented.
+
+---
+
+## Where the implementation is currently missing
+
+### 1) Nominal axis limits should be “categorical-style” (±0.5)
+**Current behavior:**  
+`Plotter._finalize_figure` only applies special `±0.5` logic when the user sets `Plot.limit(... )` and the limits are strings:
+
+```py
+if isinstance(a, str): lo = convert_units(a) - 0.5
+if isinstance(b, str): hi = convert_units(b) + 0.5
+```
+
+But the bug request is about the *default scale drawing* for nominal coordinates, not only explicit `limit()` calls.
+
+**What’s missing:**
+- When coordinate scale is `Nominal` (including inferred), seaborn should set axis limits to `(-0.5, n_categories-0.5)` (or equivalent using sticky edges), rather than relying on matplotlib’s margins/autoscale behavior.
+
+**Likely best location:**  
+In `_finalize_figure` (as hinted), after `autoscale_view()` has run, detect nominal coordinate scales and enforce the categorical span. Or implement via an “invisible sticky artist + margins=0” hack as described.
+
+---
+
+### 2) Grid should be disabled for nominal coordinate axes
+**Current behavior:**  
+Nothing in `Plotter._finalize_figure` changes grid visibility. Grid behavior is entirely rcParams/style-driven.
+
+**What’s missing:**
+- For nominal coordinates, disable gridlines even if the active style enables them.
+
+**Design question noted in prompt:** how to allow user override? The agent didn’t address it. A reasonable interpretation of the prompt is: default should match categorical plots: no grid. But you should still allow explicit user actions to enable grids afterwards (that’s naturally possible if the user calls `ax.grid(True)` after `Plot.plot()`).
+
+Implementation-wise, do something like `ax.grid(False, axis=...)` when that axis is nominal.
+
+---
+
+### 3) If nominal scale is on y, invert y-axis
+**Current behavior:**  
+No inversion occurs for nominal y. In categorical plots, seaborn commonly inverts the categorical y-axis so the first category appears at top.
+
+**What’s missing:**
+- In `_finalize_figure` (or perhaps earlier), check if `y` coordinate scale is `Nominal` and then call `ax.invert_yaxis()` (carefully, so it’s not repeatedly toggled).
+
+---
+
+## The agent also missed explicit prompt requirements
+
+The original task required a workflow:
+1) write test cases reproducing the bug  
+2) locate bug  
+3) fix  
+4) rerun tests  
+5) delete the temporary tests
+
+The agent:
+- did not write any new tests
+- did not run tests
+- did not implement the fix
+- did not delete tests (none created)
+
+---
+
+## Concrete test cases that should be added (and then removed per instructions)
+
+Even though seaborn’s repo already has tests, this change needs new regression coverage. Tests should validate:
+
+1) **Nominal x-axis limits become ±0.5**
+   - Build a simple objects plot with inferred nominal x.
+   - Assert `ax.get_xlim() == (-0.5, n-0.5)` (or close).
+   - Use deterministic category ordering.
+
+2) **Nominal y-axis is inverted**
+   - Plot with inferred nominal y.
+   - Assert `ax.yaxis_inverted()` is `True`.
+
+3) **Grid is disabled for nominal axes**
+   - Force a style/theme where grid is normally on (e.g. seaborn darkgrid theme is used by default in objects).
+   - After plotting with nominal x (or y), assert gridlines for that axis are not visible.
+     - In matplotlib: check `any(line.get_visible() for line in ax.get_xgridlines())` is `False` (or ygridlines).
+
+Important: write these tests in a temporary test module and remove at end per prompt. But for a real PR they should remain.
+
+---
+
+## Code changes that are actually needed
+
+### Detect nominal coordinate scales in `Plotter._finalize_figure`
+The agent started importing `Nominal` in `plot.py` but didn’t use it. You need to:
+- Determine whether the subplot’s `x`/`y` axis corresponds to a `Nominal` scale.
+  - In this codebase, `Plotter` stores scales in `self._scales` keyed by variable names. For paired plots, axis key might be `x0`, `x1`, etc, and `sub[axis]` gives that key.
+  - You should check `self._scales[sub[axis]]` (not always `self._scales["x"]`), because `sub[axis]` may be `"x0"`.
+
+Then apply:
+- categorical-style limits (±0.5)
+- disable grid for that axis
+- invert nominal y-axis
+
+### Avoid breaking existing behaviors
+Be careful that:
+- explicit `Plot.limit(...)` should still work and override the default categorical bounds.
+- paired/faceted sharing: changing limits must be consistent across shared axes.
+- don’t invert y-axis if already inverted (avoid toggling if `_finalize_figure` runs multiple times).
+
+### The “sticky artist” approach
+The prompt explicitly warns that the limit behavior is tricky in matplotlib and suggests the sticky-edges hack:
+- Add an invisible artist with `set_visible(False)` or alpha 0.
+- Set its data limits / sticky edges so autoscale respects `(-0.5, n-0.5)` without margins.
+- Then set `ax.margins(x=0)` / `ax.margins(y=0)` (or axis-specific margin control).
+
+Right now, seaborn objects call `ax.autoscale_view()` in `_plot_layer`, which likely introduces standard margins. If you directly `set_xlim(-0.5, n-0.5)` after that, it may be sufficient and much simpler, but you need to confirm it doesn’t get overridden by shared axes adjustments. The prompt implies there were historical matplotlib issues, so tests should confirm robustness.
+
+---
+
+## Additional notes on the agent’s trace
+
+- The agent searched for `invert_yaxis` and `gridOnMajor` in tests but didn’t follow up.
+- The agent never inspected categorical plotting code from seaborn’s classic categorical module (likely where this behavior exists today). That would have provided a direct blueprint.
+- The final Edit (adding `Nominal` import) is incomplete and unused; it should either be used or removed to avoid lint issues.
+
+---
+
+## Summary of recommended improvements
+
+1) Implement nominal-axis handling in `Plotter._finalize_figure`:
+   - set bounds to `(-0.5, n-0.5)` for nominal coordinate axes by default
+   - disable grid on those axes
+   - invert y axis when nominal
+
+2) Add regression tests for:
+   - xlim span
+   - y inversion
+   - grid suppression
+
+3) Ensure explicit user limits override the default nominal behavior.
+
+4) Validate across:
+   - single plot
+   - faceted plot
+   - paired plot
+   - shared axes combinations
+
+5) Remove temporary tests at the end only if you’re strictly following the prompt’s “delete test cases” instruction; otherwise keep them as normal regression tests.

@@ -1,0 +1,154 @@
+## Where the agent’s solution went wrong / missed requirements
+
+### 1) They never actually ran the real test suite
+- `pytest` wasn’t available, so they ran a hand-written `run_test.py`.
+- That does **not** satisfy “rerun your written test cases”, and more importantly it provides **zero confidence** that existing SymPy unit tests still pass.
+
+**Concrete improvement**
+- Use the repository’s test runner approach that exists in this environment (often `python -m sympy`-style, or `python -m pytest` if available). If `pytest` truly isn’t available, the agent should:
+  - either install it (if allowed),
+  - or run SymPy’s own test harness (SymPy historically has `python -m sympy.testing.runtests`).
+- At minimum, run the relevant existing test file(s) around `unitsystem` and `dimensionsystem`.
+
+---
+
+### 2) The fix for the reported bug is directionally correct but incomplete/unsafe
+They changed:
+
+```py
+if dim != addend_dim:
+    raise ValueError
+```
+
+to:
+
+```py
+if not self.get_dimension_system().equivalent_dims(dim, addend_dim):
+    raise ValueError
+```
+
+This is the right idea. However:
+
+- `equivalent_dims` relies on `get_dimensional_dependencies`. That function can raise `TypeError` for unsupported dimension expressions. `_collect_factor_and_dimension` previously only compared by `!=` and would not raise those `TypeError`s. Now it might, changing API behavior.
+- No guard for when `self.get_dimension_system()` is `None` (UnitSystem can be instantiated without a dimension system; some code paths might rely on that even if SI doesn’t).
+- They did not normalize the returned dimension in the `Add` case. It returns the first addend’s dimension even if the second addend is the “canonical” one (e.g., returns `acceleration*time` rather than `velocity`). That may be acceptable, but if callers compare against preferred derived dimensions it can cause regressions.
+
+**Concrete improvements**
+- Wrap equivalence check to preserve old exception behavior:
+  ```py
+  try:
+      ok = self.get_dimension_system().equivalent_dims(dim, addend_dim)
+  except TypeError:
+      ok = (dim == addend_dim)
+  if not ok: raise ValueError(...)
+  ```
+- If `dimension_system is None`, fall back to equality.
+- Optionally normalize the resulting dimension to a canonical representative (if SymPy has such a notion), or at least choose a deterministic one (e.g., keep `dim` but could also simplify if dimension system says they’re equivalent).
+
+---
+
+### 3) They introduced a **new bug** in the `Function` branch of `_collect_factor_and_dimension`
+Original code (already questionable) returned:
+```py
+return (expr.func(*(f[0] for f in fds)), *dims)
+```
+That yields a tuple longer than 2 elements, which violates the function’s contract (“Return tuple with scale factor expression and dimension expression.”).
+
+The agent “fixed” it to:
+```py
+return (expr.func(...), Dimension(1) if all(is_dimensionless(d) for d in dims) else dims[0])
+```
+
+This is **still wrong** semantically:
+- For `f(x, y)` where `x` and `y` have different (non-dimensionless) dimensions, returning `dims[0]` is incorrect and silently masks an error.
+- Even for same dimension args, choosing `dims[0]` without checking equivalence is risky.
+- This is an unrelated change to the requested bug and could break existing behavior.
+
+**Concrete improvement**
+- Revert the `Function` branch to something correct and contract-respecting:
+  - If the function is dimensionless-only (common: trig/exp/log), require all args dimensionless and return `(f(factors...), Dimension(1))`.
+  - Otherwise, if the function is unknown, you can’t infer the dimension: either raise, or keep a symbolic `Dimension(expr.func(*dims))` style (but then dependency rules must support it).
+- But **do not** introduce unrelated behavior changes in a bugfix PR unless you have coverage + a clear rationale.
+
+---
+
+### 4) Their test expectations were wrong and then “fixed” in a way that hides issues
+They initially asserted the factor is `-47 * meter/second`, then changed it to `-47`.
+
+This reveals they didn’t understand SymPy’s scale factor conventions:
+- `set_quantity_scale_factor` replaces quantities (like `meter`, `second`) by their numeric scale factors relative to canonical units. In SI, `meter` and `second` are canonical so scale factor becomes numeric. That’s why `factor` became `-47.0`.
+
+**Concrete improvement**
+- The test should assert *both*:
+  - no exception is raised,
+  - the **dimension equivalence** holds,
+  - and the numeric factor equals expected numeric value **with exactness**, ideally avoiding floats (`Rational`), e.g. use `Rational(98, 10)` etc.
+
+---
+
+### 5) They deleted the test file (per instructions) but left other artifacts
+They created `/testbed/run_test.py` and `/testbed/cleanup.py` and did not remove them. The prompt says “remember to delete the test cases you write at last” — but leaving extra scripts is still repository pollution and can affect packaging/tests.
+
+**Concrete improvement**
+- Remove `run_test.py` and `cleanup.py` as well, or never create them in-repo (use temporary execution snippets instead).
+
+---
+
+## What the correct fix should look like
+
+### Minimal targeted code fix (only for `Add`)
+In `UnitSystem._collect_factor_and_dimension`, for `Add`:
+
+- Use dimensional equivalence when possible
+- Preserve old behavior when equivalence cannot be computed
+- Don’t touch `Function` behavior in this PR
+
+Pseudo-patch:
+
+```py
+elif isinstance(expr, Add):
+    factor, dim = self._collect_factor_and_dimension(expr.args[0])
+    for addend in expr.args[1:]:
+        addend_factor, addend_dim = self._collect_factor_and_dimension(addend)
+
+        if dim != addend_dim:
+            ds = self.get_dimension_system()
+            if ds is None:
+                raise ValueError(...)
+            try:
+                if not ds.equivalent_dims(dim, addend_dim):
+                    raise ValueError(...)
+            except TypeError:
+                # fallback: not comparable => treat as mismatch like before
+                raise ValueError(...)
+
+        factor += addend_factor
+    return factor, dim
+```
+
+### Add a real regression test (and keep it)
+The prompt’s “delete tests” instruction conflicts with normal repo practice; but since your meta-instruction says we want the agent to “pass all tests”, the correct approach in real life is to **keep** the regression test under `sympy/physics/units/tests/`.
+
+Test should:
+- replicate the exact repro
+- avoid float fragility:
+  - use `Rational(-98, 10)` or `Rational(49, 5)` etc.
+
+Example structure:
+- `v1` velocity with scale factor `2*meter/second`
+- `a1` acceleration with scale factor `-Rational(49, 5)*meter/second**2` (instead of -9.8)
+- `t1` time with scale factor `5*second`
+- assert `_collect_factor_and_dimension(a1*t1 + v1)` does not raise
+- assert `dimsys_SI.equivalent_dims(dim, units.velocity)`
+
+Factor assertion:
+- should equal `-47` exactly (as Integer/Rational), not float.
+
+---
+
+## Summary of concrete action items for the agent
+
+1. Revert the unrelated `Function` branch modification in `unitsystem.py`.
+2. Make the `Add`-equivalence fix robust to `TypeError` and `dimension_system is None`.
+3. Add a proper regression test using exact rationals, and run the project’s real test harness (not an ad-hoc script).
+4. Delete any helper scripts (`run_test.py`, `cleanup.py`) created during debugging.

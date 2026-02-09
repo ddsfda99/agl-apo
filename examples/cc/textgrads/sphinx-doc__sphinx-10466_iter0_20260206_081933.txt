@@ -1,0 +1,99 @@
+## Where the agent succeeded
+- Correctly found the relevant pipeline in **`sphinx/builders/gettext.py`**:
+  - `Catalog.add()` collects `(source, line, uuid)` repeatedly.
+  - `Catalog.__iter__()` converts that to `positions=[(source, line), ...]`.
+  - `message.pot_t` blindly prints every `message.locations` entry, so duplicates become repeated `#:` lines.
+- Implemented **order-preserving deduplication** (good: avoids `set()` reordering).
+- Added a focused reproduction test, validated it, and removed it as instructed.
+
+## Where it failed key requirements
+### 1) It left the repo in a failing state (did not “make tests pass”)
+The prompt requires rerunning written tests and iterating until fixed. The agent ran `pytest -q`, saw **many unrelated failures**, and stopped without addressing them.
+
+Even if those failures are “environmental”, you still must ensure your change doesn’t introduce/alter failures and that CI expectations are met. In practice, on this repo those failures are typically avoided by running a *targeted* subset or configuring environment. But the agent did not do that rigorously and left a confusing state.
+
+### 2) The new test was not integrated into the existing Sphinx pytest harness
+The reproduction test directly instantiated `Catalog()`/`MsgOrigin()` rather than running the **gettext builder end-to-end**. This misses real duplication patterns (e.g., same message collected via multiple doctree passes, `toctree` hacks, additional targets, etc.), and it doesn’t verify actual `.pot` output.
+
+A better test should:
+- use `@pytest.mark.sphinx('gettext', testroot=..., ...)`
+- build a small root with RST that triggers the duplication
+- assert on the resulting `.pot` content that `#:` entries are unique for a given `msgid`
+
+### 3) Fix location is questionable; it’s too late/too generic
+Deduping inside `Message.__init__` is “safe-ish” but is also an odd abstraction boundary:
+- `Message` is a generic container; silently mutating/deduping inputs may surprise other uses.
+- The duplication is created by `Catalog.__iter__()` (or even earlier in `Catalog.add()`), so dedup should live there.
+- If `gettext_uuid` is enabled, duplicates might also exist in `uuids`, and this fix doesn’t address those (maybe fine, but at least consider it).
+
+### 4) Did not clean up `.claude/` untracked artifact
+`git status` shows `?? .claude/`. The agent should remove any tool-created artifacts before finishing.
+
+## Concrete improvements to make this solution robust and acceptable
+
+### A) Move deduplication to `Catalog.__iter__` (or `Catalog.add`)
+**Preferred fix**: dedupe *as you derive positions*, not in `Message`:
+
+```py
+def __iter__(self):
+    for message in self.messages:
+        seen = set()
+        positions = []
+        uuids = []
+        for source, line, uuid in self.metadata[message]:
+            pos = (source, line)
+            if pos not in seen:
+                seen.add(pos)
+                positions.append(pos)
+            uuids.append(uuid)
+        yield Message(message, positions, uuids)
+```
+
+Benefits:
+- `Message` remains a dumb data object.
+- Dedup is explicitly tied to how gettext catalogs render locations.
+- Preserves first-seen order.
+- Leaves UUID collection unchanged.
+
+(If you want to dedup UUIDs too, do it separately and only if you confirm duplicates happen and are undesired.)
+
+### B) Add an end-to-end test root that reproduces the bug via builder output
+Create a minimal test root under `tests/roots/test-gettext-duplicate-locations/`:
+- `conf.py` enabling gettext builder defaults
+- `index.rst` containing repeated inclusion or nodes that cause the same translatable string to be extracted multiple times **with same source/line** (this is the important part)
+
+Then a test like:
+
+```py
+@pytest.mark.sphinx('gettext', testroot='gettext-duplicate-locations')
+def test_gettext_locations_are_deduplicated(app):
+    app.builder.build_all()
+    pot = (app.outdir / 'index.pot').read_text(encoding='utf8')
+    # isolate the block for msgid "Type" (or whatever string you choose)
+    block = extract_po_block(pot, 'Type')
+    assert block.count('#: ') == len(set(re.findall(r'^#: (.*)$', block, re.M)))
+```
+
+Implement `extract_po_block` locally in the test.
+
+This ensures:
+- the duplication is tested at the same layer users see (`.pot`)
+- you won’t regress due to template changes
+- it matches the reported bug context (“locations duplicated unnecessarily”)
+
+### C) Make sure you actually satisfy the prompt’s lifecycle requirements
+- Run at least:
+  - the new test
+  - existing gettext tests: `tests/test_build_gettext.py` and `tests/test_intl.py` relevant cases
+- If full suite is not stable in the environment, document and scope the run (but you should still ensure your change does not affect those failures).
+
+### D) Cleanup
+- Remove `.claude/` from the working tree if it’s not supposed to be there, or add to `.gitignore` if the harness generates it (prefer removal here).
+
+## Summary of what to change now
+1. Refactor fix: move location dedup from `Message.__init__` to `Catalog.__iter__` (or `Catalog.add`).
+2. Add a builder-level regression test asserting no duplicated `#:` lines in generated `.pot`.
+3. Remove `.claude/` artifact.
+4. Re-run gettext-related tests to validate.
+
+These changes will make the fix better-scoped, properly tested, and aligned with how Sphinx’s test suite expects regressions to be covered.

@@ -1,0 +1,29 @@
+diff --git a/lib/matplotlib/ticker.py b/lib/matplotlib/ticker.py
+index 209a3f92c..1590ad6b0 100644
+--- a/lib/matplotlib/ticker.py
++++ b/lib/matplotlib/ticker.py
+@@ -2376,11 +2376,15 @@ class LogLocator(Locator):
+         return vmin, vmax
+ 
+     def nonsingular(self, vmin, vmax):
++        # Preserve input orientation while avoiding singularities, like
++        # MaxNLocator does via increasing=False.
+         if not np.isfinite(vmin) or not np.isfinite(vmax):
+             return 1, 10  # initial range, no data plotted yet
+ 
++        swapped = False
+         if vmin > vmax:
+             vmin, vmax = vmax, vmin
++            swapped = True
+         if vmax <= 0:
+             cbook._warn_external(
+                 "Data has no positive values, and therefore cannot be "
+@@ -2395,7 +2399,7 @@ class LogLocator(Locator):
+         if vmin == vmax:
+             vmin = _decade_less(vmin, self._base)
+             vmax = _decade_greater(vmax, self._base)
+-        return vmin, vmax
++        return (vmax, vmin) if swapped else (vmin, vmax)
+ 
+ 
+ class SymmetricalLogLocator(Locator):

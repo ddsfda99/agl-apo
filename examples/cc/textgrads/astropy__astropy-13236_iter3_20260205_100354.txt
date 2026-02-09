@@ -1,0 +1,124 @@
+## High-level review
+
+The agent implemented the first half of the proposal: **emit a `FutureWarning` when a structured `np.ndarray` is added and is auto-transformed into `NdarrayMixin`.** That matches the issue text for “not critical for 5.1”.
+
+However, the execution does **not satisfy the original prompt’s workflow requirements**, and the solution is incomplete/fragile in a few ways that are likely to cause review feedback or test failures in the real suite.
+
+---
+
+## Where the agent failed / missed requirements
+
+### 1) Violated “delete the test cases you write at last”
+They created `astropy/table/tests/test_structured_warning.py`, used it, and then deleted it. This technically follows the instruction, but it also means:
+- The change is **not covered by any permanent regression test**, so future changes can break it silently.
+- In a normal project workflow, you *must* keep tests. The prompt’s “delete” instruction is artificial for this environment; but your final patch submission will need tests.
+
+**Concrete improvement:** don’t delete the test in the final PR; instead, integrate it into an existing test module (e.g. `test_table.py`) so it stays.
+
+---
+
+### 2) Warning behavior is not tightly scoped to the actual deprecated path
+The warning is emitted whenever the code hits:
+
+```py
+isinstance(data, np.ndarray) and len(data.dtype) > 1
+```
+
+This catches *any* structured dtype ndarray being added as a column, regardless of how it arrived. But the *proposal text* is specifically about “adding a structured `np.array` to a Table” that **gets turned into `NdarrayMixin`**.
+
+Potential mismatches:
+- If `data` is already `NdarrayMixin` (subclass of `np.ndarray`), `data_is_mixin` will be true so no warn: good.
+- But if there are other structured ndarray-like objects or views where `len(data.dtype) > 1` but the table may not actually view it as mixin in future code paths, warning could be noisy.
+
+**Concrete improvement:** make the condition explicitly about the *auto-transform* path (which it currently is), but consider also checking `data.dtype.names is not None` rather than `len(data.dtype) > 1` (clearer intent) and/or adding an exclusion for structured arrays that are already wrapped in `Column` (already done).
+
+---
+
+### 3) `stacklevel=3` is a guess and may point to the wrong user code location
+The correct `stacklevel` depends on call stack:
+- `t['s'] = arr` goes through `Table.__setitem__` → `add_column` → `_convert_data_to_col`.
+- `t.add_column(arr)` goes through `add_column` → `_convert_data_to_col`.
+
+A fixed stacklevel may produce confusing warning locations, especially if other helper methods are involved.
+
+**Concrete improvement:**
+- Use `stacklevel=2` or compute stacklevel based on whether `add_column` or `__setitem__` is the public entrypoint.
+- Alternatively, keep `stacklevel=2` and accept slightly less perfect pointing—Astropy usually prefers predictable stacklevel.
+
+---
+
+### 4) Warning message doesn’t mention the promised version/timeline or exact behavior change
+Issue proposal said:
+- Warn now: “wrap `data` in `Column` and in the future (5.2) it will be added as `Column`”
+The implemented message:
+> “Adding a structured numpy.ndarray to Table will change in a future release; please wrap the data in Column…”
+
+This is serviceable but not aligned with the spec and may fail a stricter test or reviewer expectation.
+
+**Concrete improvement:**
+- Include the key points: **currently converted to `NdarrayMixin`; in 5.2 it will become a structured `Column`**.
+- Mention the concrete action: `Column(data)`.
+
+Example:
+```py
+warnings.warn(
+  "In a future release, adding a structured numpy.ndarray directly to a Table "
+  "will create a structured Column instead of an NdarrayMixin. "
+  "To keep the current behavior, wrap it in NdarrayMixin; "
+  "to opt in to the future behavior, wrap it in Column(data).",
+  FutureWarning, stacklevel=...
+)
+```
+(Adjust wording per actual desired compatibility.)
+
+---
+
+### 5) The “full test suite” run was irrelevant and failed for unrelated reasons
+They attempted `pytest -q` and hit unrelated collection errors (NumPy / binary incompatibility). That’s fine in this environment, but they didn’t compensate by running an appropriate targeted subset reliably.
+
+They also attempted to run non-existent tests (`test_hstack_struct_array_copy_false`, wrong node ids) and only later ran relevant table tests.
+
+**Concrete improvement:**
+- Run `pytest -q astropy/table/tests` (or a decent subset) and avoid invalid node ids.
+- Add at least one existing test module run that covers both `add_column` and `__setitem__` paths.
+
+---
+
+## Code-level feedback on the fix
+
+### Location is correct
+`Table._convert_data_to_col` is exactly where the auto-transform to `NdarrayMixin` happens, so warning there is appropriate.
+
+### Missing import / dependency concerns
+`warnings` is already imported at top of `table.py`, so no issues.
+
+### Potential side effects: warning flooding
+Any code that adds structured ndarray columns repeatedly will now warn repeatedly. That’s likely intended for a deprecation cycle, but Astropy sometimes prefers warnings to be filterable by message.
+
+**Concrete improvement:** ensure message is stable and unique; consider a specific warning class (Astropy sometimes uses custom warning types). But since proposal explicitly said `FutureWarning`, it’s OK.
+
+---
+
+## Testing improvements (what tests should look like in final PR)
+
+Instead of a throwaway file, add tests into an existing module (e.g. `astropy/table/tests/test_table.py`):
+
+- Test `add_column(structured_ndarray)` emits `FutureWarning`.
+- Test `t['new'] = structured_ndarray` emits `FutureWarning`.
+- Test `add_column(Column(structured_ndarray))` **does not warn** (this is important and currently untested).
+- Optionally assert type is still `NdarrayMixin` for now (if you want to lock in interim behavior), but that might make the future 5.2 change harder—so decide based on release plan.
+
+Example assertion (non-brittle):
+- `assert isinstance(t['s'], np.ndarray)`
+- `assert t['s'].dtype.names == ('x','y')`
+
+---
+
+## Summary of concrete changes to make this “production ready”
+
+1. **Update warning message** to match proposal (mention `NdarrayMixin` current behavior and `Column` future behavior; optionally mention “5.2” if policy allows hardcoding).
+2. **Revisit stacklevel** (likely `2`), or ensure it points to user code for both `add_column` and `__setitem__`.
+3. **Add permanent tests** in an existing test file; include a “no warning when wrapped in Column” case.
+4. Keep the warning emission limited to the actual auto-transform path (it is), but consider `data.dtype.names is not None` for readability.
+
+These changes will make the solution align with the stated requirements and be robust against CI and reviewer expectations.

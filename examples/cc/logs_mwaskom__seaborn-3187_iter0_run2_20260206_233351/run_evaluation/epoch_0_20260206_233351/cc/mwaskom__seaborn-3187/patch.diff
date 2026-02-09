@@ -1,0 +1,66 @@
+diff --git a/seaborn/_core/scales.py b/seaborn/_core/scales.py
+index 55874bf2..c16c1fed 100644
+--- a/seaborn/_core/scales.py
++++ b/seaborn/_core/scales.py
+@@ -338,6 +338,19 @@ class ContinuousBase(Scale):
+             axis.update_units(data)
+ 
+         mpl_scale.set_default_locators_and_formatters(axis)
++        # In legend contexts (where we use a PseudoAxis), ScalarFormatter may
++        # apply an offset that is shown separately on real matplotlib axes.
++        # Because legends don't render the offset text, the tick labels would
++        # appear without the multiplicative offset (e.g., show 3, 4 instead of 3e6, 4e6).
++        # Disable the offset for PseudoAxis so legend labels reflect full values.
++        try:
++            if isinstance(axis, PseudoAxis):
++                fmt = getattr(axis.major, "formatter", None)
++                if fmt is not None and hasattr(fmt, "set_useOffset"):
++                    fmt.set_useOffset(False)
++        except Exception:
++            # Be robust to formatter implementations without this API
++            pass
+         new._matplotlib_scale = mpl_scale
+ 
+         normalize: Optional[Callable[[ArrayLike], ArrayLike]]
+@@ -805,6 +818,14 @@ class PseudoAxis:
+         self._data_interval = None, None
+ 
+         scale.set_default_locators_and_formatters(self)
++        # Disable ScalarFormatter offset in legend-like PseudoAxis contexts,
++        # because legends do not display the separate offset text.
++        fmt = getattr(self.major, "formatter", None)
++        if fmt is not None and hasattr(fmt, "set_useOffset"):
++            try:
++                fmt.set_useOffset(False)
++            except Exception:
++                pass
+         # self.set_default_intervals()  Is this ever needed?
+ 
+     def set_view_interval(self, vmin, vmax):
+diff --git a/tests/_core/test_scales.py b/tests/_core/test_scales.py
+index c4b39f5d..7aab1c3d 100644
+--- a/tests/_core/test_scales.py
++++ b/tests/_core/test_scales.py
+@@ -303,6 +303,22 @@ class TestContinuous:
+         label, = a.major.formatter.format_ticks([100])
+         assert r"10^{2}" in label
+ 
++    def test_scalarformatter_offset_disabled_in_pseudoaxis(self):
++
++        # Ensure ScalarFormatter would normally apply an offset
++        with mpl.rc_context({
++            'axes.formatter.useoffset': True,
++            'axes.formatter.offset_threshold': 0,
++        }):
++            x = pd.Series([1_000_000.0, 2_000_000.0, 3_000_000.0], name="x")
++            s = Continuous()._setup(x, Coordinate())
++            # Create a PseudoAxis like seaborn does for legend-like contexts
++            a = PseudoAxis(s._matplotlib_scale)
++            fmt = a.major.formatter
++            assert isinstance(fmt, mpl.ticker.ScalarFormatter)
++            # The formatter should not use an offset on PseudoAxis
++            assert not fmt.get_useOffset()
++
+     def test_label_type_checks(self):
+ 
+         s = Continuous()

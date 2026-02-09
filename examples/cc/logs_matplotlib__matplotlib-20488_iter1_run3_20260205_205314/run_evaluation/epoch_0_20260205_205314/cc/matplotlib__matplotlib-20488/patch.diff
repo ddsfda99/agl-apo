@@ -1,0 +1,50 @@
+diff --git a/lib/matplotlib/image.py b/lib/matplotlib/image.py
+index 95bb42d75..b1d7b6750 100644
+--- a/lib/matplotlib/image.py
++++ b/lib/matplotlib/image.py
+@@ -442,12 +442,23 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):
+                 vmid = np.float64(self.norm.vmin) + dv / 2
+                 fact = 1e7 if scaled_dtype == np.float64 else 1e4
+                 newmin = vmid - dv * fact
+-                if newmin < a_min:
++                # Cast extrema to plain floats for robust comparisons against
++                # ndarray subclasses (e.g., units-aware arrays) which may not
++                # implement comparison ufuncs.
++                try:
++                    a_min_cmp = np.asarray(a_min, dtype=np.float64).item()
++                except Exception:
++                    a_min_cmp = float(a_min)
++                try:
++                    a_max_cmp = np.asarray(a_max, dtype=np.float64).item()
++                except Exception:
++                    a_max_cmp = float(a_max)
++                if newmin < a_min_cmp:
+                     newmin = None
+                 else:
+                     a_min = np.float64(newmin)
+                 newmax = vmid + dv * fact
+-                if newmax > a_max:
++                if newmax > a_max_cmp:
+                     newmax = None
+                 else:
+                     a_max = np.float64(newmax)
+@@ -533,8 +544,17 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):
+                 # that may have moved input values in/out of range
+                 s_vmin, s_vmax = vrange
+                 if isinstance(self.norm, mcolors.LogNorm):
+-                    if s_vmin < 0:
+-                        s_vmin = max(s_vmin, np.finfo(scaled_dtype).eps)
++                    # Guard against passing a nonpositive or non-finite vmin to LogNorm.
++                    # Roundoff during the rescale→resample→unscale pipeline can turn a
++                    # small positive vmin into 0 or a non-finite value; this is catastrophic
++                    # for LogNorm (log(0) → -inf), which then raises ValueError("Invalid vmin or vmax").
++                    # Clamp to the smallest positive representable value for the working dtype,
++                    # but only if the user originally provided a valid positive vmin. This avoids
++                    # silently accepting truly invalid user inputs for LogNorm.
++                    tiny_pos = np.nextafter(np.array(0, dtype=scaled_dtype), np.array(1, dtype=scaled_dtype)).item()
++                    orig_vmin = vmin
++                    if ((not np.isfinite(s_vmin)) or (s_vmin <= 0)) and (orig_vmin is not None and np.float64(orig_vmin) > 0):
++                        s_vmin = tiny_pos
+                 with cbook._setattr_cm(self.norm,
+                                        vmin=s_vmin,
+                                        vmax=s_vmax,

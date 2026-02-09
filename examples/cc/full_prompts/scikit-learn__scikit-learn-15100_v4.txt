@@ -1,0 +1,27 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Always verify the bug with a *failing* regression test on the current checkout before touching production code; if the new test passes pre-change, it didn’t reproduce the issue.
+- Test the real user-facing path from the prompt (e.g., `CountVectorizer(strip_accents="unicode")`), not only the helper (`strip_accents_unicode`), because the bug may be in the integration/dispatch chain.
+- The characteristic root-cause pattern for this bug is an over-aggressive fast-path: `normalized = NFKD(s); if normalized == s: return s` which skips combining-mark removal for already-decomposed text—fix by always stripping combining marks after normalization (or only fast-path if you can prove no combining marks exist).
+- If the repo already contains a regression test covering the case, don’t add redundant tests; extend the existing test module instead.
+- If the bug is not reproducible in this repo version, avoid “drive-by” refactors/micro-optimizations disguised as fixes; either find the actual failing behavior (often in hidden tests) or leave production code unchanged.
+
+Repo-Specific:
+- scikit-learn already has relevant coverage in `sklearn/feature_extraction/tests/` (e.g., an existing `test_strip_accents_nfkd.py`); prefer modifying/adding cases there rather than creating ad-hoc new test files.
+- `strip_accents_unicode` is in `sklearn/feature_extraction/text.py` (or nearby); when investigating, also inspect the `CountVectorizer` preprocessing/analyzer pipeline (`build_preprocessor`, etc.) to ensure the intended function is actually invoked.
+- Don’t trust a “no files found” result from a glob/grep without sanity checks (`find sklearn -name "*.py" | head`, `rg "strip_accents_unicode" sklearn`); tooling misuse can derail debugging.
+- If instructed to delete temporary tests, delete the file (remove it from the tree) rather than leaving an empty `test_*.py` placeholder.
+
+General:
+- Follow a strict loop: reproduce (failing test) → localize (code search + minimal hypothesis) → fix (smallest change) → validate (re-run targeted suite + nearby tests) → cleanup.
+- When a prompt references an upstream bug, be prepared that the repo may already include the fix; in that case, shift to finding what hidden tests might be asserting (integration path differences, edge cases), not cosmetic code edits.
+- Avoid claiming “bug not present” without evidence: show baseline failure conditions you expected and what you observed instead.
+- Handle transient execution failures (e.g., API 429/timeouts) with retries/backoff and continue; “no work performed” is always a losing outcome.

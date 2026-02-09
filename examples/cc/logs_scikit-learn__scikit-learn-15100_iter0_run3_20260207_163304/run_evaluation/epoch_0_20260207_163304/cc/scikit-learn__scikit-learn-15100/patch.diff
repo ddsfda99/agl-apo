@@ -1,0 +1,19 @@
+diff --git a/sklearn/feature_extraction/text.py b/sklearn/feature_extraction/text.py
+index bb5a9d646..5f38d8fa0 100644
+--- a/sklearn/feature_extraction/text.py
++++ b/sklearn/feature_extraction/text.py
+@@ -130,10 +130,10 @@ def strip_accents_unicode(s):
+         ASCII equivalent.
+     """
+     normalized = unicodedata.normalize('NFKD', s)
+-    if normalized == s:
+-        return s
+-    else:
+-        return ''.join([c for c in normalized if not unicodedata.combining(c)])
++    # Always remove combining marks even if input is already in NFKD form.
++    # This ensures that strings with decomposed accents (e.g., base + COMBINING
++    # mark) are normalized to their plain base character when possible.
++    return ''.join(c for c in normalized if not unicodedata.combining(c))
+ 
+ 
+ def strip_accents_ascii(s):

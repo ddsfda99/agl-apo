@@ -1,0 +1,77 @@
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..a922ccdbec 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -190,10 +190,68 @@ def _collect_factor_and_dimension(self, expr):
+                 dim /= idim**count
+             return factor, dim
+         elif isinstance(expr, Function):
+-            fds = [self._collect_factor_and_dimension(
+-                arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            # Handle functions carefully: always return (factor, Dimension)
++            # and enforce dimension rules for specific functions.
++            from sympy.functions.elementary.exponential import exp, log
++            from sympy.functions.elementary.complexes import Abs
++
++            # Special-case: exponential
++            if expr.func is exp:
++                # exp has a single argument
++                arg = expr.args[0]
++
++                # Try to detect patterns like exp(log(X)) or exp(k*log(X))
++                # without propagating invalid Dimension(Function(...)).
++                # If the argument is dimensionless, result is dimensionless.
++                try:
++                    arg_factor, arg_dim = self._collect_factor_and_dimension(arg)
++                except ValueError:
++                    # Fall back to structural handling below
++                    arg_factor, arg_dim = None, None
++
++                if arg_factor is not None and self.get_dimension_system().is_dimensionless(arg_dim):
++                    return exp(arg_factor), Dimension(1)
++
++                # Structural handling for exp(log(X)) and exp(k*log(X))
++                inner = None
++                coeff = S.One
++                if hasattr(arg, 'func') and arg.func is log:
++                    inner = arg.args[0]
++                else:
++                    # Look for multiplicative coefficient times log(inner)
++                    if isinstance(arg, Mul):
++                        log_terms = [a for a in arg.args if hasattr(a, 'func') and a.func is log]
++                        others = [a for a in arg.args if not (hasattr(a, 'func') and a.func is log)]
++                        if len(log_terms) == 1:
++                            inner = log_terms[0].args[0]
++                            # Collect factor/dimension for the coefficient part
++                            if others:
++                                c_factor, c_dim = self._collect_factor_and_dimension(Mul(*others))
++                                if not self.get_dimension_system().is_dimensionless(c_dim):
++                                    raise ValueError('Exponential argument has non-dimensionless coefficient')
++                                coeff = c_factor
++                if inner is not None:
++                    inner_factor, inner_dim = self._collect_factor_and_dimension(inner)
++                    # exp(k*log(f)) == f**k
++                    return inner_factor**coeff, inner_dim**coeff
++
++                # If we get here, the argument is dimensionful and not of log form -> error
++                raise ValueError('Exponential of dimensionful argument is not allowed')
++
++            # Special-case: absolute value propagates the dimension of its argument
++            if expr.func is Abs:
++                arg_factor, arg_dim = self._collect_factor_and_dimension(expr.args[0])
++                # Abs of a numeric/symbolic factor; dimension remains the same
++                return Abs(arg_factor), arg_dim
++
++            # Generic functions: require all arguments dimensionless and result is dimensionless
++            fds = [self._collect_factor_and_dimension(arg) for arg in expr.args]
++            dims = [d[1] for d in fds]
++            if all(self.get_dimension_system().is_dimensionless(d) for d in dims):
++                return expr.func(*(f[0] for f in fds)), Dimension(1)
++            else:
++                # Do not attempt to construct Dimension(Function(...)) which is invalid
++                raise ValueError('Function arguments must be dimensionless')
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:

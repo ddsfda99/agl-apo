@@ -1,0 +1,86 @@
+diff --git a/sympy/physics/units/tests/test_quantities.py b/sympy/physics/units/tests/test_quantities.py
+index 25a68c7be5..16d17c5dbd 100644
+--- a/sympy/physics/units/tests/test_quantities.py
++++ b/sympy/physics/units/tests/test_quantities.py
+@@ -570,3 +570,18 @@ def test_physics_constant():
+ 
+     assert not meter.is_physical_constant
+     assert not joule.is_physical_constant
++
++
++def test_collect_factor_and_dimension_function_two_args():
++    # Reproducer for multi-argument Function handling in _collect_factor_and_dimension
++    # Previously returned malformed tuples like (factor, *dims). Ensure 2-tuple is returned.
++    from sympy.physics.units.systems import SI
++    from sympy.physics.units.definitions.dimension_definitions import length
++
++    res = SI._collect_factor_and_dimension(log(meter, 10))
++    assert isinstance(res, tuple)
++    assert len(res) == 2
++    factor, dim = res
++    # log(1, 10) -> 0 numeric factor; dimension should be inverse of argument's dimension
++    assert factor == 0
++    assert dim == 1/length
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..192a7c7f2b 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -6,6 +6,12 @@
+ 
+ from sympy.core.add import Add
+ from sympy.core.function import (Derivative, Function)
++from sympy.functions.elementary.complexes import Abs
++from sympy.functions.elementary.exponential import exp, log
++from sympy.functions.elementary.trigonometric import (
++    sin, cos, tan, asin, acos, atan
++)
++from sympy.functions.elementary.hyperbolic import sinh, cosh, tanh
+ from sympy.core.mul import Mul
+ from sympy.core.power import Pow
+ from sympy.core.singleton import S
+@@ -190,10 +196,41 @@ def _collect_factor_and_dimension(self, expr):
+                 dim /= idim**count
+             return factor, dim
+         elif isinstance(expr, Function):
+-            fds = [self._collect_factor_and_dimension(
+-                arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            # Collect factor and dimension for each argument
++            fds = [self._collect_factor_and_dimension(arg) for arg in expr.args]
++            # Numeric factor: apply the function to the collected numeric factors
++            factor = expr.func(*(f for f, _ in fds))
++
++            # Dimension handling:
++            # - For exp: dimension follows its (single) argument
++            # - For log: dimension is the inverse of its (single) argument's dimension
++            # - For Abs: dimension follows its (single) argument
++            # - For standard math functions (sin, cos, tan, asin, acos, atan, sinh, cosh, tanh):
++            #   if all args are dimensionless -> dimensionless; otherwise propagate the first arg's dimension
++            # - Fallback: if all args share the same dimension use that; otherwise default to the first arg
++            if expr.func is exp:
++                dim = fds[0][1] if fds else Dimension(1)
++            elif expr.func is log:
++                dim = Dimension(1) / (fds[0][1] if fds else Dimension(1))
++            elif expr.func is Abs:
++                dim = fds[0][1] if fds else Dimension(1)
++            elif expr.func in (sin, cos, tan, asin, acos, atan, sinh, cosh, tanh):
++                if all(self.get_dimension_system().is_dimensionless(d) for _, d in fds):
++                    dim = Dimension(1)
++                else:
++                    dim = fds[0][1] if fds else Dimension(1)
++            else:
++                # Generic handling: choose a sensible dimension
++                if not fds:
++                    dim = Dimension(1)
++                else:
++                    # If all dimensions the same, use that; otherwise use the first argument's dimension
++                    first_dim = fds[0][1]
++                    if all(d == first_dim for _, d in fds):
++                        dim = first_dim
++                    else:
++                        dim = first_dim
++            return factor, dim
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:

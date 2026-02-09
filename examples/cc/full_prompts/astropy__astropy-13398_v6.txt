@@ -1,0 +1,31 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Reproduce first: write a regression test that demonstrably fails on the unmodified code path (e.g., nearby Earth-tied ITRS object transformed to AltAz with differing obstimes “flies off”/changes unexpectedly), then apply the fix and confirm it passes.
+- Don’t rely on degenerate “zenith/overhead” cases alone; add non-degenerate geometry tests (due east horizon, due north, arbitrary az/alt) and finite-distance roundtrips to catch sign/order/handedness mistakes.
+- Be explicit about semantics: “pure terrestrial/topocentric geometry within ITRS” is not the same as Astropy’s observed frames (which may include refraction/astrometry). If semantics differ, make the behavior opt-in (new frame or explicit route), not a silent default change.
+- Guard refraction: if transforming to AltAz with `pressure != 0`, either implement refraction consistently with existing paths or raise/avoid the direct path so users don’t silently lose refraction.
+- Handle `obstime` and broadcasting correctly: pass `obstime` into `EarthLocation.get_itrs(obstime=...)` (or compute ECEF directly from lon/lat/height if intentionally avoiding IERS/EOP), to avoid shape/broadcast bugs with array obstimes.
+- Don’t oversimplify the math: validate the ENU basis/rotation against a known-correct construction (dot-products onto explicit east/north/up vectors) and cross-check against the existing CIRS-based route in regimes where that is valid/expected.
+- Consider differentials/velocities: using finite-difference transforms can produce nonsensical velocities if the transform is intended time-invariant; either implement differential handling explicitly or avoid finite-difference when inappropriate.
+
+Repo-Specific:
+- Avoid hijacking the transform graph: registering new direct `ITRS <-> AltAz/HADec` transforms can globally change preferred routes and break established behavior. Use transform priorities (lower priority), gating conditions, or a new intermediate/new frame instead.
+- Import/registration hygiene matters: new transform modules must be imported in the right place/order to avoid circular imports and unintended precedence changes.
+- Test discipline: don’t use large existing test files as scratchpads; add targeted tests under `astropy/coordinates/tests/` (new file or appropriate existing one) and keep real regression tests in-tree.
+- Don’t mutate global config at import time in tests (e.g., `iers.conf...`); scope it with fixtures/`monkeypatch`.
+- Run the relevant suite subset, not just a single new test: at minimum `pytest astropy/coordinates/tests -q` (and the motivating intermediate-transformation tests) to ensure graph changes don’t break other coordinate behavior.
+- Cleanup correctly: if instructed to delete temporary tests, actually remove the file (don’t leave an empty/untracked artifact in the tree).
+
+General:
+- Minimize behavioral surface area: prefer the smallest change that fixes the reported failure; if a “feature” is needed, make it opt-in and document the semantics clearly.
+- Protect against silent regressions: any change that can alter routing/priority in a framework graph needs explicit tests ensuring existing user-facing behaviors (accuracy features like refraction, EOP handling) are preserved or intentionally gated.
+- Test for correctness beyond “passes once”: include adversarial/non-degenerate cases, roundtrips, array/broadcast shapes, and configuration variants (e.g., IERS availability) to ensure robustness.
+- Keep development workflow strict: (1) failing test on old code, (2) implement fix, (3) tests pass, (4) run broader relevant suite, (5) only then cleanup temporary artifacts.

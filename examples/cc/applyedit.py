@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -23,10 +24,8 @@ the original prompt:
 the evaluations of previous failures:
 {evaluations}
 
+You must carefully read the problems identified in the evaluations and address them in your optimized prompt.
 Return a complete revised prompt text that can be used directly as the user prompt.
-It MUST include the literal placeholder {{description}} unchanged.
-Do NOT introduce any other {{...}} placeholders.
-If you need literal braces in the text, escape them as {{ and }}.
 """
 
 def load_single_case(dataset_path: Path) -> Optional[Dict[str, Any]]:
@@ -68,18 +67,17 @@ def find_latest_prompt(prompt_dir: Path, instance_id: str) -> Optional[Path]:
     if not prompt_dir.exists():
         return None
     safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(instance_id))
-    pattern = re.compile(rf"^{re.escape(safe_id)}_v(\d+)\.txt$")
+    pattern = re.compile(rf"^{re.escape(safe_id)}_v\d+\.txt$")
     latest_path = None
-    latest_version = -1
+    latest_mtime = -1
     for path in prompt_dir.iterdir():
         if not path.is_file():
             continue
-        match = pattern.match(path.name)
-        if not match:
+        if not pattern.match(path.name):
             continue
-        version = int(match.group(1))
-        if version > latest_version:
-            latest_version = version
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
             latest_path = path
     return latest_path
 
@@ -88,37 +86,39 @@ def find_latest_textgrad(textgrads_dir: Path, instance_id: str) -> Optional[Path
     """Find the latest versioned textgrad output for the instance."""
     if not textgrads_dir.exists():
         return None
-    pattern = re.compile(rf"^{re.escape(instance_id)}_v(\d+)\.txt$")
+    pattern = re.compile(
+        rf"^{re.escape(instance_id)}_iter\d+_[0-9]{{8}}_[0-9]{{6}}\.txt$"
+    )
     latest_path = None
-    latest_version = -1
+    latest_mtime = -1
     for path in textgrads_dir.iterdir():
         if not path.is_file():
             continue
-        match = pattern.match(path.name)
-        if not match:
+        if not pattern.match(path.name):
             continue
-        version = int(match.group(1))
-        if version > latest_version:
-            latest_version = version
+        mtime = path.stat().st_mtime
+        if mtime > latest_mtime:
+            latest_mtime = mtime
             latest_path = path
     return latest_path
 
 
 def next_applyedit_path(output_dir: Path, instance_id: str) -> Path:
     """Get the next versioned applyedit path for the instance."""
-    prefix = f"{instance_id}_v"
-    next_version = 0
+    pattern_iter = re.compile(
+        rf"^{re.escape(instance_id)}_iter(\d+)_\d{{8}}_\d{{6}}\.txt$"
+    )
+    next_iter = 0
     if output_dir.exists():
         for path in output_dir.iterdir():
             if not path.is_file():
                 continue
             name = path.name
-            if not name.startswith(prefix) or not name.endswith(".txt"):
-                continue
-            suffix = name[len(prefix):-4]
-            if suffix.isdigit():
-                next_version = max(next_version, int(suffix) + 1)
-    return output_dir / f"{instance_id}_v{next_version}.txt"
+            match = pattern_iter.match(name)
+            if match:
+                next_iter = max(next_iter, int(match.group(1)) + 1)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return output_dir / f"{instance_id}_iter{next_iter}_{timestamp}.txt"
 
 
 async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
@@ -149,6 +149,9 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
         evaluations=evaluations,
     )
 
+    output_dir = BASE_DIR / "applyedits"
+    output_path = next_applyedit_path(output_dir, instance_id)
+
     token_provider = get_openai_token_provider()
     client = AsyncAzureOpenAI(
         api_version="2025-04-01-preview",
@@ -157,7 +160,7 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     )
 
     resp = await client.chat.completions.create(
-        model="gpt-5-20250807",
+        model="gpt-5.2-20251211",
         messages=[{"role": "user", "content": filled_prompt}],
     )
 
@@ -171,15 +174,10 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
     print("=== Optimized dynamic ruleset ===")
     print(content if content else "[empty]")
 
-    if "{description}" not in content:
-        print("[error] Optimized prompt is missing required {description} placeholder.")
-        return
-
-    output_dir = BASE_DIR / "applyedits"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = next_applyedit_path(output_dir, instance_id)
     output_path.write_text(content if content else "", encoding="utf-8")
     print(f"\nSaved applyedit output to {output_path}")
+
 
 
 if __name__ == "__main__":

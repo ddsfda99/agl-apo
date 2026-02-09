@@ -1,0 +1,112 @@
+diff --git a/astropy/io/ascii/html.py b/astropy/io/ascii/html.py
+index 266cf229c..6d9f28928 100644
+--- a/astropy/io/ascii/html.py
++++ b/astropy/io/ascii/html.py
+@@ -348,12 +348,18 @@ class HTML(core.BaseReader):
+ 
+         cols = list(table.columns.values())
+ 
++        # Ensure both header and data have the same column list so that
++        # downstream helpers (e.g. _set_col_formats) see the right columns
+         self.data.header.cols = cols
++        self.data.cols = cols
+ 
+         if isinstance(self.data.fill_values, tuple):
+             self.data.fill_values = [self.data.fill_values]
+ 
++        # Ensure fill values and formats are applied to columns
+         self.data._set_fill_values(cols)
++        # Apply formats passed via formats= to column info for HTML writer
++        self.data._set_col_formats()
+ 
+         lines = []
+ 
+@@ -430,8 +436,18 @@ class HTML(core.BaseReader):
+                                     # Split up multicolumns into separate columns
+                                     new_col = Column([el[i] for el in col])
+ 
++                                    # Propagate format and fill metadata to the split column
++                                    if hasattr(col.info, 'format') and col.info.format is not None:
++                                        new_col.info.format = col.info.format
++                                    if hasattr(col, 'fill_values'):
++                                        try:
++                                            new_col.fill_values = dict(col.fill_values)
++                                        except Exception:
++                                            new_col.fill_values = getattr(col, 'fill_values', {})
++
++                                    # Apply fill values to the same column being iterated
+                                     new_col_iter_str_vals = self.fill_values(
+-                                        col, new_col.info.iter_str_vals())
++                                        new_col, new_col.info.iter_str_vals())
+                                     col_str_iters.append(new_col_iter_str_vals)
+                                     new_cols_escaped.append(col_escaped)
+                                     new_cols.append(new_col)
+diff --git a/astropy/io/ascii/tests/test_html.py b/astropy/io/ascii/tests/test_html.py
+index 0515efa06..382dbd598 100644
+--- a/astropy/io/ascii/tests/test_html.py
++++ b/astropy/io/ascii/tests/test_html.py
+@@ -620,6 +620,64 @@ def test_raw_html_write_clean():
+     assert expected in out.getvalue()
+ 
+ 
++def test_html_write_applies_formats_simple():
++    """
++    HTML writer should apply formats= to columns like other writers.
++    Verify formatted cell is present and unformatted is absent.
++    """
++    t = Table([[1.2345, 2.0]], names=['a'])
++    out = StringIO()
++    t.write(out, format='ascii.html', formats={'a': '%.2f'})
++    s = out.getvalue()
++    assert '<td>1.23</td>' in s
++    assert '<td>1.2345</td>' not in s
++
++
++def test_html_write_applies_formats_function():
++    """
++    HTML writer should honor callable formats as well.
++    """
++    def fmt(x):
++        return f"val={int(x)}"
++
++    t = Table([[1.0, 3.0]], names=['a'])
++    out = StringIO()
++    t.write(out, format='ascii.html', formats={'a': fmt})
++    s = out.getvalue()
++    assert '<td>val=1</td>' in s
++    assert '<td>1.0</td>' not in s
++
++
++def test_html_write_formats_multicol_propagate():
++    """
++    For multi-dimensional (iterable) columns with multicol=True, the original
++    column's info.format should propagate to split-out subcolumns.
++    """
++    col1 = [1]
++    col2 = [(1.0, 2.0)]  # two-element tuple column (treated as 2-D)
++    t = Table([col1, col2], names=('C1', 'C2'))
++    out = StringIO()
++    # Apply 3-decimal formatting to the parent column
++    t.write(out, format='ascii.html', formats={'C2': '%.3f'})
++    s = out.getvalue()
++    # Both split cells should reflect the format
++    assert '<td>1.000</td>' in s
++    assert '<td>2.000</td>' in s
++    # And default non-formatted float strings should not appear
++    assert '<td>1.0</td>' not in s
++    assert '<td>2.0</td>' not in s
++
++
++def test_html_write_invalid_format_raises():
++    """
++    Invalid format spec should raise during HTML writing, consistent with others.
++    """
++    t = Table([[1.23]], names=['a'])
++    out = StringIO()
++    with pytest.raises(Exception):
++        t.write(out, format='ascii.html', formats={'a': '{:q}'})
++
++
+ def test_write_table_html_fill_values():
+     """
+     Test that passing fill_values should replace any matching row

@@ -1,0 +1,73 @@
+You are an expert Python developer working on the repository in `/testbed` (Astropy-like). Fix the bug described below and ensure the fix is robust and test-covered.
+
+## Bug to fix
+`tbl.write(..., format="ascii.rst", header_rows=[...])` currently fails with:
+`TypeError: RST.__init__() got an unexpected keyword argument 'header_rows'`
+
+We want `ascii.rst` output to support `header_rows` similarly to `ascii.fixed_width`, e.g. `header_rows=["name","unit"]` should produce an RST simple table with a multi-line header.
+
+## Critical instructions (read carefully)
+1) **You MUST add regression tests and KEEP them. Do NOT delete them at the end.**  
+   The earlier instruction “delete the test cases you write at last” is incorrect for this task. The evaluation will expect a permanent regression test to remain in the suite.
+2) Run a **targeted test subset** that demonstrates the bug and verifies the fix (e.g. `pytest astropy/io/ascii/tests/test_rst.py -q` or equivalent).  
+   If the full test suite fails due to unrelated pre-existing issues (e.g. warnings-as-errors elsewhere), note it briefly, but your PR-quality output must at least make the relevant tests pass.
+3) Implement the fix in a way that:
+   - Accepts `header_rows` in the RST writer without raising `TypeError`.
+   - Produces correct RST “simple table” formatting for multiple header rows:  
+     **top rule**, then all header rows, then **header/data separator rule**, then data rows, then **bottom rule**.
+   - Avoid fragile heuristics (like assuming a specific line index without justification). Prefer deriving separator placement from writer state or by explicitly constructing the RST rules from computed column widths.
+   - Either support reasonable `header_rows` combinations or validate and raise a clear error for unsupported cases. Don’t silently override caller intent (avoid `header_rows or ["name"]` unless explicitly justified).
+
+## What to do (required workflow)
+### Step 1: Add tests (must remain in repo)
+Add/extend tests under the existing ASCII RST test module (likely `astropy/io/ascii/tests/test_rst.py`).
+Create at least one regression test that:
+- Builds a `QTable` with units, writes to RST with `header_rows=["name","unit"]`, and asserts the output equals the expected RST table string.
+- Also include a test that verifies `header_rows=["name"]` (default) still works and matches current behavior.
+Optionally (recommended if feasible):
+- Add a read-side test: read back an RST table containing multi-line headers and assert either:
+  - it parses correctly (names and units), **or**
+  - it raises a clear, intentional exception stating that reading multi-line headers in RST is unsupported.  
+  (Choose whichever is consistent with the library’s design; but don’t leave it ambiguous.)
+
+Be precise about expected formatting. For `header_rows=["name","unit"]`, the expected structure should be:
+
+```
+===== ========
+ wave response
+   nm       ct
+===== ========
+350.0      0.7
+950.0      1.2
+===== ========
+```
+
+(Spacing must match the writer’s fixed-width alignment rules.)
+
+### Step 2: Reproduce the failure
+Run the new test(s) and confirm they fail on the current code with the `TypeError`.
+
+### Step 3: Locate and fix the bug
+- Find the `RST` writer class (likely in `astropy/io/ascii/rst.py` or similar).
+- Ensure `header_rows` is accepted and passed to the appropriate FixedWidth machinery. This may require:
+  - Updating `RST.__init__` signature and/or `**kwargs` handling.
+  - Ensuring the header object knows `header_rows`, and that `data.start_line` (or similar) is consistent with the number of header rows.
+- Ensure `RST.write()` (or underlying writer) outputs correct rule lines for RST simple tables with multi-line headers:
+  - one rule line at the top,
+  - one rule line separating headers from data,
+  - one rule line at the bottom.
+Do not rely on “magic indexes” unless you justify them based on explicit invariants in the writer’s algorithm. Prefer computing where the separator should be based on `len(header_rows)` and how the FixedWidth writer constructs its output, or by explicitly generating the rules and assembling the final lines.
+
+### Step 4: Validate
+Re-run the targeted tests and ensure they pass.
+
+### Step 5: Sanity check
+Optionally run a slightly broader set of ASCII tests (e.g. `pytest astropy/io/ascii/tests -q`) if it’s not too slow.  
+If unrelated failures occur, briefly note them, but do not “fix random things” unless necessary for the RST change.
+
+## Deliverable expectations
+- Code changes implementing `header_rows` support for `ascii.rst` writer.
+- Permanent regression tests proving the fix.
+- No commits required.
+
+Now proceed: add the tests first, reproduce the failure, then implement the fix, and show the passing test output.

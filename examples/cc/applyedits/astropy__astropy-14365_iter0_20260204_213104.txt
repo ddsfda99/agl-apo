@@ -1,0 +1,57 @@
+You are an expert Python developer working in the repository located at `/testbed`. Your goal is to fix a bug in Astropy’s QDP reader.
+
+## Bug
+`ascii.qdp` table parsing currently assumes QDP commands are uppercase. QDP itself is case-insensitive, so lines like:
+
+```
+read serr 1 2
+1 0.5 1 0.5
+```
+
+should be parsed successfully (including errors), but currently raise:
+`ValueError: Unrecognized QDP line: read serr 1 2`.
+
+## Expected behavior
+`Table.read("test.qdp", format="ascii.qdp")` should correctly read the table and associated errors even when QDP commands are in lowercase or mixed case.
+
+---
+
+## Constraints / Process (must follow)
+1) **Reproduce with tests**: Write a test that fails on the current code and would pass after the fix.
+2) **Locate the bug**: Explore source to find where QDP command lines are classified/parsed.
+3) **Fix the bug**: Modify implementation to treat QDP commands case-insensitively (at least `READ SERR` / `READ TERR`), without breaking existing behavior.
+4) **Validate**: Re-run only the relevant tests.
+5) **Cleanup is mandatory**: At the end, **do not leave any new test files behind**.
+   - Prefer adding your test into an *existing* test module (likely `astropy/io/ascii/tests/test_qdp.py`) rather than creating a new file.
+   - If you do create any temporary test files, you must **actually delete them** (e.g., `rm path/to/file.py`). Do **not** “delete” by emptying file contents.
+   - Ensure the repository ends with no extra test files you created.
+
+---
+
+## Testing guidance (important)
+- The reproduction example shows `Table.read(..., format="ascii.qdp")` emits an `AstropyUserWarning` about `table_id` not specified. The test suite may treat warnings as errors.
+  - Avoid this by either:
+    - Passing `table_id=0` in `Table.read(...)`, **or**
+    - Explicitly asserting the warning with `pytest.warns(AstropyUserWarning, match=...)`.
+- Do **not** run the whole test suite. Run only relevant tests, e.g.:
+  - `pytest -q astropy/io/ascii/tests/test_qdp.py`
+  - or even a single test via `-k`.
+
+---
+
+## Implementation expectations
+- QDP command parsing should not require uppercase.
+- Be careful about the scope of any case-insensitive matching:
+  - Ideally, make only the QDP command keywords case-insensitive (e.g., `READ`, `SERR`, `TERR`), rather than broadly changing all parsing behavior unless that’s clearly intended.
+  - Keep the fix minimal and targeted to the bug.
+
+---
+
+## Deliverable
+Proceed step-by-step:
+1) Add a focused test (in an existing test module) demonstrating that lowercase/mixed-case `read serr ...` works and errors are attached.
+2) Identify and patch the parsing logic causing the uppercase-only behavior.
+3) Run targeted tests to confirm pass.
+4) Ensure **no new test files remain** and no temporary artifacts are left in the repo.
+
+Do not commit changes.

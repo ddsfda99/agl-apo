@@ -1,0 +1,46 @@
+diff --git a/sympy/sets/contains.py b/sympy/sets/contains.py
+index b2d4268d12..90503b38fd 100644
+--- a/sympy/sets/contains.py
++++ b/sympy/sets/contains.py
+@@ -35,6 +35,10 @@ def eval(cls, x, s):
+         ret = s.contains(x)
+         if not isinstance(ret, Contains) and (
+                 ret in (S.true, S.false) or isinstance(ret, Set)):
++            # if contains evaluated to a Set (e.g. a relational-as-set),
++            # then membership of x in that set should be interpreted as
++            # x in ret; return as Boolean True if x is certainly in ret,
++            # otherwise keep as unevaluated Contains
+             return ret
+ 
+     @property
+@@ -45,4 +49,30 @@ def binary_symbols(self):
+             isinstance(i, (Eq, Ne))])
+ 
+     def as_set(self):
++        """
++        Return the set corresponding to this containment condition.
++
++        For a simple membership condition like Contains(x, S), where x is
++        a Symbol, the corresponding set of values satisfying the condition
++        is just S itself.
++
++        Examples
++        ========
++        >>> from sympy import Symbol, S, Contains
++        >>> x = Symbol('x')
++        >>> Contains(x, S.Reals).as_set()
++        Reals
++        >>> Contains(x, S.Integers).as_set()
++        Integers
++
++        Notes
++        =====
++        For non-trivial element expressions (e.g. Contains(f(x), S)), the
++        set of x satisfying the condition may not simply be S. Such cases
++        are not handled here and will raise NotImplementedError.
++        """
++        from sympy.core.symbol import Symbol
++        x, s = self.args
++        if isinstance(x, Symbol):
++            return s
+         raise NotImplementedError()

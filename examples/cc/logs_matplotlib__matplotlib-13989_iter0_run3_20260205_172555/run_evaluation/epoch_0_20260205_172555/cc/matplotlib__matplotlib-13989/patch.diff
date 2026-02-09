@@ -1,0 +1,17 @@
+diff --git a/lib/matplotlib/axes/_axes.py b/lib/matplotlib/axes/_axes.py
+index 4b73d5229..27a4e202b 100644
+--- a/lib/matplotlib/axes/_axes.py
++++ b/lib/matplotlib/axes/_axes.py
+@@ -6686,7 +6686,11 @@ optional.
+ 
+         density = bool(density) or bool(normed)
+         if density and not stacked:
+-            hist_kwargs = dict(density=density)
++            # Do not overwrite existing kwargs (like 'range') when enabling density.
++            # Previously this replaced hist_kwargs entirely, dropping 'range',
++            # which caused np.histogram to ignore the specified range when bins
++            # were computed automatically. Preserve existing keys and set density.
++            hist_kwargs['density'] = density
+ 
+         # List to store all the top coordinates of the histograms
+         tops = []

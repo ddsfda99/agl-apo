@@ -1,0 +1,33 @@
+diff --git a/astropy/units/quantity.py b/astropy/units/quantity.py
+index b98abfafb..2a9682e69 100644
+--- a/astropy/units/quantity.py
++++ b/astropy/units/quantity.py
+@@ -666,8 +666,26 @@ class Quantity(np.ndarray):
+         # Same for inputs, but here also convert if necessary.
+         arrays = []
+         for input_, converter in zip(inputs, converters):
+-            input_ = getattr(input_, "value", input_)
+-            arrays.append(converter(input_) if converter else input_)
++            original_input = input_
++            value_input = getattr(original_input, "value", original_input)
++            if converter:
++                try:
++                    converted = converter(value_input)
++                except (TypeError, ValueError):
++                    # If converter application fails for a non-Quantity duck array
++                    # that participates in ufunc dispatch, return NotImplemented
++                    # so NumPy can try the other operand's implementation.
++                    if not isinstance(original_input, Quantity):
++                        au = getattr(original_input, "__array_ufunc__", None)
++                        if au is not None and not isinstance(
++                            original_input, (np.ndarray, np.generic)
++                        ):
++                            return NotImplemented
++                    # Otherwise, propagate the original error.
++                    raise
++                arrays.append(converted)
++            else:
++                arrays.append(value_input)
+ 
+         # Call our superclass's __array_ufunc__
+         result = super().__array_ufunc__(function, method, *arrays, **kwargs)

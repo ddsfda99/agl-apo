@@ -1,0 +1,17 @@
+diff --git a/lib/matplotlib/image.py b/lib/matplotlib/image.py
+index 95bb42d75..a9dd681a1 100644
+--- a/lib/matplotlib/image.py
++++ b/lib/matplotlib/image.py
+@@ -533,7 +533,11 @@ class _ImageBase(martist.Artist, cm.ScalarMappable):
+                 # that may have moved input values in/out of range
+                 s_vmin, s_vmax = vrange
+                 if isinstance(self.norm, mcolors.LogNorm):
+-                    if s_vmin < 0:
++                    # Ensure vmin is strictly positive for log scaling.
++                    # Previously only negative values were bumped, but 0 can also
++                    # occur due to numeric round-off in rescaling and leads to
++                    # -inf after log transform, triggering a ValueError.
++                    if s_vmin <= 0:
+                         s_vmin = max(s_vmin, np.finfo(scaled_dtype).eps)
+                 with cbook._setattr_cm(self.norm,
+                                        vmin=s_vmin,

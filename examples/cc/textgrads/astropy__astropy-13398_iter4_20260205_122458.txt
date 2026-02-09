@@ -1,0 +1,95 @@
+## High-level review
+
+The agent implemented the *proposed feature* (“direct ITRS ↔ observed transforms staying within ITRS”) rather than fixing a narrowly-scoped “bug”. That may be aligned with the issue text, but from a repo-maintenance perspective it’s a behavior/API change with non-trivial correctness implications and needs much stronger test coverage and integration work before it can be accepted.
+
+Also, the agent did **not follow the workflow requirements**:
+- They modified an existing long test file as a scratchpad (bad practice).
+- They eventually removed the temporary tests (good), but **they also removed the only tests that validated the new behavior**, so the change is effectively untested.
+- They did not run the coordinate test suite (only targeted tests), and their initial `pytest` run failed during collection due to unrelated warnings—so they never verified their change doesn’t break anything else.
+
+## Where it failed / missed key requirements
+
+### 1) No persistent tests proving the new behavior
+The agent added two tests, used them, then deleted them as instructed. But the instruction “delete the test cases you write at last” is intended for *ad-hoc reproduction tests* that live outside the suite (or temporary files), not for real regression tests that should be committed. For a behavioral bug/feature like this, you **must keep** a regression test in the suite.
+
+**Concrete improvement**
+- Add new permanent tests in `astropy/coordinates/tests/` (likely a new file like `test_itrs_observed_transforms.py` or in an appropriate existing one) verifying:
+  - ITRS → AltAz for a local, overhead target gives alt≈90° (within tolerance).
+  - roundtrip ITRS ↔ AltAz preserves 3D topocentric vector for finite distances.
+  - ITRS → HADec gives expected ha/dec for simple geometries.
+  - The transforms do not depend on IERS/UT1 availability (set `iers.conf.auto_download=False` and use a time inside IERS_B range).
+
+### 2) Transform math is oversimplified (and likely wrong in general)
+The implemented rotation ignores **Earth rotation angle / local sidereal time**, which is essential for mapping ITRS axes to a local horizon system for arbitrary targets. The overhead test passes because it is a degenerate case: the topocentric vector is nearly aligned with “up”, so many mistakes won’t show up.
+
+Specifically:
+- AltAz depends on the observer’s **local east/north/up basis**, which can be constructed from geodetic lat/lon alone, *but only if you first interpret the input vector in the same Earth-fixed axes*. That’s fine; however, the particular sequence of rotations + handedness flips they used is not validated and easy to get wrong by sign/order.
+- HADec is **not** purely a lon-based rotation in general; hour angle is relative to the local meridian and depends on Earth rotation (i.e., time) if you’re converting from an inertial direction. But if you stay purely in ITRS with topocentric vectors, “HADec” becomes an *Earth-fixed topocentric equatorial* frame; you need a clear definition and to ensure it matches Astropy’s existing HADec semantics (which are tied to CIRS/ERFA astrometry context).
+
+**Concrete improvement**
+- Validate the basis generation against a known-correct construction:
+  - Compute ENU basis vectors directly from geodetic lon/lat and the ITRS axes, and use dot-products to project the topocentric vector.
+  - Compare results to the existing reference path (e.g., ITRS→CIRS→AltAz) in regimes where the old path is correct (e.g., distant objects / use UnitSpherical, or explicitly disable aberration/refraction).
+- Add tests for non-degenerate cases:
+  - A target due east at the horizon (az≈90°, alt≈0°) at some location.
+  - A target due north.
+  - A target with arbitrary az/alt and finite distance; verify round-trip returns original ITRS vector relative to observer.
+
+### 3) The new transforms change graph behavior globally without guardrails
+By registering direct `ITRS <-> AltAz/HADec` transforms, the transform graph will prefer this route in many conversions (including ones that historically went through CIRS to include refraction and proper astrometry). This risks:
+- silently disabling refraction behavior for ITRS↔AltAz when pressure is set,
+- inconsistencies between `ICRS->ITRS->AltAz` and `ICRS->CIRS->AltAz` paths,
+- breaking velocity handling / differentials (they used `FunctionTransformWithFiniteDifference` but did not reason about differentials).
+
+**Concrete improvement**
+- Decide and document when the “ITRS direct” transform should apply:
+  - Possibly only when transforming *positions with finite distance*? or only for `ITRS` with `obstime` treated specially?
+  - Or add a separate frame (e.g., a dedicated “TopocentricITRS”/“ObservedITRS”) to avoid changing semantics of existing public frames.
+- If keeping direct transforms, implement refraction handling consistently with existing observed transforms, or explicitly raise if `pressure != 0` to avoid silently wrong results.
+- Add tests ensuring `pressure` is either respected or explicitly rejected.
+
+### 4) “Treat ITRS as time invariant” not actually implemented robustly
+The new `itrs_to_observed` ignores input `obstime` (good per proposal), but still calls `observed_frame.location.get_itrs()` **without passing the observed frame’s obstime**. Today `EarthLocation.get_itrs(obstime=None)` uses the default obstime which is `None`, so this is OK only because EarthLocation’s *position* is time-independent. But this is fragile and unclear.
+
+Also, for the reverse transform they accept an `itrs_frame` and then add `observed_coo.location.get_itrs().cartesian` again without `obstime`.
+
+**Concrete improvement**
+- Be explicit: call `observed_frame.location.get_itrs(observed_frame.obstime)` (and similarly for observed_coo) if the design is “adopt output obstime”, or document why `None` is correct.
+- Add tests for cases where `observed_frame.obstime is None` (AltAz default) to ensure behavior is still correct.
+
+### 5) Integration issues: new file is imported, but package layout expectations might differ
+They imported `itrs_observed_transforms` inside `builtin_frames/__init__.py`. That works, but Astropy often expects transforms to be imported in a specific order to avoid circular dependencies and to control route selection. This needs review.
+
+**Concrete improvement**
+- Ensure import order doesn’t create circular imports and doesn’t change precedence unexpectedly.
+- Consider placing these transforms in an existing transform module (or at least add a comment about why order is safe).
+
+### 6) They never fixed the unrelated test-collection failures
+Their first attempt to run pytest failed due to DeprecationWarnings treated as errors in convolution tests. They worked around it by running a single test file. That’s not acceptable for validating a fix.
+
+**Concrete improvement**
+- For evaluation, you’ll likely need to run at least `pytest astropy/coordinates/tests/...`. If the environment treats DeprecationWarnings as errors globally, use appropriate pytest config or local filtering during your run. But do **not** modify unrelated library behavior as part of this fix unless required.
+
+## Suggested concrete path to make this acceptable
+
+1) **Add proper regression tests** (and keep them):
+   - New test module for ITRS-observed direct transforms.
+   - Include multiple geometries (not only zenith).
+   - Include finite-distance and UnitSpherical cases.
+   - Include a test ensuring refraction behavior is not silently dropped (either match old behavior or raise).
+
+2) **Correct/validate rotation math**:
+   - Replace ad-hoc left-handed flips with explicit ENU basis vectors and a well-defined axis convention.
+   - Verify azimuth convention matches Astropy’s (east of north).
+   - For HADec, ensure the definition matches existing HADec semantics; if not, do not override existing transforms—introduce a new frame or make the transform opt-in.
+
+3) **Be explicit about obstime policy**:
+   - Adopt output obstime consistently or document invariance clearly.
+   - Add tests around `None` obstime handling.
+
+4) **Consider not overriding existing transforms globally**
+   - If semantics differ (and they probably do), implement these as:
+     - a new frame, or
+     - a new transform path only used when explicitly requested (e.g., via intermediate frame), not the default `ITRS->AltAz`.
+
+As-is, the patch is risky: it “fixes” one confusing use-case but likely breaks others, and it has no committed tests to prevent regressions.

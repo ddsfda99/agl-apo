@@ -1,0 +1,92 @@
+You are an expert Astropy contributor fixing a small behavior change in `astropy.table` related to structured NumPy arrays being auto-converted to `NdarrayMixin`.
+
+You are in a code repository at `/testbed`.
+
+## Goal (what to implement)
+Astropy currently auto-transforms a structured `np.ndarray` (dtype with multiple fields) into an `NdarrayMixin` when adding it to a `Table` (via `_convert_data_to_col`). The proposal is:
+
+1) **Now (current behavior, e.g., 5.1)**: Keep the auto-transform, **but emit a `FutureWarning`** telling users to wrap the input in `Column(...)` if they want a real `Column`, and that **in a future release (5.2)** the structured array will be added as a `Column` by default (i.e., no auto mixin conversion).
+
+2) **Later (5.2)**: remove the conversion clause. **Do not implement the removal now**—only the warning behavior should be added in this task.
+
+## Important constraints learned from prior failures
+- The full test suite in this environment may fail during collection for unrelated reasons. **Do not claim “all tests pass.”** Run **targeted tests only** for the relevant table behavior.
+- Use Astropy’s warning conventions: prefer `AstropyDeprecationWarning` / `AstropyUserWarning` if that’s the established pattern in this area. If the issue explicitly requires `FutureWarning`, use `FutureWarning`, but still follow Astropy style.
+- Ensure the warning points to *user code*, not inside Astropy internals: **set `stacklevel` appropriately** (likely `stacklevel=2` or higher depending on call depth).
+- Do **not** use deprecated pytest patterns like `pytest.warns(None)`. Use `recwarn` fixture or `warnings.catch_warnings`.
+- Do not add a brand-new test file and delete it at the end. Instead, **extend/adjust an existing test module** under `astropy/table/tests/` so the behavior remains covered. (The “delete tests at last” instruction refers to temporary exploratory tests only—avoid creating those.)
+- Add coverage for multiple public entry points that funnel into `_convert_data_to_col`: at minimum:
+  - `Table([arr], names=['x'])`
+  - `t.add_column(arr, name='x')`
+  - `t['x'] = arr`
+
+## What to deliver
+A code change + updated existing tests proving the new warning behavior, using targeted pytest invocation.
+
+---
+
+## Step-by-step instructions
+
+### 1) Locate the conversion code
+Search for `_convert_data_to_col` and the clause:
+
+```python
+if (not isinstance(data, Column) and not data_is_mixin
+        and isinstance(data, np.ndarray) and len(data.dtype) > 1):
+    data = data.view(NdarrayMixin)
+    data_is_mixin = True
+```
+
+Identify the correct file (likely `astropy/table/table.py` or similar) and confirm the conversion is executed for all relevant APIs.
+
+### 2) Implement the warning (core fix)
+In the structured-array-to-`NdarrayMixin` conversion block:
+
+- Emit a warning **once per conversion** (not globally once-per-process unless the repo has a helper for that—follow local patterns).
+- Warning requirements:
+  - Category: **`FutureWarning`** unless Astropy policy in this module clearly dictates using an Astropy-specific warning subclass for deprecations. If using an Astropy warning class, ensure it still represents a future behavior change; keep wording consistent.
+  - Text should clearly say:
+    - “Currently structured arrays are added as `NdarrayMixin`.”
+    - “Wrap in `Column(data)` to opt-in to having a `Column` now.”
+    - “In 5.2 (or a future release) structured arrays will be added as `Column` by default.”
+  - Add `stacklevel` so the warning points to the user call site. Verify by a small local reproduction if needed.
+
+### 3) Update existing tests (permanent regression coverage)
+Find the most appropriate existing test file under `astropy/table/tests/` that already tests table initialization / adding columns / mixins. Add tests there.
+
+Test expectations:
+- For a structured array like:
+  ```python
+  arr = np.array([(1, 2.0)], dtype=[('a', 'i4'), ('b', 'f8')])
+  ```
+- When added via each API (constructor, `add_column`, `__setitem__`):
+  - A warning of the expected category is emitted.
+  - The message matches robustly (use a stable regex).
+  - The resulting column is still the current behavior (i.e., it becomes `NdarrayMixin` / mixin column), since we are **not** changing behavior yet.
+- Also add a test asserting that **if the user wraps with `Column(arr)`**, then:
+  - **No warning is emitted** (use `recwarn` or `warnings.catch_warnings`), and
+  - The result is a `Column` (or at least not an `NdarrayMixin`), consistent with intended opt-in.
+
+Avoid brittle message matching; match key phrases like `structured`, `Column`, and `5.2` (or “future release”) instead of the full sentence.
+
+### 4) Run targeted tests only
+Run pytest only for the relevant tests you edited, e.g.:
+- `pytest -q astropy/table/tests/test_<relevant>.py -k structured`
+or the specific test node(s).
+
+If the environment still fails during collection for unrelated reasons, narrow further to the single test file you modified. Do not run `pytest -q` on the whole repository unless collection is clean.
+
+### 5) Do not leave temporary test files
+Do not create standalone temporary test modules that you later delete. Only commit-like modifications to existing test files are acceptable here.
+
+---
+
+## Quality checklist before finishing
+- [ ] Warning uses correct category and includes `stacklevel`.
+- [ ] Warning message clearly instructs to wrap with `Column` and mentions upcoming behavior change.
+- [ ] Existing tests updated (not new throwaway files).
+- [ ] Tests cover constructor, `add_column`, and `__setitem__`.
+- [ ] Targeted pytest run demonstrates the new tests pass.
+- [ ] No use of deprecated pytest APIs (`pytest.warns(None)`).
+
+Proceed to implement now.

@@ -1,0 +1,110 @@
+diff --git a/astropy/table/table.py b/astropy/table/table.py
+index 5afe2127a..6f4e666ea 100644
+--- a/astropy/table/table.py
++++ b/astropy/table/table.py
+@@ -1243,6 +1243,13 @@ class Table:
+         # mixin class
+         if (not isinstance(data, Column) and not data_is_mixin
+                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):
++            warnings.warn(
++                "Structured NumPy arrays are currently added to Table as NdarrayMixin. "
++                "Wrap with Column(data) to get a Column now. In Astropy 5.2 structured "
++                "arrays will be added as Column by default.",
++                FutureWarning,
++                stacklevel=3,
++            )
+             data = data.view(NdarrayMixin)
+             data_is_mixin = True
+ 
+diff --git a/astropy/table/tests/test_mixin.py b/astropy/table/tests/test_mixin.py
+index 2fdcd20d8..6ba211cd2 100644
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -14,6 +14,7 @@ from astropy.utils.data_info import ParentDtypeInfo
+ from astropy.table.table_helpers import ArrayWrapper
+ from astropy.coordinates import EarthLocation, SkyCoord
+ from astropy.table import Table, QTable, join, hstack, vstack, Column, NdarrayMixin
++import warnings
+ from astropy.table import serialize
+ from astropy import time
+ from astropy import coordinates
+@@ -702,6 +703,7 @@ def test_ndarray_mixin():
+     Test directly adding a plain structured array into a table instead of the
+     view as an NdarrayMixin.  Once added as an NdarrayMixin then all the previous
+     tests apply.
++    Also verify FutureWarning is emitted for structured arrays via different APIs.
+     """
+     a = np.array([(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')],
+                  dtype='<i4,' + ('|U1'))
+@@ -711,12 +713,26 @@ def test_ndarray_mixin():
+                            names=['rx', 'ry'])
+     d = np.arange(8, dtype='i8').reshape(4, 2).view(NdarrayMixin)
+ 
+-    # Add one during initialization and the next as a new column.
+-    t = Table([a], names=['a'])
+-    t['b'] = b
+-    t['c'] = c
++    # Constructor path should warn for structured array auto-conversion.
++    with pytest.warns(FutureWarning, match=r"Structured.*NdarrayMixin.*Column.*5\.2|Structured.*NdarrayMixin.*Column.*future"):
++        t = Table([a], names=['a'])
++
++    # __setitem__ path should warn for structured arrays.
++    with pytest.warns(FutureWarning, match=r"Structured.*NdarrayMixin.*Column.*5\.2|Structured.*NdarrayMixin.*Column.*future"):
++        t['b'] = b
++
++    # Another structured array variant (recarray) should also warn.
++    with pytest.warns(FutureWarning, match=r"Structured.*NdarrayMixin.*Column.*5\.2|Structured.*NdarrayMixin.*Column.*future"):
++        t['c'] = c
++
++    # Already an NdarrayMixin: no warning expected when adding.
+     t['d'] = d
+ 
++    # Direct add_column call should warn for structured arrays.
++    t2 = Table()
++    with pytest.warns(FutureWarning, match=r"Structured.*NdarrayMixin.*Column.*5\.2|Structured.*NdarrayMixin.*Column.*future"):
++        t2.add_column(b, name='b')
++
+     assert isinstance(t['a'], NdarrayMixin)
+ 
+     assert t['a'][1][1] == a[1][1]
+@@ -759,6 +775,40 @@ def test_ndarray_mixin():
+         "     (4, 'd')    (40, 'dd')   (400., 'rdd')   6 .. 7"]
+ 
+ 
++def test_structured_array_column_no_warning():
++    """
++    If the user wraps a structured array in Column(...), no FutureWarning should
++    be emitted and the result should be a real Column, not NdarrayMixin.
++    """
++    arr = np.array([(1, 2.0)], dtype=[('a', 'i4'), ('b', 'f8')])
++
++    # Constructor with Column wrapper should not warn and should produce Column.
++    with warnings.catch_warnings(record=True) as w:
++        warnings.simplefilter('always')
++        t = Table([Column(arr, name='x')])
++    assert not any(issubclass(wi.category, FutureWarning) for wi in w)
++    assert isinstance(t['x'], Column)
++    assert not isinstance(t['x'], NdarrayMixin)
++
++    # add_column with Column wrapper should not warn.
++    t2 = Table()
++    with warnings.catch_warnings(record=True) as w2:
++        warnings.simplefilter('always')
++        t2.add_column(Column(arr, name='x'))
++    assert not any(issubclass(wi.category, FutureWarning) for wi in w2)
++    assert isinstance(t2['x'], Column)
++    assert not isinstance(t2['x'], NdarrayMixin)
++
++    # __setitem__ with Column wrapper should not warn.
++    t3 = Table()
++    with warnings.catch_warnings(record=True) as w3:
++        warnings.simplefilter('always')
++        t3['x'] = Column(arr)
++    assert not any(issubclass(wi.category, FutureWarning) for wi in w3)
++    assert isinstance(t3['x'], Column)
++    assert not isinstance(t3['x'], NdarrayMixin)
++
++
+ def test_possible_string_format_functions():
+     """
+     The QuantityInfo info class for Quantity implements a

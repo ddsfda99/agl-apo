@@ -1,0 +1,117 @@
+## High-level assessment
+
+The agent correctly reproduced the reported symptom (a `source-read` handler doesn’t affect content pulled in via `.. include::`) and attempted a fix by monkeypatching Docutils’ `state_machine.insert_input()` inside Sphinx’s `Include` directive.
+
+However, the solution is **not acceptable** because it **breaks Sphinx’s existing include semantics** and causes a real regression in the test suite (`tests/test_build_html.py::test_html5_output[subdir/includes.html-expect9]`). The agent also missed the prompt requirement to **delete the added tests** at the end.
+
+## Where the agent went wrong
+
+### 1) The test root naming mistake (minor, but indicative)
+They first created `tests/roots/source-read-include/…` but the Sphinx test harness expects `tests/roots/test-<testroot>/…`, i.e. `tests/roots/test-source-read-include`. They fixed it later, but this shows unfamiliarity with the repo’s testing conventions.
+
+### 2) The “fix” is a fragile monkeypatch of Docutils internals
+They replaced:
+
+```py
+state_machine.insert_input = wrapped_insert_input
+```
+
+during `Include.run()`.
+
+Problems:
+- `insert_input()` is used for more than just includes; patching it even briefly is risky because nested parsing and other directives may re-enter it in unexpected ways.
+- It changes line/source bookkeeping and may alter relative path resolution behavior in included files (exactly the regression observed).
+- It emits `source-read` with `doc or self.env.docname`, which is semantically wrong. Included files are not docnames; they are *dependencies* of the current doc. Many extensions use `docname` to key per-document state and will be confused by fake docnames derived from include filenames or by reusing the parent docname.
+
+### 3) It regresses existing include behavior (confirmed by failing test)
+The failing test expects included content in `subdir/includes.html` to contain a paragraph “This is an include file.” but now the HTML contains only `['Absolute ', None]` for `<p>` nodes. That strongly suggests the include content or subsequent parsing got corrupted.
+
+The likely cause: reconstructing `StringList` from `new_text.splitlines(True)` and passing it into `original_insert()` is **not equivalent** to what Docutils originally passed/expected. Docutils include handling tracks:
+- `input_offset`
+- `source` stack
+- line number mapping for warnings
+- relative path base for directives like `image::`
+
+The monkeypatch bypasses those invariants.
+
+### 4) The agent didn’t finish the required cleanup
+Prompt explicitly says: “remember to delete the test cases you write at last.” The agent left:
+- `tests/test_source_read_include.py`
+- `tests/roots/test-source-read-include/*`
+
+## What the fix should do instead
+
+### Correct conceptual fix
+Sphinx’s `source-read` event is defined for **documents** read by Sphinx (docnames). Included files via `.. include::` are handled entirely by Docutils’ include mechanism during parsing; they are **not** read through `SphinxStandaloneReader.read_source()`, so Sphinx never gets a chance to apply `source-read` transformations to those include files.
+
+To support “search/replace in included sources”, Sphinx needs a **separate hook** for included files, or it needs to ensure includes are read through a Sphinx-controlled read pipeline *without breaking Docutils semantics*.
+
+### Concrete implementation direction (safe)
+Do **not** monkeypatch `insert_input`. Instead, override the `Include` directive to read the file itself *the same way Docutils does*, transform it, then feed it into the parser using Docutils’ supported APIs.
+
+The safest path is:
+
+1) In Sphinx’s `Include.run()`, after resolving `filename`, **read the file content** (respecting `:encoding:` option and other include options supported by Docutils include directive).
+2) Emit a **new Sphinx event** specifically for includes, e.g.:
+   - `include-read` with signature `(filename, content)` or `(docname, filename, content)`
+   - or reuse `source-read` but with a clearly documented `docname` (parent docname) and add `filename` as extra arg (requires API change).
+3) Insert the transformed content using Docutils’ official method:
+   - build a `StringList` from the lines
+   - crucially set the `source` to the include filename
+   - and use `self.state_machine.insert_input()` **without monkeypatching**, passing the `StringList` that includes correct source metadata.
+
+But to preserve semantics, you must also ensure:
+- relative path base inside included content matches Docutils behavior (paths are relative to the including file, unless absolute). This is subtle and is why naive injection breaks.
+- circular include detection remains intact (Docutils tracks it).
+
+To do that, the override should leverage (or mirror) Docutils’ own `Include` directive implementation rather than reimplement it loosely. Concretely:
+- Import `docutils.parsers.rst.directives.misc.Include` (already used as `BaseInclude`)
+- Read its source: use its helper methods / attributes if available (varies by docutils version)
+- If it doesn’t expose a clean “read file” function, copy the relevant logic carefully (encoding, start/end line options, etc.) but **do not change path resolution**.
+
+### Even better: implement this in `sphinx/io.py` isn’t sufficient
+The agent focused on `Include`, which is correct: the bug is in the include pipeline, not in `SphinxStandaloneReader.read_source()` (that only covers top-level docs).
+
+But the fix must be done in a way that:
+- doesn’t alter the meaning/structure of included content
+- doesn’t lie about `docname`
+- doesn’t affect other directives
+
+## Test strategy improvements
+
+### Add a regression test that uses *existing include semantics*
+The agent’s minimal test only checks replacement in HTML. It should also assert something about:
+- images/relative paths still work from included files
+- circular include warnings still behave
+
+Otherwise you risk shipping a fix that “replaces strings” but breaks core include features (which is what happened).
+
+A better test would include:
+- an included file containing an `.. image:: relative.png` and ensure output contains the correct relative link
+- an included file that includes another file, to ensure nesting works
+
+### Keep test roots consistent
+Use only `tests/roots/test-<name>` and add the test root there.
+
+### Cleanup required
+Per prompt, the final step must delete the test(s) added. The agent didn’t do this.
+
+## Specific changes to undo/redo
+
+1) **Revert** the monkeypatch-based changes in `sphinx/directives/other.py` (`Include.run`).
+2) Implement include-source transformation without monkeypatching:
+   - either by augmenting/overriding Docutils Include logic cleanly
+   - or by adding a Sphinx-side reader/helper used by the directive
+3) Ensure the event API is correct:
+   - Prefer a new event like `include-read` rather than overloading `source-read` with bogus docnames.
+4) Re-run full test suite to ensure no regression.
+5) Remove the temporary test file and root directory as required by the prompt.
+
+## Summary
+
+- The agent found the right location (Sphinx’s include directive pipeline) but implemented the fix in an unsafe way that breaks existing behavior.
+- The regression in `test_build_html_output` confirms the approach is wrong.
+- The fix should avoid monkeypatching Docutils state machine methods and should either:
+  - integrate with Docutils Include logic while applying transformations, or
+  - introduce a dedicated include-content hook/event and keep docname semantics intact.
+- They also failed the “delete your tests at the end” requirement.

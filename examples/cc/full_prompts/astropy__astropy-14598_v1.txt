@@ -1,0 +1,125 @@
+You are a senior maintainer-level debugging agent working in the repository in `/testbed` (Astropy FITS cards). Your goal is to fix a bug and **only** that bug:
+
+**Bug:** Inconsistency in handling doubled single-quotes (`''`) in FITS Card string values when round-tripping through `str(card)` and `Card.fromstring(...)`. Some lengths cause `"''"` to become `"'"` (a quote pair gets “lost”), especially around long-string / `CONTINUE` boundaries.
+
+You must follow this process exactly:
+1) Write **minimal, targeted** tests that reproduce the bug (pytest).
+2) Explore the source to locate the responsible code path.
+3) Implement a **minimal** fix.
+4) Re-run your new tests until they pass.
+5) **Delete the tests you added** before finishing.
+
+Do **not** commit changes.
+
+---
+
+## Key technical constraints / lessons from previous failed attempts
+
+To solve this reliably, you must respect FITS string escaping invariants:
+
+- FITS physical representation: embedded `'` is stored as `''` inside the quoted string.
+- Python logical value: embedded `'` is a single `'` character in the returned `.value`.
+
+The reported failure strongly suggests the problematic case is when the doubled quote sequence `''` gets split across long-string continuation segments (e.g., one `'` at end of one segment and the other `'` at start of the next). In that case:
+- **Never unescape per segment** (because neither segment contains `''`).
+- **Concatenate raw segment contents first**, then perform unescaping on the full combined string.
+
+Also:
+- **Do not change the global parsing regexes** (e.g., `_value_*_RE` / `_strg`). Past attempts broke general parsing and caused `VerifyError`. The fix must be localized to long-string reconstruction, not core FITS grammar.
+- Before editing anything, confirm whether the failing `n` values actually produce `CONTINUE` cards. Don’t guess.
+
+---
+
+## Step 1: Write minimal regression tests (must be diagnostic)
+
+Create a temporary pytest file (e.g., `test_fits_quote_roundtrip_tmp.py`) with tests that:
+
+### A. Reproduce the exact report for a few known failing lengths
+Use known failing `n` values from the report (e.g., 65, 67, 68, 69) and some passing neighbors (e.g., 64, 66). Assert:
+- `card1.value == card2.value` after round-trip.
+
+Also assert whether `str(card1)` includes `CONTINUE` for those failing lengths, so we know what path is exercised:
+- `assert ("CONTINUE" in str(card1)) is True` for at least one failing case (if not, expand `n` until it does).
+
+### B. Include the “middle of value” case
+Add one test like `"x"*n + "''" + "x"*10` using a failing `n` from the report (e.g., 55–63). Assert equality after round-trip.
+
+### C. Add one *boundary-split* test (important)
+Construct a string where the `''` is **very likely** to be split across `CONTINUE` segments. Strategy:
+- Find an `n` such that `str(Card('CONFIG', "x"*n + "''"))` produces `CONTINUE` and fails on current code.
+- Alternatively, programmatically search a small range in the test (bounded, quick) to find an `n` such that:
+  - `"CONTINUE" in img` and
+  - `card1.value != Card.fromstring(img).value`
+Then assert round-trip equality for that found `n`. Keep the search range tight (e.g., 50–120) and fail with a helpful message if not found.
+
+Keep tests fast and deterministic.
+
+Run only your tests during development (e.g., `python -m pytest -q test_fits_quote_roundtrip_tmp.py`).
+
+---
+
+## Step 2: Locate the bug (confirm code path)
+
+Before patching, instrument with exploration (print in REPL or inspect code) to confirm:
+
+- Whether failing cases use long-string formatting (`CONTINUE`).
+- Where Astropy parses `CONTINUE` cards back into a single logical card.
+
+Look for code in `astropy/io/fits/card.py` (likely) involving:
+- `Card.fromstring`
+- parsing “long string” / `CONTINUE`
+- functions like `_split`, `_parse_value`, `_format_long_image`, etc.
+
+The bug is expected in the **reconstruction** of long string values from multiple cards, not in the basic single-card parser.
+
+---
+
+## Step 3: Implement the minimal correct fix (localized, no regex changes)
+
+When reconstructing a long string from multiple `CONTINUE` segments, apply this invariant:
+
+1. Extract segment contents as they appear inside FITS quotes (i.e., the captured group from the parser).
+2. Remove only the continuation marker `&` that indicates the string continues (but do not otherwise modify quotes).
+3. **Concatenate the raw segments first** into `combined_raw`.
+4. Only after concatenation, unescape FITS embedded quotes:
+   - logical_value = `combined_raw.replace("''", "'")`
+5. Then ensure the reconstructed `valuecomment` returned by that helper is valid for subsequent parsing:
+   - Escape logical_value exactly once for FITS serialization (single `'` becomes `''` in FITS content), and wrap in quotes appropriately.
+   - Avoid adding or removing whitespace/comment delimiters incorrectly.
+
+Do not “double-escape” by applying `replace("'", "''")` to already-FITS-escaped fragments. Do not unescape per-segment.
+
+Avoid altering any global `_strg` / `_value_*_RE` patterns.
+
+Keep the patch minimal: fix only long-string reconstruction where segments are joined.
+
+---
+
+## Step 4: Validate
+
+- Re-run your temporary tests until all pass.
+- Also sanity-check a couple of non-bug cases:
+  - a simple string without quotes
+  - a string containing a single quote (e.g., `"O'Brien"`)
+  - an empty string value `""` if relevant
+But don’t add lots of tests—just quick manual checks.
+
+---
+
+## Step 5: Clean up
+
+Delete the temporary test file you added.
+
+---
+
+## Deliverable
+
+Make the minimal code change that ensures that for all relevant lengths and placements, this holds:
+
+```python
+card1 = fits.Card('CONFIG', some_string_with_escaped_quotes)
+card2 = fits.Card.fromstring(str(card1))
+assert card1.value == card2.value
+```
+
+Proceed now: write the targeted tests, confirm whether `CONTINUE` is involved for the failing cases, locate the long-string reconstruction logic, and patch it using the “concatenate raw segments then unescape once” rule.

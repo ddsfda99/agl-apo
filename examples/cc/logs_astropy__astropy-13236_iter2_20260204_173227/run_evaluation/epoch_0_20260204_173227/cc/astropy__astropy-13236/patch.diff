@@ -1,0 +1,128 @@
+diff --git a/astropy/table/table.py b/astropy/table/table.py
+index 5afe2127a..19526ccca 100644
+--- a/astropy/table/table.py
++++ b/astropy/table/table.py
+@@ -1243,6 +1243,31 @@ class Table:
+         # mixin class
+         if (not isinstance(data, Column) and not data_is_mixin
+                 and isinstance(data, np.ndarray) and len(data.dtype) > 1):
++            # Emit a FutureWarning about upcoming behavior change and how to opt-in
++            # to current Column behavior. Ensure the warning points to user code.
++            try:
++                import inspect
++                stack = inspect.stack()
++                # Compute stacklevel to first frame not in this module (table.py),
++                # so the warning points to the user call site across entry points.
++                this_file = __file__.replace('\\', '/')
++                stacklevel = 2  # default fallback
++                for i, fi in enumerate(stack):
++                    fname = fi.filename.replace('\\', '/')
++                    if fname != this_file:
++                        # Set stacklevel so that the warning location is this frame
++                        stacklevel = max(i + 1, 1)
++                        break
++            except Exception:
++                stacklevel = 2
++
++            warnings.warn(
++                "Structured numpy array input was auto-converted to NdarrayMixin when adding "
++                "to Table. Wrap the input in Column(arr) to get a Column now. In Astropy 5.2, "
++                "structured arrays will be added as a Column by default.",
++                FutureWarning,
++                stacklevel=stacklevel,
++            )
+             data = data.view(NdarrayMixin)
+             data_is_mixin = True
+ 
+diff --git a/astropy/table/tests/test_mixin.py b/astropy/table/tests/test_mixin.py
+index 2fdcd20d8..673f16359 100644
+--- a/astropy/table/tests/test_mixin.py
++++ b/astropy/table/tests/test_mixin.py
+@@ -6,6 +6,9 @@ import copy
+ import pickle
+ from io import StringIO
+ 
++import os
++import warnings
++import re
+ import pytest
+ import numpy as np
+ 
+@@ -702,6 +705,8 @@ def test_ndarray_mixin():
+     Test directly adding a plain structured array into a table instead of the
+     view as an NdarrayMixin.  Once added as an NdarrayMixin then all the previous
+     tests apply.
++    Also verify FutureWarning about upcoming behavior change and stacklevel points
++    to this test file for multiple entry points.
+     """
+     a = np.array([(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')],
+                  dtype='<i4,' + ('|U1'))
+@@ -711,14 +716,63 @@ def test_ndarray_mixin():
+                            names=['rx', 'ry'])
+     d = np.arange(8, dtype='i8').reshape(4, 2).view(NdarrayMixin)
+ 
+-    # Add one during initialization and the next as a new column.
+-    t = Table([a], names=['a'])
+-    t['b'] = b
+-    t['c'] = c
+-    t['d'] = d
+-
++    # Regex to match message robustly and case-insensitive
++    msg_re = re.compile(r"(?i)structured.*ndarraymixin.*column.*(5\.2|future)")
++
++    # Constructor path: should warn and still produce NdarrayMixin
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t = Table([a], names=['a'])
++        # ensure a warning
++        fut_warns = [w for w in rec if issubclass(w.category, FutureWarning) and msg_re.search(str(w.message))]
++        assert fut_warns, 'Expected FutureWarning for constructor with structured array'
++        # stacklevel correctness: filename should be this test file
++        assert any(w.filename.endswith(os.path.basename(__file__)) for w in fut_warns)
+     assert isinstance(t['a'], NdarrayMixin)
+ 
++    # add_column path: should warn and still produce NdarrayMixin
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t.add_column(b, name='b')
++        fut_warns = [w for w in rec if issubclass(w.category, FutureWarning) and msg_re.search(str(w.message))]
++        assert fut_warns, 'Expected FutureWarning for add_column with structured array'
++        assert any(w.filename.endswith(os.path.basename(__file__)) for w in fut_warns)
++    assert isinstance(t['b'], NdarrayMixin)
++
++    # __setitem__ new column path: should warn and still produce NdarrayMixin
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t['c'] = c
++        fut_warns = [w for w in rec if issubclass(w.category, FutureWarning) and msg_re.search(str(w.message))]
++        assert fut_warns, 'Expected FutureWarning for __setitem__ new column with structured array'
++        assert any(w.filename.endswith(os.path.basename(__file__)) for w in fut_warns)
++    assert isinstance(t['c'], NdarrayMixin)
++
++    # __setitem__ replacement path: set once then replace; should warn and still NdarrayMixin
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t['c'] = c
++        fut_warns = [w for w in rec if issubclass(w.category, FutureWarning) and msg_re.search(str(w.message))]
++        assert fut_warns, 'Expected FutureWarning for __setitem__ replace with structured array'
++        assert any(w.filename.endswith(os.path.basename(__file__)) for w in fut_warns)
++    assert isinstance(t['c'], NdarrayMixin)
++
++    # Wrapping with Column should suppress warning and produce a real Column
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t2 = Table()
++        t2.add_column(Column(b), name='b')
++        assert not any(issubclass(w.category, FutureWarning) for w in rec), 'No FutureWarning expected when wrapping with Column'
++        assert isinstance(t2['b'], Column)
++
++    # Add NdarrayMixin directly should not warn and works as before
++    with warnings.catch_warnings(record=True) as rec:
++        warnings.simplefilter('always')
++        t['d'] = d
++        # Ensure no FutureWarning for adding an already-mixin column
++        assert not any(issubclass(w.category, FutureWarning) for w in rec)
++
++    # Original functional checks remain valid
+     assert t['a'][1][1] == a[1][1]
+     assert t['a'][2][0] == a[2][0]

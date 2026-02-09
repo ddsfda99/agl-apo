@@ -1,0 +1,52 @@
+diff --git a/sympy/physics/hep/gamma_matrices.py b/sympy/physics/hep/gamma_matrices.py
+index 23284e4a92..bdcb7d4f57 100644
+--- a/sympy/physics/hep/gamma_matrices.py
++++ b/sympy/physics/hep/gamma_matrices.py
+@@ -692,10 +692,14 @@ def kahane_simplify(expression):
+     # power of two factor, as described in Kahane's paper:
+     resulting_coeff *= 2**(number_of_contractions)
+ 
+-    # If `first_dum_pos` is not zero, it means that there are trailing free gamma
+-    # matrices in front of `expression`, so multiply by them:
+-    for i in range(0, first_dum_pos):
+-        [ri.insert(0, free_pos[i]) for ri in resulting_indices]
++    # If `first_dum_pos` is not zero, it means that there are leading free gamma
++    # matrices before the first contracted one in `expression`. Prepend them in
++    # their original order to all resulting index lists.
++    if first_dum_pos:
++        leading = [free_pos[i] for i in range(0, first_dum_pos)]
++        for ri in resulting_indices:
++            # Prepend without reversing order
++            ri[:0] = leading
+ 
+     resulting_expr = S.Zero
+     for i in resulting_indices:
+diff --git a/sympy/physics/hep/tests/test_gamma_matrices.py b/sympy/physics/hep/tests/test_gamma_matrices.py
+index 27509803f2..ef23c101d1 100644
+--- a/sympy/physics/hep/tests/test_gamma_matrices.py
++++ b/sympy/physics/hep/tests/test_gamma_matrices.py
+@@ -399,3 +399,24 @@ def test_gamma_matrix_trace():
+     t = ps*ps*ps*ps*ps*ps*ps*ps
+     r = gamma_trace(t)
+     assert r.equals(4*p2*p2*p2*p2)
++
++
++def test_kahane_simplify_preserves_leading_free_order():
++    # Regression tests for preserving order of leading free gammas in kahane_simplify
++    a1, a2, a3 = tensor_indices('a1:4', LorentzIndex)
++    mu = tensor_indices('mu', LorentzIndex)
++
++    # Two leading free gammas before a simple contraction
++    t = G(a1)*G(a2)*G(mu)*G(-mu)
++    r = kahane_simplify(t)
++    assert _is_tensor_eq(r, 4*G(a1)*G(a2))
++
++    # Three leading free gammas before a simple contraction
++    t = G(a1)*G(a2)*G(a3)*G(mu)*G(-mu)
++    r = kahane_simplify(t)
++    assert _is_tensor_eq(r, 4*G(a1)*G(a2)*G(a3))
++
++    # Mixed case: free prefix + contraction + free suffix
++    t = G(a1)*G(a2)*G(mu)*G(-mu)*G(a3)
++    r = kahane_simplify(t)
++    assert _is_tensor_eq(r, 4*G(a1)*G(a2)*G(a3))

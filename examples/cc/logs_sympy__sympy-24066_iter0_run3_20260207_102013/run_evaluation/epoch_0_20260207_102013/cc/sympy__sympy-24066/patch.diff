@@ -1,0 +1,28 @@
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index 3daf84c108..096a6a4c29 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -190,10 +190,19 @@ def _collect_factor_and_dimension(self, expr):
+                 dim /= idim**count
+             return factor, dim
+         elif isinstance(expr, Function):
+-            fds = [self._collect_factor_and_dimension(
+-                arg) for arg in expr.args]
+-            return (expr.func(*(f[0] for f in fds)),
+-                    *(d[1] for d in fds))
++            # Collect factor and dimension for each argument
++            fds = [self._collect_factor_and_dimension(arg) for arg in expr.args]
++            factor = expr.func(*(f for f, _ in fds))
++            dims = [d for _, d in fds]
++            # If all arguments are dimensionless, the function result is dimensionless
++            if all(self.get_dimension_system().is_dimensionless(d) for d in dims):
++                return factor, Dimension(1)
++            # For single-argument functions, propagate the argument's dimension
++            if len(dims) == 1:
++                return factor, dims[0]
++            # For multi-argument functions, there is no general rule; fall back to
++            # using the function applied to the dimensions to preserve structure.
++            return factor, expr.func(*dims)
+         elif isinstance(expr, Dimension):
+             return S.One, expr
+         else:

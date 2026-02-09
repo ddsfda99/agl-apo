@@ -1,0 +1,75 @@
+## High-level review
+
+The agent correctly diagnosed the root cause and implemented the minimal, correct fix:
+
+- In `_log_reg_scoring_path`, the temporary `LogisticRegression` instance used only for scoring was constructed without `multi_class`, so it defaulted to `'ovr'`.
+- Probabilistic scorers (e.g. `neg_log_loss`) call `predict_proba()`, which uses different math depending on `multi_class`. So CV scoring for `multi_class='multinomial'` was inconsistent with the final refit model.
+
+The change:
+```py
+log_reg = LogisticRegression(fit_intercept=fit_intercept,
+                             multi_class=multi_class)
+```
+is the correct fix for the reported bug.
+
+## Where the agent failed the prompt requirements
+
+### 1) They deleted the regression test at the end
+The prompt says “remember to delete the test cases you write at last.” The agent complied, but that makes the fix unprotected going forward and is *not* how upstream scikit-learn work is normally done. In a real contribution, you must keep the test.  
+
+Given your meta-instruction (“output can be combined… to make the coding agent pass all tests”), note that **CI won’t fail because of deleting the test**, but this is still a significant process miss: future regressions won’t be caught.
+
+**Concrete improvement:** Keep the regression test (or move it to the right file) and do *not* delete it.
+
+### 2) They added a test that didn’t compile initially
+They forgot to import `_log_reg_scoring_path`, causing a `NameError`. They fixed it later, but this indicates they didn’t run the test immediately after adding it.
+
+**Concrete improvement:** After writing a new test, run it once before further edits, and ensure imports are correct.
+
+### 3) The new test was overly complex / fragile
+The test:
+- reconstructs two estimators manually by assigning `classes_`, `coef_`, `intercept_`
+- compares `-log_loss` to the internal scoring output
+
+It worked, but it’s more moving parts than necessary and risks brittleness:
+- depends on log_loss default behaviors and label ordering
+- risks solver-specific coefficient shape assumptions
+- assumes `coefs[0]` always matches `(n_classes, n_features+1)` for multinomial (true here, but not a great invariant to rely on)
+
+**Concrete improvement (simpler/stronger test):**
+- Call `_log_reg_scoring_path(... scoring='neg_log_loss', multi_class='multinomial')`
+- For each returned coef vector `w`, set it on a `LogisticRegression(multi_class='multinomial')` **and** assert that `log_reg.multi_class == 'multinomial'` (direct invariant).
+- Then compare the scorer result to `get_scorer('neg_log_loss')(log_reg, X_test, y_test)` using the *same* scorer object, rather than re-deriving via `log_loss`.
+
+Example assertion pattern:
+```py
+scorer = get_scorer('neg_log_loss')
+...
+expected = scorer(lr_multi, X_test, y_test)
+assert_allclose(scores[0], expected)
+```
+This removes duplicated log-loss implementation and avoids sign mistakes.
+
+### 4) The fix might still be incomplete for some scoring paths
+The immediate bug is `multi_class`, but the temporary `log_reg` in `_log_reg_scoring_path` also ignores other parameters that can affect probabilities/decision function, such as:
+- `solver` (less relevant since model isn’t fit, but can affect shape expectations in some code paths)
+- `intercept_scaling` (relevant mostly for liblinear; again not fit here)
+- `classes_` handling for ovr uses `[-1,1]` while multinomial uses `np.unique(y_train)`; that part is fine.
+
+For *this* bug, only `multi_class` matters, so the fix is acceptable. But the agent’s own PR description hinted at “other parameters must be passed”; they did not pursue this, which is fine unless additional issues exist.
+
+**Concrete improvement:** Audit whether `_log_reg_scoring_path` should also set `solver`/`penalty`/etc. on `log_reg` for consistency, or add comments explaining why only `multi_class` is needed for scoring.
+
+## Source-level notes on the fix
+
+- The chosen fix is aligned with the original issue report and scikit-learn behavior: `predict_proba` uses softmax only when `self.multi_class != 'ovr'`.
+- No other code changes are needed for correctness.
+
+## What to change to “pass all tests” (and be robust)
+
+1. **Keep** a regression test (do not delete it).
+2. Simplify test using `get_scorer('neg_log_loss')` for expected value.
+3. Ensure the test imports `_log_reg_scoring_path` (or import module-level `sklearn.linear_model.logistic as logistic` and access `logistic._log_reg_scoring_path`).
+4. Ensure deterministic splitting and set `max_iter` sufficiently high to avoid convergence flakiness if you switch to paths that actually fit (though `_log_reg_scoring_path` uses already-fit coefficients from `logistic_regression_path`, so this is mostly OK).
+
+If you apply (1), the implementation change the agent made should still pass the full suite (it already did in their run), and you also get permanent coverage for the bug.

@@ -1,0 +1,134 @@
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 19f7c0a8d..732ccc947 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -362,21 +362,125 @@ class Only(SphinxDirective):
+             memo.section_level = surrounding_section_level
+ 
+ 
++from pathlib import Path
++from docutils import statemachine
++from docutils import io as du_io
++from docutils import utils as du_utils
++
+ class Include(BaseInclude, SphinxDirective):
+     """
+     Like the standard "Include" directive, but interprets absolute paths
+     "correctly", i.e. relative to source directory.
++
++    Additionally, for reStructuredText includes (non-literal/non-code/non-parser),
++    emit Sphinx's "source-read" event for the included content to allow extensions
++    to modify it before it is parsed.
+     """
+ 
+     def run(self) -> list[Node]:
+-        if self.arguments[0].startswith('<') and \
+-           self.arguments[0].endswith('>'):
+-            # docutils "standard" includes, do not do path processing
++        # Delegate docutils built-in include behavior for standard includes
++        # (e.g. <iso-8859-1.txt>), or when special options are in use.
++        if self.arguments[0].startswith('<') and self.arguments[0].endswith('>'):
+             return super().run()
++
++        # Resolve path relative to the including document / source directory
+         rel_filename, filename = self.env.relfn2path(self.arguments[0])
+         self.arguments[0] = filename
+         self.env.note_included(filename)
+-        return super().run()
++
++        # If using literal/code/parser options, delegate to docutils entirely.
++        if ('literal' in self.options) or ('code' in self.options) or ('parser' in self.options):
++            return super().run()
++
++        # Re-implement only the reST include path to allow source-read event,
++        # while preserving Docutils behaviors.
++        # This closely follows docutils.parsers.rst.directives.misc.Include.run.
++        current_source = self.state.document.current_source
++        path = directives.path(self.arguments[0])
++        _base = Path(current_source).parent
++        # Pathlib join with absolute preserves absolute; relative resolves under base
++        path = du_utils.relative_path(None, _base / path)
++
++        # Settings
++        encoding = self.options.get('encoding', self.state.document.settings.input_encoding)
++        e_handler = self.state.document.settings.input_encoding_error_handler
++        tab_width = self.options.get('tab-width', self.state.document.settings.tab_width)
++
++        # Open the include file
++        try:
++            include_file = du_io.FileInput(source_path=path,
++                                           encoding=encoding,
++                                           error_handler=e_handler)
++        except UnicodeEncodeError:
++            raise self.severe(f'Problems with "{self.name}" directive path:\n'
++                              f'Cannot encode input file path "{path}" '
++                              '(wrong locale?).')
++        except OSError as error:
++            raise self.severe(f'Problems with "{self.name}" directive '
++                              f'path:\n{du_io.error_string(error)}.')
++        else:
++            self.state.document.settings.record_dependencies.add(path)
++
++        # Read content (respect start/end options)
++        startline = self.options.get('start-line', None)
++        endline = self.options.get('end-line', None)
++        try:
++            if startline or (endline is not None):
++                lines = include_file.readlines()
++                rawtext = ''.join(lines[startline:endline])
++            else:
++                rawtext = include_file.read()
++        except UnicodeError as error:
++            raise self.severe(f'Problem with "{self.name}" directive:\n' + du_io.error_string(error))
++
++        # start-after/end-before slicing
++        after_text = self.options.get('start-after', None)
++        if after_text:
++            after_index = rawtext.find(after_text)
++            if after_index < 0:
++                raise self.severe('Problem with "start-after" option of "%s" '
++                                  'directive:\nText not found.' % self.name)
++            rawtext = rawtext[after_index + len(after_text):]
++        before_text = self.options.get('end-before', None)
++        if before_text:
++            before_index = rawtext.find(before_text)
++            if before_index < 0:
++                raise self.severe('Problem with "end-before" option of "%s" '
++                                  'directive:\nText not found.' % self.name)
++            rawtext = rawtext[:before_index]
++
++        include_lines = statemachine.string2lines(rawtext, tab_width, convert_whitespace=True)
++        for i, line in enumerate(include_lines):
++            if len(line) > self.state.document.settings.line_length_limit:
++                raise self.warning('"%s": line %d exceeds the'
++                                   ' line-length-limit.' % (path, i + 1))
++
++        # Prevent circular inclusion (preserve docutils behavior)
++        clip_options = (startline, endline, before_text, after_text)
++        include_log = self.state.document.include_log
++        if not include_log:
++            include_log.append((du_utils.relative_path(None, current_source),
++                                (None, None, None, None)))
++        if (path, clip_options) in include_log:
++            master_paths = (pth for (pth, opt) in reversed(include_log))
++            inclusion_chain = '\n> '.join((path, *master_paths))
++            raise self.warning('circular inclusion in "%s" directive:\n%s'
++                               % (self.name, inclusion_chain))
++
++        # Emit source-read for the included content using the including docname.
++        # Extensions can modify the content text via the event.
++        content_text = '\n'.join(include_lines)
++        arg = [content_text]
++        # Use including document's env.docname for event semantics
++        self.env.events.emit('source-read', self.env.docname, arg)
++        # Re-split into lines with same whitespace conversion
++        include_lines = statemachine.string2lines(arg[0], tab_width, convert_whitespace=True)
++
++        # Include as rST source: add end marker and insert into input stream
++        include_lines += ['', f'.. end of inclusion from "{path}"']
++        self.state_machine.insert_input(include_lines, path)
++        include_log.append((path, clip_options))
++        return []
+ 
+ 
+ def setup(app: Sphinx) -> dict[str, Any]:

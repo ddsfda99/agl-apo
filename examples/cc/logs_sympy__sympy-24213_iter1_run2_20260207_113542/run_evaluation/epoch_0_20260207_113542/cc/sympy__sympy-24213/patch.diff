@@ -1,0 +1,36 @@
+diff --git a/sympy/physics/units/unitsystem.py b/sympy/physics/units/unitsystem.py
+index a436880c4b..2e8a9e7db6 100644
+--- a/sympy/physics/units/unitsystem.py
++++ b/sympy/physics/units/unitsystem.py
+@@ -176,10 +176,27 @@ def _collect_factor_and_dimension(self, expr):
+                 addend_factor, addend_dim = \
+                     self._collect_factor_and_dimension(addend)
+                 if dim != addend_dim:
+-                    raise ValueError(
+-                        'Dimension of "{}" is {}, '
+-                        'but it should be {}'.format(
+-                            addend, addend_dim, dim))
++                    # Allow addition of equivalent (but not structurally equal) dimensions
++                    ds = self.get_dimension_system()
++                    equivalent = False
++                    if ds is not None:
++                        try:
++                            equivalent = ds.equivalent_dims(dim, addend_dim)
++                        except TypeError:
++                            # Fall back to treating as mismatch on dependency errors
++                            equivalent = False
++                    if not equivalent:
++                        raise ValueError(
++                            'Dimension of "{}" is {}, '
++                            'but it should be {}'.format(
++                                addend, addend_dim, dim))
++                    # Prefer a canonical/named representative for stability
++                    try:
++                        if hasattr(addend_dim, 'name') and addend_dim.name.is_Symbol and not (hasattr(dim, 'name') and dim.name.is_Symbol):
++                            dim = addend_dim
++                    except Exception:
++                        # Be conservative: if anything goes wrong, keep existing dim
++                        pass
+                 factor += addend_factor
+             return factor, dim
+         elif isinstance(expr, Derivative):

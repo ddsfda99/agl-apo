@@ -1,0 +1,138 @@
+diff --git a/sphinx/directives/other.py b/sphinx/directives/other.py
+index 35e16e623..647329903 100644
+--- a/sphinx/directives/other.py
++++ b/sphinx/directives/other.py
+@@ -119,16 +119,28 @@ class TocTree(SphinxDirective):
+                 if url_re.match(ref) or ref == 'self':
+                     toctree['entries'].append((title, ref))
+                 elif docname not in self.env.found_docs:
+-                    if excluded(self.env.doc2path(docname, False)):
+-                        message = __('toctree contains reference to excluded document %r')
+-                        subtype = 'excluded'
++                    # handle special generated pages like genindex/search/modindex via std domain
++                    try:
++                        std = self.env.get_domain('std')
++                        is_special = (ref in std.anonlabels) or (ref in std.labels)
++                    except Exception:
++                        is_special = False
++
++                    if is_special:
++                        # keep original ref (do not absolutize or include as a source file)
++                        toctree['entries'].append((title, ref))
++                        # do not add to includefiles to avoid bogus rebuild deps
+                     else:
+-                        message = __('toctree contains reference to nonexisting document %r')
+-                        subtype = 'not_readable'
+-
+-                    logger.warning(message, docname, type='toc', subtype=subtype,
+-                                   location=toctree)
+-                    self.env.note_reread()
++                        if excluded(self.env.doc2path(docname, False)):
++                            message = __('toctree contains reference to excluded document %r')
++                            subtype = 'excluded'
++                        else:
++                            message = __('toctree contains reference to nonexisting document %r')
++                            subtype = 'not_readable'
++
++                        logger.warning(message, docname, type='toc', subtype=subtype,
++                                       location=toctree)
++                        self.env.note_reread()
+                 else:
+                     if docname in all_docnames:
+                         all_docnames.remove(docname)
+diff --git a/sphinx/environment/adapters/toctree.py b/sphinx/environment/adapters/toctree.py
+index 9678e3c7c..3ee96af89 100644
+--- a/sphinx/environment/adapters/toctree.py
++++ b/sphinx/environment/adapters/toctree.py
+@@ -140,24 +140,59 @@ class TocTree:
+                         # don't show subitems
+                         toc = nodes.bullet_list('', item)
+                     else:
+-                        if ref in parents:
+-                            logger.warning(__('circular toctree references '
+-                                              'detected, ignoring: %s <- %s'),
+-                                           ref, ' <- '.join(parents),
+-                                           location=ref, type='toc', subtype='circular')
+-                            continue
+-                        refdoc = ref
+-                        toc = self.env.tocs[ref].deepcopy()
+-                        maxdepth = self.env.metadata[ref].get('tocdepth', 0)
+-                        if ref not in toctree_ancestors or (prune and maxdepth > 0):
+-                            self._toctree_prune(toc, 2, maxdepth, collapse)
+-                        process_only_nodes(toc, builder.tags)
+-                        if title and toc.children and len(toc.children) == 1:
+-                            child = toc.children[0]
+-                            for refnode in child.findall(nodes.reference):
+-                                if refnode['refuri'] == ref and \
+-                                   not refnode['anchorname']:
+-                                    refnode.children = [nodes.Text(title)]
++                        # handle special generated pages via standard domain labels
++                        std = self.env.get_domain('std')
++                        if ref in std.anonlabels or ref in std.labels:
++                            # Determine if builder will generate the page
++                            will_emit = False
++                            if ref == 'genindex':
++                                will_emit = bool(getattr(builder, 'use_index', False))
++                            elif ref == 'search':
++                                will_emit = bool(getattr(builder, 'search', False))
++                            elif ref == 'modindex':
++                                # Only include if the builder will generate the python module index
++                                try:
++                                    di = getattr(builder, 'domain_indices', [])
++                                    will_emit = any(name == 'py-modindex' for (name, _cls, _content, _collapse) in di)
++                                except Exception:
++                                    will_emit = False
++                            if not will_emit:
++                                # skip silently
++                                continue
++                            # map to actual docname via labels
++                            target_doc = std.anonlabels.get(ref, std.labels.get(ref, ('', '')))[0]
++                            if not title:
++                                # use localized title from labels if available
++                                if ref in std.labels:
++                                    title = std.labels[ref][2]
++                                else:
++                                    title = ref
++                            reference = nodes.reference('', '', internal=True,
++                                                        refuri=target_doc,
++                                                        anchorname='',
++                                                        *[nodes.Text(title)])
++                            para = addnodes.compact_paragraph('', '', reference)
++                            item = nodes.list_item('', para)
++                            toc = nodes.bullet_list('', item)
++                        else:
++                            if ref in parents:
++                                logger.warning(__('circular toctree references '
++                                                  'detected, ignoring: %s <- %s'),
++                                               ref, ' <- '.join(parents),
++                                               location=ref, type='toc', subtype='circular')
++                                continue
++                            refdoc = ref
++                            toc = self.env.tocs[ref].deepcopy()
++                            maxdepth = self.env.metadata[ref].get('tocdepth', 0)
++                            if ref not in toctree_ancestors or (prune and maxdepth > 0):
++                                self._toctree_prune(toc, 2, maxdepth, collapse)
++                            process_only_nodes(toc, builder.tags)
++                            if title and toc.children and len(toc.children) == 1:
++                                child = toc.children[0]
++                                for refnode in child.findall(nodes.reference):
++                                    if refnode['refuri'] == ref and \
++                                       not refnode['anchorname']:
++                                        refnode.children = [nodes.Text(title)]
+                     if not toc.children:
+                         # empty toc means: no titles will show up in the toctree
+                         logger.warning(__('toctree contains reference to document %r that '
+@@ -170,6 +205,13 @@ class TocTree:
+                     elif not included(self.env.doc2path(ref, False)):
+                         message = __('toctree contains reference to non-included document %r')
+                     else:
++                        # if it's a special page, skip warning
++                        try:
++                            std = self.env.get_domain('std')
++                            if ref in std.anonlabels or ref in std.labels:
++                                continue
++                        except Exception:
++                            pass
+                         message = __('toctree contains reference to nonexisting document %r')
+ 
+                     logger.warning(message, ref, location=toctreenode)

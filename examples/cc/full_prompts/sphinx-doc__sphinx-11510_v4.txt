@@ -1,0 +1,33 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Reproduce includes correctly: `.. include::` injects lines via Docutils `state_machine.insert_input()` and bypasses `SphinxStandaloneReader.read_source()`, so `source-read` won’t fire unless you hook include-time reading.
+- Don’t “fix” this by monkeypatching `state_machine.insert_input()`; it’s brittle and can corrupt source/line bookkeeping, relative-path behavior inside included content, and nested parsing (confirmed regression).
+- Avoid large copy/paste reimplementations of Docutils’ `Include.run()` inside Sphinx; it’s a maintenance hazard and easy to drift from Docutils semantics (start/end slicing, encoding, include_log, dependency tracking, parser options, literal/code modes).
+- If overriding Sphinx’s `Include` directive, keep the override minimal and preserve Docutils behaviors:
+  - Respect `start-line/end-line/start-after/end-before`, `encoding`, `tab-width`
+  - Preserve circular-include detection (`document.include_log`)
+  - Preserve `:literal:` / `:code:` / `:parser:` behavior (often safest to delegate those paths to Docutils)
+  - Insert with correct `source` metadata and offsets so warnings, `image::` resolution, etc. behave as before.
+- Path handling must be consistent: keep absolute path for reading; don’t join a base dir with an absolute path; pass a stable, correct “source” string to Docutils for location tracking.
+- Event semantics: don’t invent misleading `docname`s from include filenames. If reusing `source-read`, define a clear rule (typically: use the including document’s `env.docname`; include path should be conveyed separately if needed). Consider a dedicated include-focused event if API change is allowed.
+- Test expectations should guard against regressions: beyond “string replaced”, also ensure included content still parses correctly and relative references from the included file (e.g., images) still resolve.
+
+Repo-Specific:
+- Test roots must be named `tests/roots/test-<name>` and referenced as `@pytest.mark.sphinx(testroot='<name>')`; wrong root naming wastes runs.
+- Existing suite already covers include semantics (e.g. `tests/test_build_html.py` include cases); after any include change, run those tests (ideally full suite) post-patch, not just pre-patch.
+- If instructed to create temporary tests and delete them, actually remove both the pytest file and the `tests/roots/test-...` directory at the end; otherwise the task fails requirements.
+- Prefer include fragments as `.inc` (not in `source_suffix`) in repro tests to isolate true include behavior (and avoid accidentally building the include file as its own document).
+
+General:
+- Favor minimal, well-scoped changes over invasive hooks; touching core parsing requires extreme caution because many directives/features rely on subtle invariants (source stacks, offsets, dependency tracking).
+- Don’t override or monkeypatch third-party internals unless there’s no alternative; if you must, ensure it’s re-entrant safe and preserves all metadata.
+- When changing behavior that affects parsing, add regression checks that cover “it still works the old way” (paths, nested includes, warnings) in addition to the new desired behavior.
+- Always run targeted tests + broader suite after implementing the fix; a passing minimal repro is not enough for core pipeline changes.

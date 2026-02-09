@@ -1,0 +1,42 @@
+diff --git a/sklearn/utils/_set_output.py b/sklearn/utils/_set_output.py
+index 335773c6a..7dee129c1 100644
+--- a/sklearn/utils/_set_output.py
++++ b/sklearn/utils/_set_output.py
+@@ -127,12 +127,36 @@ def _wrap_data_with_container(method, data_to_wrap, original_input, estimator):
+         return data_to_wrap
+ 
+     # dense_config == "pandas"
+-    return _wrap_in_pandas_container(
++    df = _wrap_in_pandas_container(
+         data_to_wrap=data_to_wrap,
+         index=getattr(original_input, "index", None),
+         columns=estimator.get_feature_names_out,
+     )
+ 
++    # Attempt to preserve pandas dtypes for transformers that select features
++    # without modifying their values (e.g., feature selectors). We detect such
++    # transformers by the presence of a `get_support` method.
++    try:
++        pd = check_pandas_support("Setting output container to 'pandas'")
++        if isinstance(df, pd.DataFrame) and isinstance(original_input, pd.DataFrame):
++            if hasattr(estimator, "get_support"):
++                # Build a dtype mapping for the selected columns based on the
++                # original input DataFrame.
++                orig_dtypes = original_input.dtypes
++                # Only preserve dtypes for columns that exist in the original input
++                # and are present in the output.
++                selected = [col for col in df.columns if col in orig_dtypes.index]
++                if selected:
++                    dtype_map = {col: orig_dtypes[col] for col in selected}
++                    # Use errors='ignore' to avoid raising if conversion is not possible.
++                    df = df.astype(dtype_map, errors="ignore")
++    except Exception:
++        # If any unexpected error occurs during dtype preservation, silently
++        # fall back to the DataFrame without enforced dtypes.
++        pass
++
++    return df
++
+ 
+ def _wrap_method_output(f, method):
+     """Wrapper used by `_SetOutputMixin` to automatically wrap methods."""

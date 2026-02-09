@@ -1,0 +1,37 @@
+diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+index abdeba8ef..46cd13258 100644
+--- a/astropy/io/ascii/rst.py
++++ b/astropy/io/ascii/rst.py
+@@ -57,10 +57,17 @@ class RST(FixedWidth):
+     data_class = SimpleRSTData
+     header_class = SimpleRSTHeader
+ 
+-    def __init__(self):
+-        super().__init__(delimiter_pad=None, bookend=False)
++    def __init__(self, header_rows=None):
++        # For RST simple tables, use space as delimiter, no padding, and no bookend.
++        # Accept header_rows to allow multiple header lines (e.g., name, unit).
++        super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)
+ 
+     def write(self, lines):
+         lines = super().write(lines)
+-        lines = [lines[1]] + lines + [lines[1]]
++        # The rule line (e.g., "==== ======") appears after the header rows.
++        # When header_rows has N entries, the rule line is at index N.
++        header_rows = getattr(self.header, "header_rows", ["name"]) or ["name"]
++        rule_index = len(header_rows)
++        rule_line = lines[rule_index]
++        lines = [rule_line] + lines + [rule_line]
+         return lines
+diff --git a/astropy/io/ascii/tests/test_rst.py b/astropy/io/ascii/tests/test_rst.py
+index 84d6fed40..b06328a79 100644
+--- a/astropy/io/ascii/tests/test_rst.py
++++ b/astropy/io/ascii/tests/test_rst.py
+@@ -3,6 +3,8 @@
+ from io import StringIO
+ 
+ from astropy.io import ascii
++from astropy.table import QTable
++import astropy.units as u
+ 
+ from .common import assert_almost_equal, assert_equal
