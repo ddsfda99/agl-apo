@@ -60,27 +60,6 @@ async def apo_algorithm(*, store: agl.LightningStore):
         ],
     )
     
-    # Configure models using CloudGPT/APIM
-    # Available models: gpt-4o-20241120, gpt-5-mini-20250807, gpt-5-20250807, o1-20241217, etc.
-    # llm_proxy.update_model_list(
-    #     [
-    #         ModelConfig(
-    #             model_name="claude-sonnet-4-5-20250929",
-    #             litellm_params={"model": "azure/gpt-5-mini", "api_base": "https://19836-mi88m061-eastus2.cognitiveservices.azure.com/",
-    #             "api_key": "AwJJGh3UYH9LnY3IfFuTTduW7HLgcA59tBTM3ogQemx50yfzIFUoJQQJ99BKACHYHv6XJ3w3AAAAACOGkzX7",
-    #             "api_version": "2025-04-01-preview",
-    #             "rpm": 180},
-    #         ),
-    #         ModelConfig(
-    #             model_name="claude-haiku-4-5-20251001",
-    #             litellm_params={"model": "azure/gpt-5-mini", "api_base": "https://19836-mi88m061-eastus2.cognitiveservices.azure.com/",
-    #             "api_key": "AwJJGh3UYH9LnY3IfFuTTduW7HLgcA59tBTM3ogQemx50yfzIFUoJQQJ99BKACHYHv6XJ3w3AAAAACOGkzX7",  
-    #             "api_version": "2025-04-01-preview",
-    #             "rpm": 180},
-    #         ),
-    #     ]
-    # )
-    
     # ===== CloudGPT setup =====
     token_provider = get_openai_token_provider()
     
@@ -107,13 +86,6 @@ async def apo_algorithm(*, store: agl.LightningStore):
         ]
     )
     await llm_proxy.restart()
-    
-    # ===== Original AsyncAzureOpenAI client setup =====
-    # async_openai_client = AsyncAzureOpenAI(
-    #     api_version="2024-12-01-preview",
-    #     azure_endpoint="https://19836-mi88m061-eastus2.cognitiveservices.azure.com",
-    #     api_key="AwJJGh3UYH9LnY3IfFuTTduW7HLgcA59tBTM3ogQemx50yfzIFUoJQQJ99BKACHYHv6XJ3w3AAAAACOGkzX7",
-    # )
     
     # ===== CloudGPT AsyncAzureOpenAI client =====
     async_openai_client = AsyncAzureOpenAI(
