@@ -1,0 +1,74 @@
+Attempt A (successful): why it succeeded
+- Bug-mechanism alignment (correctness)
+  - The failure described is “comma-separated regex options get incorrectly split,” especially for regex syntax that legitimately contains commas: quantifier ranges {m,n}, commas inside character classes [...], and escaped commas \,.
+  - Patch A addresses exactly the splitting point by introducing a syntax-aware splitter `_split_regex_csv` and wiring it into both regex CSV transformers:
+    - `_regexp_csv_transfomer`: switched from `_csv_transformer(value)` to `_split_regex_csv(value)`
+    - `_regexp_paths_csv_transfomer`: same switch
+  - `_split_regex_csv` implements the minimal required state to avoid false splits:
+    - Tracks `in_char_class` for `[...]`
+    - Tracks `brace_depth` for `{...}` (covers `{m,n}` without splitting)
+    - Detects escaping via odd-number backslash counting so `\,` won’t split
+  - It preserves prior behavior of unquoting each segment by calling `pylint_utils._unquote(part)` on each extracted pattern (so config quoting continues to work).
+
+- Scope control (minimal change vs overreach)
+  - Changes are localized to regex CSV behavior only. It does not alter unrelated transformers or broaden types/signatures.
+  - The only extra behavioral change is returning `[]` for falsy `value` in both regex CSV transformers. That is low risk and consistent with “empty list” semantics.
+
+- Patch completeness (all touched call paths)
+  - The prompt required consistency between “regex list” and “regex-path list” if they share splitting logic. Attempt A explicitly updates both `_regexp_csv_transfomer` and `_regexp_paths_csv_transfomer` to use the same helper, meeting that requirement.
+
+- Validation quality
+  - Tests exercise the real argparse/config parsing path using `Run([...], exit=False)` and reading `run.linter.config.bad_names_rgxs` (end-to-end behavior, not private helper unit tests).
+  - Targeted regression cases directly match the prompt’s edge cases:
+    - `{1,3}` quantifier: `--bad-names-rgxs=(foo{1,3}),bar` asserts exactly two compiled patterns with `.pattern` equal to `(foo{1,3})` and `bar`.
+    - Escaped comma and comma inside character class: `foo\,bar,a[,]b` asserts it does not split incorrectly and includes a matching sanity assertion (`"foo,bar"` matches).
+  - This is causally why it “succeeded”: it fixed the specific parsing step that was breaking regex compilation, and verified via the same path users hit (CLI/config parsing), ensuring no “unit-only” false confidence.
+
+Attempt B (failed): why it failed
+- Root cause 1: Incomplete fix (missed required transformer)
+  - Patch B only changes `_regexp_csv_transfomer`; it leaves `_regexp_paths_csv_transfomer` untouched (still using the naive CSV splitting internally via existing logic).
+  - The original prompt explicitly required consistent handling across both regex CSV transformers if they share splitting logic. Attempt B violates that, so any tests covering regex-path CSV options (or future usage) would still fail or behave incorrectly.
+
+- Root cause 2: Overreach / unrelated API change introduces risk and likely breaks expectations
+  - Patch B broadens `_glob_paths_csv_transformer` signature from `value: str` to `value: str | Sequence[str]` and changes its internal behavior to accept list/tuple inputs.
+  - This is unrelated to the stated objective (regex CSV options) and violates “smallest change” / “do not change unrelated transformers.”
+  - Even if it doesn’t immediately fail compilation, such type broadening can cause subtle behavior shifts (e.g., callers passing other sequence types, config defaults, argparse interactions), increasing regression risk.
+
+- Root cause 3: Validation gap (does not meet prompt’s test requirements)
+  - Attempt B’s summary claims tests were created then deleted (“Cleaned up: Deleted … as requested”), but the patch shows no tests added at all. That conflicts with the prompt requirement to “Add tests that exercise the real argparse/config parsing path.”
+  - Since patch B adds no regression tests, it’s likely the evaluation harness (which expects a regression test or existing tests to pass) flags missing coverage and/or still sees failures in other code paths (notably regex-path CSV behavior).
+
+- Root cause 4: Likely incorrect splitting semantics for regexes (risk of false negatives/positives)
+  - Patch B’s `_split_regex_patterns` tracks parentheses depth `()` and treats commas inside parentheses as non-delimiters. That is not part of the original requirement and can change intended semantics: many valid configurations might expect `(a),(b)` to mean two patterns, but B would keep it as one segment if commas are inside parentheses. Attempt A avoids this overreach and only protects known comma-bearing regex constructs with strong justification ({}, [], escapes).
+  - B also doesn’t reuse/centralize logic across both regex transformers; it nests helper inside `_regexp_csv_transfomer`, preventing reuse by `_regexp_paths_csv_transfomer` and making inconsistency more likely.
+
+Reusable good practices / patterns (from Attempt A)
+- Fix the bug at the actual boundary where incorrect semantics are introduced
+  - Replace naive delimiter split with a syntax-aware scan at the transformer level (where you still have raw input text and can preserve quoting/unquoting).
+- Keep the change minimal and targeted
+  - Add one helper, wire it into the two relevant transformers, do not touch unrelated transformers or expand public signatures.
+- Preserve existing semantics explicitly
+  - Continue to apply the same unquoting behavior per element after splitting.
+- Add end-to-end regression tests through the public configuration/CLI path
+  - Use the project’s existing “run/cli helper” to parse arguments and then assert on the resulting config object’s compiled regex patterns.
+
+Concrete anti-patterns / avoidable mistakes (from Attempt B)
+- Leaving parallel code paths unfixed
+  - Fixing only one of multiple similar transformers causes inconsistent behavior and future regressions.
+- Unnecessary API/type broadening in unrelated code
+  - Changing argument types and behavior in non-target transformers increases regression surface and violates scope constraints.
+- Tests that don’t match required integration level (or no tests at all)
+  - Unit-calling private helpers (even if present) fails the requirement to validate the real parsing path; deleting tests leaves no safety net.
+- Over-generalizing parsing rules without justification
+  - Treating commas inside parentheses as always “not a separator” is a semantic change that can break legitimate configurations.
+
+Keep-vs-avoid comparison (actionable)
+- Keep:
+  - A small, dedicated splitter that understands only the necessary regex constructs (escapes, character classes, quantifier braces).
+  - Shared use across all regex CSV transformers.
+  - Integration tests that run the actual option parsing and inspect resulting compiled regex patterns.
+- Avoid:
+  - Signature/type changes for unrelated transformers.
+  - Fixing only one transformer when multiple share the same flawed logic.
+  - Parsing rules that silently change delimiter meaning in common regex constructs without explicit requirement.
+  - Skipping (or deleting) regression tests.

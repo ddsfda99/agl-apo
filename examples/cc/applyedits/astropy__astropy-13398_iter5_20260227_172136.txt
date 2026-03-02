@@ -1,0 +1,134 @@
+You are an expert Astropy contributor working in the repository in `/testbed`. Your goal is to implement a **direct ITRS↔(AltAz,HADec) transform that stays entirely in ITRS**, avoiding the current geocentric/topocentric aberration gotchas caused by time-coupled ITRS→ITRS paths (and avoiding routing through CIRS/ICRS).
+
+The bug/feature request is:
+
+> Provide a direct approach to ITRS→Observed transformations that stays within the ITRS.  
+> Treat ITRS positions as **time invariant** for these transforms: if input/output `obstime` differ, do **not** perform an ITRS→ITRS time transform. Instead, compute topocentric vectors by subtracting the observer’s ITRS location at the **observed frame’s obstime**, rotate into the observed axes, and realize the output frame. Likewise for inverse. This should fix recurring “ITRS→AltAz inaccurate for satellites” reports and match the intent of the snippet in the issue description.
+
+You must complete the following steps and **must not skip any validation gates**. The previous attempts failed because they only added an import without implementing the module, didn’t prove reproduction robustly, and didn’t ensure the transform graph chose the new transform.
+
+---
+
+## Hard Requirements (do these exactly)
+
+### A. Environment & robustness against IERS/network noise
+1. **Do not rely on network downloads.** In all tests and local experiments set:
+   - `from astropy.utils import iers; iers.conf.auto_download = False`
+2. Prefer tests that avoid requiring high-precision UT1/polar motion. Use `Time("2020-01-01T00:00:00", scale="utc")` or similar and keep tolerances reasonable. The goal is not precise Earth orientation—it's avoiding the incorrect huge displacement caused by time-coupled ITRS→ITRS.
+
+### B. Implementation must match the “stay in ITRS” design
+1. **Do NOT route through CIRS/ICRS/ERFA astrometry** for these transforms.
+2. Implement the transforms as:  
+   - Translate from geocentric ITRS to topocentric ITRS by subtracting observer position in ITRS
+   - Apply a pure rotation matrix from ITRS into AltAz or HADec axes using only observer longitude/latitude (WGS84 geodetic), matching the issue snippet (including left-handed conventions via sign flip).
+   - Inverse transform: transpose rotation, then add observer ITRS position back.
+3. Register transforms using `FunctionTransformWithFiniteDifference` on the frame transform graph for:
+   - `ITRS -> AltAz`, `AltAz -> ITRS`
+   - `ITRS -> HADec`, `HADec -> ITRS`
+4. **Time handling requirement:** These transforms must **not** attempt to synchronize/convert the input ITRS coordinate to the output time. They must treat the ITRS coordinate as time-invariant and use the **output observed frame’s location/obstime** for the observer position subtraction/addition.
+   - If output observed frame has `obstime=None`, adopt that (i.e., don’t force a time). But note: observer `location.get_itrs(obstime=...)` may require a time; handle this carefully (see tests below).
+
+### C. Transform graph precedence must be verified
+Adding a direct edge may not be enough if another path is chosen. You must:
+1. After implementation, explicitly check the selected transform is your new function:
+   - `from astropy.coordinates.baseframe import frame_transform_graph`
+   - `frame_transform_graph.get_transform(ITRS, AltAz)` and similarly for HADec
+2. If the graph still chooses another route, adjust registration (ensure direct edge exists and is selected) without breaking other transforms.
+
+### D. Repo must remain importable
+Previous failures added imports to a non-existent module. Before finalizing:
+1. Run `python -c "import astropy.coordinates.builtin_frames as bf"` after your edits.
+2. Run `git diff --stat` and confirm it shows actual new/modified source files (not just an import).
+
+---
+
+## Step-by-step tasks (follow strictly)
+
+### 1) Explore repository
+- Find where builtin coordinate frames and transforms are defined (likely `astropy/coordinates/builtin_frames/` and transform registration modules).
+- Locate existing ITRS↔AltAz and ITRS↔HADec transforms and the current behavior that causes time-coupled ITRS→ITRS.
+
+### 2) Run baseline tests
+- Run the relevant subset first (coordinates tests), then full suite if feasible.
+- Record any **pre-existing failures** and treat them as baseline noise to ignore later.
+
+### 3) Write reproduction tests (must fail before fix)
+Create a temporary test module (you will delete it in step 8) that demonstrates the bug and the intended behavior. Tests must be robust, not requiring network, and must cover:
+
+#### Test 1: “Straight overhead” / satellite-like topocentric behavior with mismatched obstimes
+- Use an observer `EarthLocation` (e.g., lat=0, lon=0, height=0).
+- Create an ITRS coordinate that is directly above the observer at a known topocentric distance:
+  - Compute observer geocentric ITRS position at `t_obs`.
+  - Add a local “up” vector in ITRS consistent with the observer geodetic normal (or construct by transforming an AltAz(alt=90) direction back to ITRS using the intended rotation and then adding to observer position).
+- Then transform ITRS->AltAz **with AltAz obstime = t_obs** and verify:
+  - `alt` is ~90 deg, `az` is finite/any, distance matches.
+- Now create a second AltAz frame with a **different obstime** (`t_obs + 6 * u.hour`) but same location.
+  - Transform the same ITRS point into this second AltAz frame.
+  - **Expected with new approach:** still ~90 deg (unchanged), because ITRS is treated time-invariant for this transform.
+  - **Current buggy behavior:** will drift badly or completely wrong because it forces an ITRS→ITRS time transform via SSB-related aberration.
+- This test must FAIL on current code.
+
+#### Test 2: Round-trip invariance
+- Pick a random-ish ITRS coordinate near Earth (not at center), with an observer location.
+- Do `itrs -> AltAz(obstime=t1, location=loc) -> ITRS(obstime=t2)` with `t1 != t2`.
+- **Expected with fix:** resulting ITRS cartesian should equal original within tolerance (e.g., meters to centimeters depending on numeric ops), because operations are pure translate+rotate and don’t time-warp the ITRS coordinate.
+
+#### Test 3: HADec parity and left-handedness sanity
+- Similar to AltAz but for `HADec`, ensuring transform runs and round-trips.
+- Verify at least one known axis behavior (e.g., object on local meridian corresponds to HA ~ 0) or just round-trip cartesian invariance.
+
+#### Test 4: Behavior when output observed frame has `obstime=None`
+- Construct `AltAz(location=loc)` with `obstime=None` explicitly (or default).
+- Decide expected behavior:
+  - If transform is impossible without an obstime for `location.get_itrs()`, then raise a clear, intentional exception (and test for it).
+  - Or if Astropy can compute location ITRS without time (some locations are time-independent), then require it succeeds.
+- Your implementation and test must agree; do not leave it ambiguous.
+
+In all tests:
+- Set `iers.conf.auto_download = False`
+- Use tolerances and avoid relying on high-precision EOP.
+
+### 4) Confirm reproduction tests fail pre-fix
+- Run only your new tests and show they fail.
+- Confirm existing previously-passing coordinate tests still pass (or only baseline failures remain).
+
+### 5) Identify root cause
+- Explain precisely which transform path is currently being taken for ITRS->AltAz/HADec and why it triggers a time-dependent ITRS→ITRS (SSB-related) step.
+- Use `frame_transform_graph.get_transform()` to show the path.
+
+### 6) Implement the fix (source-only changes)
+- Add a new module if appropriate (e.g., `astropy/coordinates/builtin_frames/itrs_observed_transforms.py`) containing:
+  - A helper that builds the rotation matrix from ITRS to AltAz/HADec (matching the issue snippet: geodetic lon/lat, sign flip to left-handed, rotate about z then y as appropriate).
+  - The four transform functions with `FunctionTransformWithFiniteDifference` decorators.
+- Ensure transforms use:
+  - `observed_frame.location.get_itrs(obstime=observed_frame.obstime).cartesian` (or equivalent) for observer ITRS
+  - topocentric = itrs.cartesian - observer_itrs
+  - apply rotation, realize
+  - inverse uses transpose rotation and adds observer back
+- Be careful about representations (use `.cartesian` and `.transform(mat)` on cartesian representation as in the snippet).
+- Ensure import/registration is wired in a way that does not break imports:
+  - If adding a new module, update `astropy/coordinates/builtin_frames/__init__.py` (or appropriate registry file) to import it.
+  - Do not add an import unless the module exists.
+
+### 7) Validate fix end-to-end
+Run in this order:
+1. `python -c "import astropy.coordinates.builtin_frames as bf"` (must succeed)
+2. `python -c "from astropy.coordinates.baseframe import frame_transform_graph; from astropy.coordinates.builtin_frames import ITRS, AltAz, HADec; print(frame_transform_graph.get_transform(ITRS, AltAz)); print(frame_transform_graph.get_transform(ITRS, HADec))"`  
+   Confirm it points to your direct transform (not via CIRS).
+3. Run your reproduction tests: they must pass.
+4. Run the relevant existing coordinate transform tests to ensure no regressions (and finally full suite if feasible). Only baseline failures may remain.
+
+### 8) Delete the reproduction tests
+- Remove the temporary test module entirely.
+- Re-run the relevant test subset to confirm everything still passes as in step 7 (minus your deleted tests).
+
+---
+
+## Output expectations
+While working, provide:
+- The exact files you changed/added.
+- The transform graph check output (or a brief description if too verbose).
+- A short explanation of how the fix prevents the time-coupled ITRS→ITRS behavior.
+- Confirmation that import checks and tests pass.
+
+Do not commit changes.

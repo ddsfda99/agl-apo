@@ -1,0 +1,146 @@
+You are an expert Astropy/FITS contributor working in a code repository at `/testbed`.
+
+Your goal: **fix the bug** “Inconsistency in double single-quote (`''`) management in FITS Card” so that a `fits.Card` round-trips through `str(card)` / `Card.fromstring(...)` without corrupting `''` into `'` in any of the reported length-dependent scenarios, including long-string `CONTINUE` cases.
+
+This is a SWE-bench style task: **your final patch MUST include permanent tests** that fail before your fix and pass after.  
+Even if the original instructions said to delete tests, **do NOT delete the tests you add**. They are required as proof and as regression protection.
+
+---
+
+## Background: what’s going wrong
+A FITS string literal encodes an actual single quote `'` as doubled `''` inside the FITS card text. The bug report shows that in some lengths—especially when `CONTINUE` long-string splitting occurs—`''` sometimes becomes `'` after parsing, meaning unescaping/escaping is applied inconsistently across chunk boundaries.
+
+The most likely class of root causes: **unescaping (`''` → `'`) is applied at the wrong stage or twice (per-chunk and then again globally), or applied after lossy splitting.** Your fix must preserve correct behavior for:
+- simple strings
+- long strings using `CONTINUE`
+- strings where `''` appears at the end or in the middle
+- boundary cases where the two quotes of `''` fall in different `CONTINUE` chunks
+- literal ampersands `&` and the long-string continuation semantics
+
+---
+
+## Hard requirements
+1. **Keep new tests in the final patch.** Do not remove or empty them.
+2. **Do not modify existing tests** (only add new ones).
+3. After your fix:
+   - Your new tests pass.
+   - All previously passing tests in the relevant FITS subset still pass.
+4. If the full suite cannot run due to unrelated collection/environment issues, you must:
+   - Identify and record baseline failures first.
+   - Then run a stable, relevant subset pre- and post-fix, and ensure no regressions in that subset.
+
+---
+
+## Step-by-step tasks
+
+### (1) Explore repository
+- Locate FITS card parsing/formatting code (likely under `astropy/io/fits/`).
+- Locate FITS tests (likely `astropy/io/fits/tests/`).
+
+### (2) Establish baseline test behavior
+Run tests *before any changes* and record failures as “baseline/unrelated”:
+- Prefer running a focused subset that should collect reliably:
+  - `pytest -q astropy/io/fits/tests/test_card.py`
+  - `pytest -q astropy/io/fits/tests/test_header.py`
+- If those pass, optionally broaden to `pytest -q astropy/io/fits/tests/`.
+- If there are collection errors elsewhere, do **not** try to fix them; just record them and keep testing within the FITS subset that runs.
+
+### (3) Add NEW permanent regression tests (do not delete)
+Add a new test module under:  
+`astropy/io/fits/tests/test_card_quote_regressions.py` (or similar).
+
+Your tests must cover **all** of the following:
+
+#### A. Exact reported failing scenario (trailing `''`, length-dependent)
+Replicate the bug report loop precisely and assert full round-trip equality:
+
+- For `n in range(60, 70)`:
+  - `card1 = fits.Card('CONFIG', "x"*n + "''")`
+  - `card2 = fits.Card.fromstring(str(card1))`
+  - Assert `card1.value == card2.value`
+  - Also assert `len(card1.value) == len(card2.value)` to catch silent truncation
+
+Make the test deterministic and informative: if it fails, the assertion message should include `n` and both values.
+
+#### B. Embedded `''` with trailing content (as in report)
+For `n in range(50, 70)`:
+- Value: `"x"*n + "''" + "x"*10`
+- Round-trip and assert equality.
+
+#### C. **Boundary-crossing CONTINUE chunk case** (critical regression guard)
+Construct a value such that when serialized (`str(card)`), it uses `CONTINUE` and the doubled quote `''` is split across chunks (i.e., one chunk ends with a single `'` and the next starts with `'`). Requirements:
+- Assert that `str(card)` contains `"CONTINUE"` to ensure you exercise long-string splitting.
+- Then round-trip and assert equality.
+
+Implementation guidance (you must actually implement it, not just describe it):
+- Choose a long string length (e.g., several hundred characters) and place `''` near a chunk boundary.
+- If you don’t know the exact chunk size, write a small helper inside the test to search for an `n` that makes `str(card)` contain a pattern like `"...'"` at the end of a CONTINUE string chunk and the next line begins with a quote. You can:
+  - Iterate over a range of `n` and find the first where `str(card)` has `CONTINUE` and where the serialized text shows the `''` split across lines.
+  - Then assert round-trip for that `n`.
+This is important: it ensures the fix doesn’t just handle the specific lengths in the report but truly fixes chunk-boundary behavior.
+
+#### D. Control test: normal single-quote escaping works
+Add a small test like:
+- `val = "ab'cd"` (one real quote in Python)
+- Create card, serialize/parse roundtrip, assert equality.
+This ensures you didn’t break basic quote escaping/unescaping.
+
+#### E. Control test: literal ampersand `&` near continuation boundaries (guard)
+Add a test where the string contains `&` characters and is long enough to require `CONTINUE`, e.g.:
+- `val = "x"*N + "&" + "y"*N + "''" + "z"*N`
+- Ensure `CONTINUE` appears in `str(card)`.
+- Round-trip equality must hold.
+This guards against confusing literal `&` with the FITS long-string continuation marker.
+
+**Important:** Ensure these tests fail on the buggy code *before* your fix.
+
+### (4) Confirm new tests fail pre-fix
+Run:
+- `pytest -q astropy/io/fits/tests/test_card_quote_regressions.py`
+and confirm failure reproduces the bug.
+
+### (5) Find root cause
+Identify the functions involved in:
+- formatting a `Card` to string (`__str__` / formatting helpers)
+- parsing a card from string (`Card.fromstring`, parsing helpers)
+- long-string `CONTINUE` splitting/reassembly
+- quote escaping/unescaping logic
+
+You are specifically looking for places where `replace("''", "'")` or similar unescaping is done:
+- per chunk *and* again after concatenation
+- before/after `rstrip()` in a way that can drop a quote at chunk boundaries
+- inconsistently between short and long-string code paths
+
+### (6) Implement the fix (minimal change)
+Fix the bug in source code only. Keep the patch minimal and localized.
+Strongly preferred properties of the fix:
+- Unescaping (`''` → `'`) should happen **exactly once** on the complete logical string, not per chunk, unless you can prove per-chunk is safe.
+- Reassembly of `CONTINUE` chunks must be lossless with respect to doubled quotes.
+- Avoid changing semantics for whitespace trimming unless necessary; if trimming is required, ensure it doesn’t interact with quotes at boundaries.
+
+### (7) Validate post-fix
+After the fix, run:
+- `pytest -q astropy/io/fits/tests/test_card_quote_regressions.py`
+- `pytest -q astropy/io/fits/tests/test_card.py`
+- `pytest -q astropy/io/fits/tests/test_header.py`
+
+If those pass and baseline allows, run:
+- `pytest -q astropy/io/fits/tests/`
+
+Any new failure in pre-existing tests means your fix is wrong or incomplete—revise it.
+
+### (8) Final deliverable expectations
+- Your final output should be a patch that includes:
+  - Source code fix(es)
+  - **The new regression test file(s) kept in place**
+- Do not remove or empty the tests you added.
+- Do not modify existing tests.
+
+---
+
+## Additional execution notes (to avoid prior failure patterns)
+- Do **not** claim you ran “full suite” if collection errors prevent it; instead, explicitly list commands you ran and their results.
+- Ensure the boundary-crossing test truly triggers `CONTINUE` by asserting `"CONTINUE"` in the serialized card text.
+- Ensure you are testing the exact reproduction logic: `Card.fromstring(str(card1))`.
+
+Now proceed: explore, baseline, add permanent tests that fail, fix, and re-run until all specified tests pass.

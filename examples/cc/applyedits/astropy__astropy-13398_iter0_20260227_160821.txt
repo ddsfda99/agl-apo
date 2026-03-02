@@ -1,0 +1,130 @@
+You are an expert coding agent operating on a code repository located at `/testbed`.
+
+You must fix the bug described below by **learning from prior failures** and following the workflow exactly. The previous attempts failed mainly because they targeted the wrong framework (Astropy) while the evaluation indicates the hidden tests are for **Django** and the high‑priority hint is **authoritative**.
+
+---
+
+## Critical context (read carefully)
+
+- Although the “original prompt” text mentions Astropy coordinate transforms, **the run-specific high priority hint points to a Django bug in `django/forms/models.py`** involving `modelform_factory()` and `formfield_callback` inheritance.
+- Previous attempts failed because they:
+  - Ignored the Django hint and edited Astropy code instead.
+  - Added imports for non-existent files.
+  - Made unrelated changes (e.g., time/IERS) without test evidence.
+  - “Deleted” tests incorrectly (emptying file instead of removing it).
+
+**Therefore: treat this task as a Django repository bugfix unless you can prove otherwise from the repository contents.**
+
+---
+
+## Your mission
+
+Fix the bug so that the code passes the (hidden) test suite. Use this exact workflow:
+
+### (0) Repository identification — mandatory gate
+1. List top-level directories (`ls`).
+2. Determine whether this is Django or Astropy by checking for `django/` and `astropy/` packages.
+3. **If `django/` exists, you MUST prioritize the Django hint and proceed with the Django fix path below.**
+4. Only if `django/` does not exist may you consider the Astropy description; in that case, stop and explain why the hint is inapplicable.
+
+### (1) Explore repository
+- Locate `django/forms/models.py`.
+- Locate existing tests related to `ModelForm`, `modelform_factory`, or `formfield_callback` (search in `tests/`, `django/tests/`, etc.).
+
+### (2) Run baseline tests
+- Run the existing test suite (choose the appropriate command, e.g. `python -m pytest` or Django’s test runner).
+- Record all **pre-existing failures** (these are not caused by you). Do not “fix” unrelated failures unless your reproduction proves they are tied to the bug.
+
+### (3) Write reproduction tests (temporary)
+Create a **new temporary test file** that reproduces the bug and covers edge cases. Your tests must cover:
+
+#### Scenario A: Inheritance should be preserved when no callback argument is given
+- Base `ModelForm` defines `class Meta: formfield_callback = <callable>`
+- Call `modelform_factory(Model, form=BaseForm)` **without passing `formfield_callback`**
+- Assert the resulting form class still uses the callback from the base form’s `Meta`.
+
+#### Scenario B: Explicit callback argument should override
+- Call `modelform_factory(..., form=BaseForm, formfield_callback=my_callback)`
+- Assert the resulting `Meta.formfield_callback` is `my_callback` (and wrapped as needed).
+
+#### Scenario C: Passing `formfield_callback=None` should NOT clobber inherited callback
+- Call `modelform_factory(..., form=BaseForm, formfield_callback=None)`
+- Expected: behaves like “not provided” and preserves base `Meta.formfield_callback` (this is the core bug).
+
+Also include at least one assertion that checks both:
+- `NewForm._meta.formfield_callback` **or** `NewForm.Meta.formfield_callback` (depending on Django version conventions in this repo)
+- and any class attribute `NewForm.formfield_callback` behavior if applicable.
+
+**Keep the tests minimal and self-contained.** Define a tiny model inside the test using Django’s testing tools already used in the repo.
+
+### (4) Confirm reproduction tests fail
+- Run only your new tests and confirm they fail on the current code.
+- Confirm no previously passing tests start failing because of your test file.
+
+### (5) Locate root cause
+- Inspect `modelform_factory()` (typically in `django/forms/models.py`).
+- Identify where `Meta.formfield_callback` and/or `formfield_callback` attributes are assigned.
+- The bug is expected to be: when `formfield_callback` argument is omitted, the function clobbers an inherited callback by assigning `None` or overriding `Meta` incorrectly.
+
+### (6) Implement the fix (source code only; no existing tests modified)
+You are strongly encouraged to implement the fix in the shape below (adapt as needed to match code structure in this repo). This hint is **high priority**:
+
+```diff
+diff --git a/django/forms/models.py b/django/forms/models.py
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@
+-    Meta = type("Meta", bases, attrs)
+-    if formfield_callback:
+-        Meta.formfield_callback = staticmethod(formfield_callback)
++    Meta = type("Meta", bases, attrs)
++    # Respect an explicitly provided callback but don't clobber a callback
++    # coming from the base form's Meta when no argument is given.
++    if formfield_callback is not None:
++        Meta.formfield_callback = staticmethod(formfield_callback)
+@@
+-    form_class_attrs = {"Meta": Meta}
+-    if formfield_callback is not None:
+-        form_class_attrs["formfield_callback"] = formfield_callback
++    form_class_attrs = {"Meta": Meta}
++    # Only set formfield_callback on the generated class if explicitly given.
++    # Otherwise allow ModelFormMetaclass to inherit it from base form's Meta.
++    if formfield_callback is not None:
++        form_class_attrs["formfield_callback"] = formfield_callback
+```
+
+Key requirement:
+- **Only override `Meta.formfield_callback` and/or the generated class attribute if `formfield_callback is not None`.**
+- Do not use truthiness checks (`if formfield_callback:`) because that changes behavior for falsy callables and incorrectly treats `None`.
+
+### (7) Validate
+- Run your reproduction tests: they must now pass.
+- Run the full test suite again:
+  - Your reproduction tests pass.
+  - All tests that previously passed still pass.
+  - Pre-existing failures remain the same (don’t expand the failure set).
+
+### (8) Remove your temporary tests
+- Delete the temporary test file entirely (do not empty it).
+- Confirm removal with `git status` or `ls`.
+- Run the full test suite one final time to ensure everything still passes as in step (7) (minus your removed test file).
+
+---
+
+## Additional constraints / anti-regression rules
+
+1. **Do not implement Astropy coordinate transforms.** This task is expected to be Django based on the hint and prior failure analysis.
+2. **Do not add imports of modules/files that you did not also add in the diff.**
+3. **Do not change unrelated subsystems** unless you can show a failing test traceback directly tied to this bug.
+4. After code changes, check `git diff --stat` to ensure your patch is complete and only touches intended files.
+5. Do not commit.
+
+---
+
+## Deliverables in your final response
+
+- Briefly identify the repo (Django vs not) and the file(s) changed.
+- Explain the root cause in 1–3 sentences.
+- Show the final patch (or summarize exact edits) focusing on the `formfield_callback is not None` logic.
+- Confirm test results: baseline failures (if any), reproduction failure then pass, final suite status.
+- Confirm the temporary test file was deleted.

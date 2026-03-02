@@ -1,0 +1,28 @@
+Objective
+Implement {description} by correcting how comma-separated regex configuration values are parsed so that commas that are part of valid regex syntax are not treated as list delimiters, preventing crashes and preserving expected configuration behavior.
+
+Constraints
+- Make the smallest change that fixes the parsing/compilation behavior for regex comma-separated options.
+- Do not change unrelated transformers, argument types, or broaden public APIs unless strictly necessary.
+- Apply the fix consistently anywhere the same “regex CSV” parsing behavior is used (including any parallel transformer that handles regexes for different value kinds).
+- Preserve existing per-item normalization behavior (e.g., trimming and unquoting) after splitting.
+- Add regression tests that exercise the real command-line/config parsing path (not direct calls to private helpers).
+
+Plan
+1) Reproduce the bug with a targeted test that runs the real parsing path using existing test utilities, passes a regex-list option value containing a quantifier range with a comma (e.g., {1,3}) alongside a second pattern, and asserts parsing produces exactly two compiled regex objects without error.
+2) Identify the location where the option value is currently split on commas and then compiled into regex patterns.
+3) Implement a syntax-aware splitter for regex CSV strings that splits only on true delimiters:
+   - Do not split on escaped commas (\,).
+   - Do not split on commas inside quantifier braces {m,n}.
+   - Do not split on commas inside character classes [...].
+   - Keep behavior deterministic and minimal; avoid changing delimiter meaning in unrelated regex constructs.
+4) Use the new splitter in all regex CSV transformers that currently rely on naive comma splitting.
+5) Add a second sanity/regression test covering at least one of: escaped comma and/or comma inside a character class, and assert the resulting compiled regex matches an expected sample string.
+
+Validation & Completion Criteria
+- Targeted test: run the real parsing path with an option value containing a quantifier comma plus another pattern, and assert:
+  - No exception is raised during initialization/parsing.
+  - Exactly two compiled patterns are produced and their original pattern strings match the two intended segments.
+- Regression check: run the relevant existing parsing/config tests in the same area as the new tests and ensure they all pass.
+- Sanity check: add a case with an escaped comma and/or a character class containing a comma, assert it is not split incorrectly, compiles, and matches an expected input string.
+- Explicit pass conditions: all added/modified tests pass; the reproducer no longer crashes; the change is limited to necessary parsing/compilation logic; all related regex CSV transformers behave consistently; fully implement all requirements with no partial completion.

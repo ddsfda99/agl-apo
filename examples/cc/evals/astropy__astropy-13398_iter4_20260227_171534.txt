@@ -1,0 +1,44 @@
+## Failure Modes
+- **Patch is incomplete / missing core implementation**: All three attempts claim to add `itrs_observed_transforms.py`, but the diff only shows adding an import in `builtin_frames/__init__.py`. If the new module is not actually present (or not included in the patch), nothing changes and the bug remains.
+- **Potentially wrong technical direction (Attempt 1)**: Attempt 1 claims to “stay within ITRS” but then routes through **CIRS** to match existing paths. That contradicts the issue’s core requirement and likely reintroduces the same IERS/UT1/polar-motion dependencies and time-dependent behavior the proposal aims to avoid.
+- **No demonstrated correctness against existing astropy semantics**: Even if the module existed, the matrix-only approach (Attempts 2/3) risks breaking:  
+  - unit conventions/handedness and axis definitions (AltAz vs HADec)  
+  - `obstime=None` behavior and adoption rules  
+  - differential/velocity handling (finite-difference transforms)  
+  - refraction behavior (AltAz pressure/temperature)  
+  Without strong validation against existing tests or reference transforms, it’s easy to introduce subtle sign/axis/time bugs.
+- **Tests were created then deleted; no lasting regression protection**: The workflow explicitly asked to delete tests at the end, but for SWE-bench grading the harness expects tests already present in the repo to catch regressions indirectly. The attempts rely on ephemeral tests and therefore provide no persistent evidence that the fix is correct.
+
+## Evidence
+- **Diffs only modify `__init__.py`**: Every patch shows only:
+  ```diff
+  +from . import itrs_observed_transforms
+  ```
+  No added file diff appears, despite summaries claiming a new module was created and used.
+- **Self-contradiction vs issue requirement (Attempt 1)**: Summary says “stays within ITRS” but then: “final implementation routes via CIRS … to ensure consistency”, which is exactly what the issue proposal tries to avoid (and likely keeps IERS dependency).
+- **Reliance on “baseline failures” as justification**: Attempts repeatedly cite IERS/NumPy failures and conclude changes are fine, but they don’t show isolation of the specific bug or that existing passing coordinate-transform tests remain passing in a clean environment.
+- **Claims of deleting tests by “clearing contents”**: Attempt 1 explicitly says it “deleted the reproduction test file by clearing its contents”, which would still leave an empty test file in-tree (potential collection oddities) and is not a reliable cleanup method.
+
+## Prompt Improvement Directions
+- **Require patch completeness verification steps**:
+  - “After implementing, run `git diff --stat` and confirm the new file appears in the diff.”
+  - “Show the actual diff for `itrs_observed_transforms.py` (or any modified source), not just imports.”
+  - “Run `python -c 'from astropy.coordinates.builtin_frames import itrs_observed_transforms; print(itrs_observed_transforms.__file__)'` to prove module exists and imports.”
+- **Force alignment with the stated design goal**:
+  - Add explicit instruction: “Do not route ITRS↔Observed through CIRS/ICRS/ERFA astrometry; implement rotation+translation directly in ITRS as proposed.”
+  - Add explicit instruction: “Transform must *not* call IERS/UT1/polar motion machinery.”
+- **Correctness validation checklist (agent must execute)**:
+  - Validate overhead case: object at `location.get_itrs(obstime) + (0,0,h)` produces `Alt=90°` (AltAz) and `HA=0`/`Dec=lat` (HADec).
+  - Validate time invariance: input ITRS with different `obstime` than output AltAz/HADec gives the same observed result (adopts output `obstime`, even if `None`).
+  - Validate round-trip: `ITRS -> AltAz -> ITRS` preserves geocentric cartesian to tight tolerance.
+  - Validate axis/handedness using multiple azimuths and cardinal directions (east/north/up sanity checks), not only “straight overhead”.
+- **Edge cases to explicitly handle / test mentally**:
+  - `obstime=None` for output observed frames (must be adopted, not forced).
+  - Missing `location` should raise a clear error (AltAz/HADec require it).
+  - Representations with/without distance (unit-sphere vs cartesian with length).
+  - Differential behavior: ensure `FunctionTransformWithFiniteDifference` is appropriate and won’t produce nonsense due to discontinuities; verify derivatives aren’t accidentally time-dependent.
+- **Make the agent keep changes minimal and scoped**:
+  - “Only add the new direct transform functions and register them; do not change existing transform chains unless necessary.”
+  - “Confirm via `frame_transform_graph.get_transform(ITRS, AltAz)` that the direct transform is chosen.”
+- **Avoid “baseline failures” handwaving**:
+  - Instruct: “Run a focused subset that doesn’t require IERS download (use `iers.conf.auto_download=False` and `iers.conf.iers_degraded_accuracy='warn'`) and demonstrate that your new transforms bypass IERS.”

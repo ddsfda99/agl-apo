@@ -1,0 +1,19 @@
+Attempt A shows stronger engineering discipline for a reusable bug-fix workflow: it prioritizes reproducing through a realistic integration path, keeps the change scoped to the failing behavior, applies the fix consistently where the same logic is reused, preserves existing normalization semantics, adds lasting regression tests (and keeps them), and includes explicit completion/validation gates plus cleanup of temporary artifacts. Risk handling is better because integration-level tests reduce false confidence and the “smallest necessary change” constraint prevents collateral behavior shifts.
+
+Attempt B has good instincts (reproduce, implement a safer parser, verify), but has weaker rigor and higher risk: it tests private internals rather than the real user-facing path, broadens function input types “for robustness” (an API/behavior change unrelated to the bug), reports inability to run broader checks without establishing a reliable minimal validation set, and deletes the reproducer tests (removing long-term protection). These are common anti-patterns for maintainable bug fixes.
+
+Transferable DO rules:
+- Reproduce first via the most realistic path available (end-to-end/integration when feasible).
+- Add a failing test that captures the bug and keep it as a regression test.
+- Localize the fix to the smallest surface that corrects behavior; preserve existing semantics unless explicitly required.
+- Apply the fix consistently anywhere the same logic is used, avoiding duplication.
+- Prefer refactoring into a small helper only when it reduces duplication and risk.
+- Validate with: targeted regression + nearby related tests + any cheap static checks; document what was run.
+- Remove temporary debug artifacts, keep only purposeful tests and code.
+
+Transferable AVOID rules:
+- Avoid broadening public APIs/types or “drive-by” refactors while fixing a bug.
+- Avoid testing only private helpers when the bug manifests through a public interface.
+- Avoid deleting regression tests after the fix.
+- Avoid claiming completion without explicit pass/fail gates and verified runs.
+- Avoid adding logic that changes unrelated parsing/normalization behaviors.

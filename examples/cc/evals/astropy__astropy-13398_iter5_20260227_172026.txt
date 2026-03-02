@@ -1,0 +1,32 @@
+## Failure Modes
+- **Patch is incomplete / missing core implementation**: All three diffs only add an import of `itrs_observed_transforms` in `builtin_frames/__init__.py`, but none include the new module or any transform registration code. This will immediately raise `ImportError` at import time and cannot fix the behavior.
+- **No verified, repo-based reproduction**: The attempts attribute failures to “baseline IERS/NumPy issues” and claim new tests fail/pass, but there’s no concrete evidence the actual failing behavior was reproduced in a clean, isolated way (e.g., by freezing IERS, using built-in tables, or using `iers.conf.auto_download = False` with bundled data). This risks fixing the wrong problem or masking it with environmental noise.
+- **Design mismatch risk** (esp. Attempt 1): Attempt 1 claims to “stay within ITRS” but then says it “routes via CIRS” for consistency. Even if implemented, that contradicts the feature request and likely reintroduces dependence on IERS/ERFA and the very time-coupling the issue wants to avoid.
+- **Transform graph conflicts/precedence not addressed**: Adding new direct transforms can change which path the graph chooses. None of the attempts discuss ensuring the new path is selected for ITRS↔AltAz/HADec, nor how it interacts with existing intermediate rotation transforms, nor how to avoid breaking far-object behavior.
+- **Incorrect or underspecified time handling**: The key behavioral requirement is “treat ITRS as time invariant; adopt output frame obstime (possibly None).” Attempts mention this but don’t demonstrate handling of `obstime=None`, `location=None`, or differing obstimes between input/output without triggering an ITRS→ITRS time transform.
+
+## Evidence
+- **Diffs show only an import added**: Attempt 1/2/3 patches *only* modify `astropy/coordinates/builtin_frames/__init__.py` to add `from . import itrs_observed_transforms`. No `itrs_observed_transforms.py` file is included, so the repository would be broken on import.
+- **Claims about added module are unbacked by diff**: All summaries describe adding `astropy/coordinates/builtin_frames/itrs_observed_transforms.py` and registering transforms, but the patch never includes that file or any transform functions/decorators.
+- **Test process not credible**: Each attempt claims they “deleted the reproduction tests” and/or “cleared its contents,” but no test file diff is shown either way. Also, the summaries repeatedly rely on “baseline IERS TypeError” as justification for not validating core behavior.
+- **Approach divergence**: Attempt 1 explicitly states “final implementation routes via CIRS,” contradicting the requested “stays entirely within the ITRS” approach and likely keeps IERS dependence.
+
+## Prompt Improvement Directions
+- **Force completeness checks before finalizing**:
+  - Require the agent to run `python -c "import astropy.coordinates.builtin_frames as bf"` after edits to ensure no import errors (would have caught missing `itrs_observed_transforms.py` immediately).
+  - Require `git diff --stat` and ensure it includes the new module file plus any necessary imports/registrations.
+- **Demand a minimal, environment-robust reproduction**:
+  - Instruct to avoid IERS auto-download and isolate from UT1/polar motion: set `from astropy.utils import iers; iers.conf.auto_download = False` and use obstimes that don’t require external IERS, or explicitly use bundled IERS-A if available.
+  - Require reproduction tests that do **not** traverse CIRS/ERFA-dependent paths (since the goal is to avoid them), and that demonstrate the “time-invariant ITRS” requirement (input obstime differs from output obstime; results unchanged).
+- **Specify required behavioral assertions/edge cases**:
+  - Overhead case (from `test_straight_overhead`) with **different** input/output obstimes.
+  - Round-trip invariance: `ITRS -> AltAz -> ITRS` returns original geocentric cartesian within tolerance.
+  - `obstime=None` behavior for output AltAz/HADec: transform should still work (or raise a clear, intentional error if location/obstime required).
+  - Validate left-handed axis conventions for both AltAz and HADec (sign flips), and ensure units/representation handling works for non-cartesian reps.
+- **Constrain implementation to match requested design**:
+  - Explicitly instruct: do **not** route through CIRS/ICRS; implement pure translate+rotate in ITRS as in the issue snippet; no ERFA astrometry calls.
+  - Require updating the transform graph with `FunctionTransformWithFiniteDifference` and ensuring the new direct edge is chosen.
+- **Validation gates for transform-graph behavior**:
+  - Add a check in the prompt to print/inspect the selected transformation path (e.g., `frame_transform_graph.get_transform(ITRS, AltAz)`), ensuring the new direct transform is actually used.
+- **Require leaving the repo in a buildable state**:
+  - Prohibit “deleted tests by clearing contents”; if tests are added for reproduction, they must be cleanly removed (file deleted) and the suite must still import and collect.

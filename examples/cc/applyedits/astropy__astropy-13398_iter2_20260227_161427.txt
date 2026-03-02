@@ -1,0 +1,125 @@
+You are an expert software engineer working on the repository in `/testbed` (Astropy). Your goal is to implement a **direct** approach for **ITRS ↔ observed frames (AltAz, HADec)** transformations that **stays within ITRS** (topocentric translation + local rotation), avoiding the current path that effectively references coordinates to the SSB and causes large errors when obstimes differ.
+
+This is a bugfix/behavior change in the coordinate transform graph.
+
+---
+
+## Critical constraints (read carefully)
+
+1. **Scope constraint (high priority):**
+   - Do **NOT** modify any IERS/time infrastructure (`astropy/utils/iers/*`, Time conversion logic, leap seconds, etc.) unless you can prove with a minimal reproducer that the failure is directly caused there. The issue is about **coordinate transforms**.
+   - Do **NOT** implement the “fix” by routing through CIRS/ICRS/GCRS or any barycentric/aberration-heavy intermediate frames. The solution must **stay in ITRS**.
+
+2. **Transform-graph constraint:**
+   - The new behavior must be achieved by registering **direct transform edges**:
+     - `ITRS -> AltAz`
+     - `AltAz -> ITRS`
+     - `ITRS -> HADec`
+     - `HADec -> ITRS`
+   - Ensure these edges are actually selected by `frame_transform_graph` for those pairs.
+
+3. **Time behavior requirement (core of issue):**
+   - Treat ITRS positions as **time-invariant for these observed transforms**.
+   - When transforming ITRS ↔ observed frames, **do not attempt to synchronize obstimes via ITRS→ITRS** in a way that references SSB motion.
+   - In practice: use **observed_frame.location.get_itrs(...)** for the observer position and compute topocentric vector via subtraction/addition in ITRS Cartesian space; the “output frame obstime” is simply used (even if `None`).
+
+4. **Protocol constraint about tests:**
+   - You must create local reproduction tests to guide your work, but **do not include any new tests in the final patch** (do not commit them, do not leave empty test files behind). Use them locally and remove them before final output.
+
+5. **Completeness check (mandatory):**
+   - If you add a new module/file, it must appear in the final diff. Before finishing, run:
+     - `git diff --stat`
+     - `git status`
+   - Confirm the new file is present and the transform functions are registered.
+
+---
+
+## What to implement (design guidance)
+
+Implement direct transforms equivalent to the approach outlined in the issue description:
+
+- Compute a rotation matrix from ITRS axes to the observed frame axes using only the observer’s geodetic longitude/latitude (and frame type).
+- Compute topocentric ITRS vector:
+  - `topo = itrs_coo.cartesian - observed_frame.location.get_itrs(obstime=observed_frame.obstime).cartesian`
+  - Then rotate to observed axes.
+- For inverse:
+  - Rotate observed cartesian back to ITRS axes, then add observer’s geocentric ITRS position.
+
+You may implement a helper like `itrs_to_observed_mat(frame)` to build the rotation matrices. Pay attention to:
+- AltAz is left-handed in Astropy conventions (as per issue snippet); likewise HADec has a handedness flip.
+- Use `astropy.coordinates.matrix_utilities.rotation_matrix` and `matrix_transpose` or equivalent.
+- Use `FunctionTransformWithFiniteDifference` decorators as in the snippet, unless there is a better established pattern in this codebase for these frames.
+- Keep refraction behavior unchanged unless explicitly required; don’t silently apply refraction.
+
+**Important:** ensure that obstime handling matches the requirement: the ITRS coordinate should not be “dragged” by Earth orbital motion due to an ITRS→ITRS different-time transform.
+
+---
+
+## Required workflow
+
+### (1) Repo exploration
+- Identify where frame transforms are defined (likely under `astropy/coordinates/builtin_frames/` and transformation modules).
+- Locate existing transforms for ITRS↔AltAz and ITRS↔HADec; understand current path.
+
+### (2) Baseline tests
+- Run the test suite (or relevant subset) to establish baseline failures.
+- Record baseline failures clearly; do not “fix” unrelated failures.
+
+### (3) Write local reproduction tests (do NOT commit)
+Your local tests must cover at least:
+
+1. **The core failing scenario: mismatched obstimes**
+   - Example: an ITRS coordinate near an observer transformed to AltAz at a different time should remain correct topocentrically (e.g., “straight overhead” scenario described in `test_intermediate_transformations.test_straight_overhead()`).
+   - Verify current behavior is wrong (large error) and new behavior is correct.
+
+2. **`obstime=None` in observed frame**
+   - Transform ITRS → AltAz where AltAz has default `obstime=None`; ensure no crash and reasonable result. The transform should adopt output frame’s obstime semantics.
+
+3. **Round-trip sanity**
+   - ITRS → AltAz → ITRS returns original ITRS Cartesian (within tolerance) for a nearby target (e.g., a satellite-like distance) and for a not-trivial direction (not only zenith).
+
+4. **Axis/sign correctness**
+   - Include at least two non-degenerate directions (e.g., zenith and due east or due north) to catch handedness/rotation sign mistakes.
+
+### (4) Confirm reproducer fails before fix
+- Run only those tests first; ensure they fail on current code.
+
+### (5) Root cause
+- Explain where the current transform goes wrong (likely an ITRS→ITRS time synchronization or path through GCRS/CIRS causing SSB-referenced displacement).
+
+### (6) Implement fix (source changes only)
+- Add/modify transform functions to implement the direct ITRS-local approach.
+- Ensure the transform graph selects these edges.
+
+### (7) Verify
+- Run:
+  - Your local reproduction tests (must pass).
+  - Relevant existing coordinate tests (especially those around `intermediate_transformations`, AltAz/HADec/ITRS).
+  - Full test suite if feasible.
+- Confirm no new regressions relative to baseline.
+
+### (8) Remove local tests
+- Delete the temporary tests from your working tree before final output (again: don’t leave empty files).
+
+---
+
+## Mandatory verification: ensure transform edge is used
+After implementing, add a small local check (can be in a scratch script, not committed) such as:
+
+- Verify the graph has a direct transform:
+  - `frame_transform_graph.get_transform(ITRS, AltAz)` returns your function/class (or at least the direct edge, not a multi-hop path).
+- Optionally print/inspect the selected transform route if Astropy provides a way.
+
+---
+
+## Final output requirements
+- Provide a patch that:
+  - Implements the direct ITRS↔AltAz/HADec transforms staying in ITRS.
+  - Does not touch unrelated IERS/time code.
+  - Includes any new module files in the diff if you create them.
+- Before finalizing, show:
+  - `git diff --stat`
+  - `git status`
+  - A brief note confirming the new transforms are registered and selected.
+
+Begin by exploring the repository and locating the existing ITRS/AltAz/HADec transform code and relevant tests.

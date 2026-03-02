@@ -1,0 +1,28 @@
+diff --git a/astropy/coordinates/builtin_frames/__init__.py b/astropy/coordinates/builtin_frames/__init__.py
+index 6fd688c28..17b524478 100644
+--- a/astropy/coordinates/builtin_frames/__init__.py
++++ b/astropy/coordinates/builtin_frames/__init__.py
+@@ -48,6 +48,7 @@ from . import supergalactic_transforms
+ from . import icrs_cirs_transforms
+ from . import cirs_observed_transforms
+ from . import icrs_observed_transforms
++from . import itrs_observed_transforms
+ from . import intermediate_rotation_transforms
+ from . import ecliptic_transforms
+ 
+diff --git a/astropy/utils/iers/iers.py b/astropy/utils/iers/iers.py
+index dae42fba8..f1cf782c4 100644
+--- a/astropy/utils/iers/iers.py
++++ b/astropy/utils/iers/iers.py
+@@ -266,7 +266,10 @@ class IERS(QTable):
+         try:  # see if this is a Time object
+             jd1, jd2 = jd1.utc.jd1, jd1.utc.jd2
+         except Exception:
+-            pass
++            # If conversion to UTC fails but a Time object was passed in,
++            # fall back to using its native JD parts to avoid type errors.
++            if isinstance(jd1, Time):
++                jd1, jd2 = jd1.jd1, jd1.jd2
+ 
+         mjd = np.floor(jd1 - MJD_ZERO + jd2)
+         utc = jd1 - (MJD_ZERO+mjd) + jd2

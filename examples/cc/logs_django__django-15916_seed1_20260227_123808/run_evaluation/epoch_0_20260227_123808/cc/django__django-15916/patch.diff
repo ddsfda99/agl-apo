@@ -1,0 +1,43 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 192d9fad94..b923c90cbe 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -263,6 +263,9 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+                 base_formfield_callback = b.Meta.formfield_callback
+                 break
+ 
++        # Prefer an explicitly provided class attribute, otherwise inherit from
++        # base's Meta.formfield_callback. Do not yet consider the current class's
++        # Meta since it isn't created until after the class is constructed.
+         formfield_callback = attrs.pop("formfield_callback", base_formfield_callback)
+ 
+         new_class = super().__new__(mcs, name, bases, attrs)
+@@ -270,8 +273,16 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+         if bases == (BaseModelForm,):
+             return new_class
+ 
++        # Build _meta from the class's Meta and validate options.
+         opts = new_class._meta = ModelFormOptions(getattr(new_class, "Meta", None))
+ 
++        # If no explicit callback was provided and none was inherited from a
++        # base class, check the current class's Meta for formfield_callback.
++        if formfield_callback is None:
++            meta = getattr(new_class, "Meta", None)
++            if meta is not None and hasattr(meta, "formfield_callback"):
++                formfield_callback = meta.formfield_callback
++
+         # We check if a string was passed to `fields` or `exclude`,
+         # which is likely to be a mistake where the user typed ('foo') instead
+         # of ('foo',)
+diff --git a/tests/model_forms/tests.py b/tests/model_forms/tests.py
+index d2ce3348c5..4693fdaf3d 100644
+--- a/tests/model_forms/tests.py
++++ b/tests/model_forms/tests.py
+@@ -3465,6 +3465,7 @@ class FormFieldCallbackTests(SimpleTestCase):
+             callback_args, [(id_field, {}), (name_field, {"widget": widget})]
+         )
+ 
++
+     def test_bad_callback(self):
+         # A bad callback provided by user still gives an error
+         with self.assertRaises(TypeError):

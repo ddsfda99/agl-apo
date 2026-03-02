@@ -1,0 +1,87 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 192d9fad94..2b709a8efb 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -257,13 +257,34 @@ class ModelFormOptions:
+ 
+ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+     def __new__(mcs, name, bases, attrs):
++        # Determine effective formfield_callback with precedence:
++        # 1) class attribute 'formfield_callback' if provided
++        # 2) current class Meta.formfield_callback if provided
++        # 3) base classes' formfield_callback (class attr), else bases' Meta.formfield_callback
+         base_formfield_callback = None
+         for b in bases:
++            if hasattr(b, "formfield_callback") and b.formfield_callback is not None:
++                base_formfield_callback = b.formfield_callback
++                break
+             if hasattr(b, "Meta") and hasattr(b.Meta, "formfield_callback"):
+                 base_formfield_callback = b.Meta.formfield_callback
+                 break
+ 
+-        formfield_callback = attrs.pop("formfield_callback", base_formfield_callback)
++        class_attr_callback = attrs.pop("formfield_callback", None)
++        current_meta = attrs.get("Meta")
++        current_meta_callback = (
++            getattr(current_meta, "formfield_callback", None) if current_meta else None
++        )
++        # Tentative callback from attrs and bases; will re-evaluate after class creation.
++        tentative_callback = (
++            class_attr_callback
++            if class_attr_callback is not None
++            else (
++                current_meta_callback
++                if current_meta_callback is not None
++                else base_formfield_callback
++            )
++        )
+ 
+         new_class = super().__new__(mcs, name, bases, attrs)
+ 
+@@ -303,12 +324,32 @@ class ModelFormMetaclass(DeclarativeFieldsMetaclass):
+                 # fields from the model"
+                 opts.fields = None
+ 
++            # Determine effective callback with precedence:
++            # 1) new_class.Meta.formfield_callback
++            # 2) tentative_callback
++            # 3) new_class.formfield_callback
++            meta_callback = (
++                getattr(new_class.Meta, "formfield_callback", None)
++                if hasattr(new_class, "Meta")
++                else None
++            )
++            class_callback = getattr(new_class, "formfield_callback", None)
++            effective_callback = (
++                meta_callback
++                if meta_callback is not None
++                else (
++                    tentative_callback
++                    if tentative_callback is not None
++                    else class_callback
++                )
++            )
++
+             fields = fields_for_model(
+                 opts.model,
+                 opts.fields,
+                 opts.exclude,
+                 opts.widgets,
+-                formfield_callback,
++                effective_callback,
+                 opts.localized_fields,
+                 opts.labels,
+                 opts.help_texts,
+@@ -636,7 +677,11 @@ def modelform_factory(
+     class_name = model.__name__ + "Form"
+ 
+     # Class attributes for the new form class.
+-    form_class_attrs = {"Meta": Meta, "formfield_callback": formfield_callback}
++    # Only set class-level formfield_callback if explicitly provided.
++    # If None, defer to the base form's Meta.formfield_callback.
++    form_class_attrs = {"Meta": Meta}
++    if formfield_callback is not None:
++        form_class_attrs["formfield_callback"] = formfield_callback
+ 
+     if getattr(Meta, "fields", None) is None and getattr(Meta, "exclude", None) is None:
+         raise ImproperlyConfigured(

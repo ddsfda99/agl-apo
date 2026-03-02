@@ -1,0 +1,34 @@
+## Failure Modes
+- **Patch is incomplete / missing core implementation file.** All attempts claim to add `astropy/coordinates/builtin_frames/itrs_observed_transforms.py`, but none of the diffs include it—only the `__init__.py` import (and in attempts 2/3, an unrelated IERS change). This would cause an import error at runtime and means the intended transform fix is not actually present.
+- **Introduced unrelated and risky changes in `astropy/utils/iers/iers.py`.** Attempts 2 and 3 modify `IERS.mjd_utc` to special-case `Time` objects. This is unrelated to the ITRS↔Observed transform issue and risks masking deeper problems, breaking type expectations, or changing time scale semantics in subtle ways.
+- **Likely mismatch with task domain / instruction drift.** The “run-specific hint” clearly targets `django/forms/models.py` (ModelForm callback inheritance). All three attempts instead modify Astropy coordinate transforms. This indicates the agent is solving the wrong problem for the benchmark instance.
+- **Test protocol violations / non-verifiable claims.**
+  - They claim to add then “delete” tests by emptying files—this is not the same as deleting; it can still affect discovery/import behavior.
+  - They report many “pre-existing” failures without a stable, minimal reproduction command/log. This makes it hard to trust the stated before/after status.
+- **If the missing module were present, transform design correctness is still unproven.**
+  - The direct rotation-matrix approach ignores refraction and may conflict with existing transform graph priorities, potentially changing results for far-field objects or existing invariants.
+  - “Adopt output obstime” behavior for ITRS is a behavioral change that requires careful graph/path selection and compatibility checks.
+
+## Evidence
+- **No new file in diffs:** Every patch shows only:
+  - `astropy/coordinates/builtin_frames/__init__.py` importing `itrs_observed_transforms`
+  - Attempts 2/3 also modify `astropy/utils/iers/iers.py`
+  - There is **no diff adding `itrs_observed_transforms.py`**, contradicting their summaries.
+- **Unrelated IERS edits:** Attempts 2 and 3 add fallback logic in `IERS.mjd_utc`. This is not connected to “direct ITRS to Observed transformations that stays within the ITRS” and is classic scope creep.
+- **Wrong target vs hint:** The prompt’s high-priority hint explicitly says “Prefer implementing the fix shape below in `django/forms/models.py`…”. None of the attempts touch Django or that file path.
+- **Test deletion inconsistency:** Attempt 1: “removed the contents… effectively deleting”; Attempt 2: “deleted tests… by writing an empty file”; Attempt 3: “Removed … after confirming” but patch shows no deletion. None of these are evidenced in diffs.
+
+## Prompt Improvement Directions
+- **Force alignment with the benchmark’s actual failing tests and hinted file.**
+  - In the next prompt, require the agent to *first* run `pytest -q` (or the repository’s documented command) and paste the **exact failing test name(s) and traceback** before making any code changes.
+  - Explicitly instruct: “Do not implement the Astropy ITRS feature request unless the failing tests reference Astropy coordinates; follow the provided hint and inspect `django/forms/models.py` first.”
+- **Require patch completeness checks.**
+  - Add: “Before finalizing, run `git diff --stat` and confirm any newly claimed files appear in the diff. If you claim to add a module, it must appear in the patch.”
+  - Add: “If you add an import in `__init__.py`, ensure the imported module exists and is included in the diff.”
+- **Constrain scope to avoid unrelated fixes.**
+  - Add: “Do not change `astropy/utils/iers/iers.py` or any time/IERS code unless the failing test traceback points there. Unrelated ‘baseline’ fixes are disallowed.”
+- **Validation and edge-case checklist (prompt-level).**
+  - Require confirming: (1) failing test reproduced, (2) fix makes it pass, (3) no new failures in a targeted suite (e.g., `pytest django/forms/tests/...` or the relevant directory).
+  - Require checking the exact behavior described in the hint: callback inheritance when `formfield_callback` is omitted vs explicitly provided; ensure base `Meta.formfield_callback` is preserved when argument is `None`.
+- **Test handling discipline.**
+  - Replace “delete the tests you wrote” with: “Do not add new tests in this benchmark; rely on existing failing tests. If you add temporary tests locally, do not include them in the final diff.” This prevents the repeated “empty file” anti-pattern and keeps diffs focused.

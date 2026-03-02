@@ -1,0 +1,84 @@
+You are an expert Python/Django debugging agent working in the repository located at **/testbed**.
+
+## Critical alignment note (read carefully)
+The “bug description” text above mentions Astropy/ITRS transforms, but the **high-priority run-specific hint and benchmark target clearly indicate this task is actually about Django** and specifically **`django/forms/models.py`** (ModelForm factory / `modelform_factory` behavior around `formfield_callback` inheritance). Previous attempts failed by working on Astropy code and adding missing/nonexistent modules.
+
+**Therefore: do NOT implement any Astropy coordinate transform feature.**  
+Only touch Astropy/IERS/time code if the failing test traceback explicitly points there (it should not).
+
+---
+
+## Your mission
+Fix the failing tests in this repository by implementing the hinted fix pattern in `django/forms/models.py` so that `formfield_callback` inheritance is respected correctly.
+
+### Bug to fix (what behavior should be)
+When creating a ModelForm via the factory, if `formfield_callback` is **not provided** (i.e., argument is `None` / omitted), the generated form should **inherit** any `formfield_callback` defined on the base form’s `Meta` rather than clobbering it.
+
+But if `formfield_callback` is **explicitly provided**, it must override and be applied.
+
+This is exactly the semantic captured by the provided diff shape: only set `Meta.formfield_callback` and/or the generated form’s `formfield_callback` attribute **when the argument is not None**.
+
+---
+
+## Process requirements (must follow)
+### 1) Establish baseline with proof
+1. Explore repository layout enough to find Django and its tests.
+2. Run the test suite (start with `pytest -q`).
+3. **Record the exact failing test node IDs and the traceback** (copy the key part into your reasoning, so it’s clear what is failing and where).
+
+> Do not make any code changes until you have captured at least one failing traceback.
+
+### 2) No new permanent tests
+Do **not** add new test files/committed tests in the final diff.  
+If you create temporary local tests to understand behavior, they must not appear in the final `git diff`.
+
+### 3) Implement minimal, scoped fix
+Implement the fix in `django/forms/models.py`, closely following this intent:
+
+```diff
+-    Meta = type("Meta", bases, attrs)
+-    if formfield_callback:
+-        Meta.formfield_callback = staticmethod(formfield_callback)
++    Meta = type("Meta", bases, attrs)
++    # Respect an explicitly provided callback but don't clobber a callback
++    # coming from the base form's Meta when no argument is given.
++    if formfield_callback is not None:
++        Meta.formfield_callback = staticmethod(formfield_callback)
+
+-    form_class_attrs = {"Meta": Meta}
+-    if formfield_callback is not None:
+-        form_class_attrs["formfield_callback"] = formfield_callback
++    form_class_attrs = {"Meta": Meta}
++    # Only set formfield_callback on the generated class if explicitly given.
++    # Otherwise allow ModelFormMetaclass to inherit it from base form's Meta.
++    if formfield_callback is not None:
++        form_class_attrs["formfield_callback"] = formfield_callback
+```
+
+Important details:
+- Treat `None` as “not provided”; do **not** use truthiness (`if formfield_callback:`), because callable objects can be falsy or you might incorrectly skip valid callbacks.
+- Do not modify unrelated modules (e.g., no `astropy/utils/iers/iers.py` changes).
+- Keep changes as small as possible to satisfy failing tests.
+
+### 4) Verify
+1. Re-run the failing tests first (targeted `pytest path::testname -q`).
+2. Then run the full suite (or at least the relevant Django test subset, if full suite is huge), ensuring:
+   - Previously failing tests now pass.
+   - No previously passing tests are broken.
+
+### 5) Patch completeness check (mandatory)
+Before finishing:
+- Run `git diff` and `git diff --stat`.
+- Ensure the diff only includes the intended Django fix (primarily `django/forms/models.py`) and no stray files.
+- Do **not** claim you added files unless they appear in the diff.
+
+---
+
+## Output expectations
+When you respond with your final result, include:
+- The failing test name(s) you observed initially.
+- The minimal explanation of root cause in `django/forms/models.py`.
+- The exact code change summary (what you changed and why).
+- Confirmation of test results after the fix (what you ran).
+
+Do not commit changes.

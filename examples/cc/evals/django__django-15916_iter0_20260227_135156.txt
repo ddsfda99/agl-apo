@@ -1,0 +1,24 @@
+## Failure Modes
+- **Fix applied in the wrong layer / incomplete understanding of the bug source**: Attempt 1 “fixes” `ModelFormMetaclass.__new__` by post-hoc reading `new_class.Meta.formfield_callback`. That risks changing semantics for *all* ModelForms (not just factory-generated ones) and can conflict with how `formfield_callback` is supposed to be resolved (explicit class attr vs inherited base vs Meta vs factory arg). The likely real bug is in `modelform_factory` injecting `formfield_callback=None` and thereby overriding inheritance.
+- **Incorrect/invalid code introduced (hard failure)**: Attempt 3 introduces nonsensical code (`new_class := type("tmp", (), {})`) before `new_class` exists, and leaves `formfield_callback` effectively unset/undefined. This would likely crash or silently break callback resolution.
+- **Test handling violations / no lasting regression protection**: All attempts add tests but then remove them (required by the original prompt, but counterproductive for SWE-bench). This guarantees no persistent regression coverage and makes the patch less verifiable.
+- **Edge cases not validated**: None of the attempts demonstrate checking: (a) explicit `formfield_callback` argument should override base Meta, (b) base form class attribute `formfield_callback` vs base Meta `formfield_callback` precedence, (c) interaction with `modelform_factory` creating a new Meta subclass and possible `staticmethod` wrapping, (d) `formfield_callback` being inherited through multi-level form inheritance.
+
+## Evidence
+- **Attempt 2 pinpoints the likely true cause**: It notes `modelform_factory` “unconditionally sets … formfield_callback to the passed argument, even if None,” which matches the bug description (“overwritten with the default argument None before the new class is constructed”). The patch changes `form_class_attrs` to omit the attribute when `None`:
+  - `form_class_attrs = {"Meta": Meta}` then `if formfield_callback is not None: ...`
+- **Attempt 1 changes global metaclass behavior**: Patch adds logic after `ModelFormOptions(...)` to read `new_class.Meta.formfield_callback` when `formfield_callback is None`. This is broad and may override intended precedence rules or duplicate existing mechanisms.
+- **Attempt 3 is clearly broken**: It replaces the correct line with a block that references `new_class` before assignment via a dummy `type("tmp"... )` and never restores the original behavior—high chance of runtime error or wrong callback resolution.
+- **Tests added but not kept**: Attempt 1 diff shows only whitespace changes in tests (suggesting the repro test was removed). Attempts 2/3 diffs include new tests, contradicting the “deleted test cases” instruction for final state—indicating inconsistency and lack of a stable verification artifact.
+
+## Prompt Improvement Directions
+- **Force correct placement of fix by requiring a root-cause proof**: Instruct the agent to identify *where `formfield_callback=None` is injected* and demonstrate via a minimal trace (print/inspection or assertion) that the generated class has `formfield_callback=None` in attrs, overriding base Meta. This steers away from risky metaclass hacks.
+- **Require a precedence matrix + tests for each cell**: Add explicit requirements to validate:
+  1) `modelform_factory(..., formfield_callback=explicit)` overrides everything  
+  2) base form class attribute `formfield_callback` works  
+  3) base form `Meta.formfield_callback` works (the reported bug)  
+  4) absence everywhere results in default behavior  
+  5) multi-level inheritance (Base → Derived passed to factory)
+- **Patch completeness checks**: Require running targeted tests and at least one broader suite subset (e.g., `forms` + `model_forms`) and reporting command outputs. Also require checking that `modelform_factory` does/doesn’t set `Meta.formfield_callback` and whether it wraps with `staticmethod` consistently.
+- **Avoid global behavior changes unless necessary**: Add an explicit prompt constraint: “Prefer local fix in `modelform_factory` over changing `ModelFormMetaclass` unless you can show the metaclass is solely responsible and that changes won’t affect non-factory forms.”
+- **SWE-bench alignment**: Remove the instruction to delete new tests (or override it in your own prompting). Instead: “Keep the regression test; do not delete it.” This is essential for scoring and prevents unverifiable fixes.

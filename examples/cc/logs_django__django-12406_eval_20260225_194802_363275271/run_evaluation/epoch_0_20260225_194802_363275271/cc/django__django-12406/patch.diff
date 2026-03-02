@@ -1,0 +1,41 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index dafc11f995..0449825a7f 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -13,7 +13,7 @@ from django.forms.forms import BaseForm, DeclarativeFieldsMetaclass
+ from django.forms.formsets import BaseFormSet, formset_factory
+ from django.forms.utils import ErrorList
+ from django.forms.widgets import (
+-    HiddenInput, MultipleHiddenInput, SelectMultiple,
++    HiddenInput, MultipleHiddenInput, SelectMultiple, RadioSelect,
+ )
+ from django.utils.text import capfirst, get_text_list
+ from django.utils.translation import gettext, gettext_lazy as _
+@@ -1185,10 +1185,25 @@ class ModelChoiceField(ChoiceField):
+                  required=True, widget=None, label=None, initial=None,
+                  help_text='', to_field_name=None, limit_choices_to=None,
+                  **kwargs):
++        # For required fields rendered with RadioSelect, don't include an
++        # empty "blank" choice. Radio inputs have an inherent unselected
++        # state so the blank option is unnecessary and confusing.
++        use_empty = True
+         if required and (initial is not None):
+-            self.empty_label = None
++            use_empty = False
+         else:
+-            self.empty_label = empty_label
++            # If a RadioSelect (or subclass) is used, omit the empty choice
++            # when the field is required.
++            if widget is not None:
++                try:
++                    is_radio = isinstance(widget, RadioSelect) or (
++                        isinstance(widget, type) and issubclass(widget, RadioSelect)
++                    )
++                except Exception:
++                    is_radio = False
++                if is_radio and required:
++                    use_empty = False
++        self.empty_label = (empty_label if use_empty else None)
+ 
+         # Call Field instead of ChoiceField __init__() because we don't need
+         # ChoiceField.__init__().

@@ -1,0 +1,98 @@
+You are an expert Python developer familiar with Astropy’s coordinates transform graph.
+
+You are given a code repository in the current directory (`/testbed`). Implement the feature/bugfix described below **correctly and completely**, learning from prior failed attempts.
+
+## Bug / Feature to Implement (must match description)
+Users report apparent inaccuracy for **ITRS→AltAz** transforms for nearby/terrestrial objects (satellites, airplanes, mountains, buildings). The root issue is the current route effectively mixes geocentric vs topocentric aberration and, worse, makes an **ITRS position “move” with time** because the current ITRS→ITRS machinery can reference to SSB/earth orbit behavior when obstimes differ.
+
+We want a **direct approach to “Observed” frames** that stays entirely within ITRS and purely does:
+- Convert **geocentric ITRS** to **topocentric ITRS** by subtracting observer location in ITRS,
+- Apply a simple rotation into the observed frame basis (AltAz or HADec),
+- And the inverse for observed→ITRS.
+
+Key behavior requirement:
+- Treat the ITRS position as **time-invariant** for these observed transforms.
+- **Do not** attempt to synchronize input and output `obstime` via ITRS→ITRS for these transforms.
+- The output frame’s `obstime` is simply whatever the target frame has (even if `None` for default AltAz/HADec).
+
+You must implement direct transform edges for:
+- `ITRS <-> AltAz`
+- `ITRS <-> HADec`
+
+The approach is essentially what’s shown in the issue text: build the ITRS↔Observed rotation matrices from the observer’s geodetic lon/lat, handle left-handedness, subtract/add observer ITRS location, and register the transforms in the `frame_transform_graph` using `FunctionTransformWithFiniteDifference`.
+
+## Critical constraints (based on prior failures)
+1. **Your patch must include the actual new module/code** (not just an import).  
+   - Before finalizing, run `git diff --stat` and verify the new/changed files are present and include the transform registrations and logic.
+2. **Do not claim tests passed unless you actually ran them**. When you report results, include:
+   - The exact `pytest` command(s) you ran,
+   - A short snippet of relevant output showing pass/fail counts (or the failing test names).
+3. **Transform-graph correctness must be validated**:
+   - Confirm `frame_transform_graph.get_transform(ITRS, AltAz)` and similarly for HADec actually returns your new direct transform (not an indirect chain).
+   - Ensure you don’t accidentally create an ambiguity/cycle that changes other unrelated routes.
+4. **Avoid hand-waving about IERS**: your tests should be designed to avoid dependence on IERS downloads where possible (e.g., freeze IERS auto-download; focus on purely geometric/topocentric behavior). Do not dismiss failures as “baseline” unless you can show they existed before your change.
+
+## Required workflow (follow exactly)
+### (1) Explore repository
+- Identify where Astropy coordinate frames and transforms are implemented.
+- Identify existing tests relevant to ITRS/AltAz/HADec and intermediate transformations.
+
+### (2) Baseline tests
+- Run the existing test suite (or a targeted subset if full suite is too slow).
+- Record any **pre-existing** failures. These must be demonstrated as present **before** your changes.
+
+### (3) Write temporary reproduction tests (must later be deleted)
+Create new tests that reproduce the bug/feature need. They must cover:
+- **Exact failing scenario** implied by the description: when transforming a nearby ITRS position to AltAz/HADec, the result should be correct even if input and output obstimes differ; and it should not “fly off” due to ITRS→ITRS time propagation.
+- Additional relevant scenarios to ensure completeness:
+  - Both directions: ITRS→AltAz and AltAz→ITRS; ITRS→HADec and HADec→ITRS.
+  - Cases where target `AltAz(obstime=None)` (default) and where `obstime` is set.
+  - A simple “straight overhead”/topocentric sanity case (e.g., object located directly above the observer at some altitude using ITRS cartesian arithmetic).
+  - A non-overhead case (e.g., due east/west or north) to validate axis handedness/rotation.
+  - Ensure round-trips recover original vectors within tolerance.
+
+Testing guidance:
+- Prefer tests that rely only on EarthLocation geometry and frame rotations, not on high-precision Earth orientation.  
+- If needed, set `astropy.utils.iers.conf.auto_download = False` in tests and use tolerances appropriate for purely geometric expectations.
+- The tests must FAIL on the current codebase and PASS after your fix.
+
+### (4) Confirm reproduction tests fail
+- Run just your new tests (`pytest -k ...`), confirm they fail for the right reason.
+
+### (5) Locate root cause
+- Determine current ITRS→AltAz/HADec route and why it incorrectly depends on time / uses the wrong intermediate transforms.
+
+### (6) Implement the fix (source only)
+- Implement direct ITRS↔AltAz and ITRS↔HADec transforms as described.
+- Ensure transform registration is in a module that is imported so the transforms are registered at runtime.
+- Ensure the new transforms:
+  - Subtract `observed_frame.location.get_itrs().cartesian` from `itrs_coo.cartesian` (topocentric vector),
+  - Rotate into the observed frame basis via a deterministic matrix from lon/lat,
+  - Inverse uses transpose rotation, then adds observer ITRS location back.
+- Ensure output `obstime` behavior matches the requirement: do not do any ITRS→ITRS obstime propagation; just realize the target frame.
+
+### (7) Full test run
+- Run the same baseline suite again.
+- Confirm:
+  - Your reproduction tests now pass,
+  - No previously passing tests are broken,
+  - Any pre-existing failures remain unchanged.
+
+### (8) Delete the temporary tests
+- Remove the reproduction tests you added. (They are only for demonstrating the bug during development.)
+- Ensure the final diff contains **only source code changes**.
+
+## Mandatory verification commands (must execute and use results)
+Before final response, you must run and use:
+- `git diff --stat`
+- `pytest ...` (baseline subset + your targeted tests)
+- A short Python snippet (e.g., `python -c ...`) that prints:
+  - `frame_transform_graph.get_transform(ITRS, AltAz)` and `(..., HADec)` to confirm direct transforms are selected.
+
+## Output expectations
+At the end, provide:
+- The final code changes (already applied in the repo).
+- The exact commands you ran and brief outputs (no invented results).
+- Confirmation that temporary tests were deleted and not present in final diff.
+
+Now implement the fix in `/testbed`.

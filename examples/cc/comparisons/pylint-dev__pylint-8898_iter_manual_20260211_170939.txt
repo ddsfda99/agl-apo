@@ -1,0 +1,37 @@
+## Attempt Outcomes
+- Attempt A: success
+- Attempt B: failure
+
+Attempt A (success): why it succeeded (causal chain)
+- Bug mechanism matched: The crash comes from `_regexp_csv_transfomer` using `_csv_transformer`, which splits on every comma before compiling each fragment as a regex. For input `(foo{1,3})`, naive splitting yields something like `"(foo{1"` and `"3})"` (after unquoting), and the second fragment is not a valid regex, producing the `re.error` shown in the report.
+- Fix directly addresses the root: A adds `_split_regex_csv()` in `pylint/config/argument.py` and swaps both `_regexp_csv_transfomer` and `_regexp_paths_csv_transfomer` to use it instead of `_csv_transformer`. This is important: it fixes the exact call path in the traceback (`pylint/config/argument.py:_regexp_csv_transfomer`) and also covers the sibling transformer that had the same vulnerability.
+- Correct parsing model for this specific bug: `_split_regex_csv` splits only on commas that are (1) not escaped, (2) not inside a character class `[...]`, and (3) not inside a brace quantifier `{...}` (tracked by `brace_depth`). That specifically prevents splitting commas used in `{m,n}` quantifiers, which is the concrete reproducer from the prompt.
+- Preserves existing behavior where appropriate: It still supports multiple patterns separated by commas at “top level”, and still unquotes via `pylint_utils._unquote()` per-part (matching prior behavior where `_csv_transformer` likely produced strings then unquoted elsewhere).
+- Validation hits the real integration path: Tests in `tests/config/test_argparse_config.py` run `Run([path, "--bad-names-rgxs=..."], exit=False)` and assert `run.linter.config.bad_names_rgxs` contains compiled patterns with expected `.pattern` strings. This validates: argparse -> option transformer -> config assignment -> compilation, i.e., the same route that crashed for users, not just a unit of a helper.
+
+Attempt B (failure): why it failed (root causes)
+- Patch incompleteness vs repository expectations: Attempt B modifies `_regexp_csv_transfomer` to accept `str | Sequence[str]` and also changes `_glob_paths_csv_transformer` to accept `str | Sequence[str]`. This is API surface expansion with no evidence that argparse/config ever passes lists/tuples here. That’s scope creep and raises compatibility risk (typing/runtime) without solving the reported bug any better.
+- Did not fix all relevant call paths: It leaves `_regexp_paths_csv_transfomer` untouched and still using `_csv_transformer`. Even if the report is about `bad-names-rgxs`, the underlying class of “regex CSV” bugs typically affects multiple options; Attempt A addressed both. Leaving a sibling transformer broken is a common reason for suite failures (regression tests expecting consistent behavior across similar options).
+- Splitting logic is more error-prone than needed: The B splitter tracks parentheses `()` depth and treats commas inside them as non-separators. But regex grouping parentheses are not a “comma context” in regex syntax (commas have no special meaning inside `()` generally); this broad rule can change semantics of existing configurations that relied on commas inside groups being separators (even if unusual). More importantly, B’s depth tracking for `[]` is simplistic: it increments on every `[` and decrements on every `]` even though nested `[` is not really a thing in regex char classes; while this might not break common cases, it’s unnecessary complexity that can still mis-handle patterns with literal brackets/character-class edge cases. A’s approach (“in_char_class” boolean) is closer to actual regex behavior.
+- Validation mismatch with requirements and possibly with harness: B’s summary claims tests were added then deleted “as requested”. But the patch as provided shows no tests added at all (only code changes). That means (a) there was no durable regression test to protect the fix, and (b) any “passed” claim can’t be trusted under the evidence policy. In SWE-bench style evaluation, missing/incorrect tests often correlates with latent failures: the patch might not satisfy the hidden tests that check actual CLI/config parsing or other transformers.
+- Likely reason for the recorded failure outcome: hidden tests probably cover the exact reported reproduction (TOML/INI config parsing of `bad-name-rgxs="(foo{1,3})"`). Attempt B’s change may not actually be used in that code path if upstream expects a `str` and still uses `_csv_transformer` elsewhere before it reaches `_regexp_csv_transfomer` (or if quoting/unquoting differs). Attempt A explicitly unquotes per-part after splitting and validated via `Run`, making it much more likely to match the real path.
+
+Reusable good practices/patterns (from A)
+- Fix at the transformer boundary where the crash occurs: patching `pylint/config/argument.py` in `_regexp_csv_transfomer` (and the related `_regexp_paths_csv_transfomer`) is the correct “choke point”.
+- Add a minimal syntax-aware splitter rather than trying to retrofit general CSV parsing:
+  - Track “in character class” and “brace depth” to protect `{m,n}` and `[...]`.
+  - Treat escaped commas `\,` as literal commas.
+  - Unquote each segment after splitting (`pylint_utils._unquote(part)`).
+- Integration tests through the public interface:
+  - Use `Run([...], exit=False)` and assert on `run.linter.config.<option>` to ensure the full argparse/config pipeline is exercised.
+  - Include sanity assertions on matching behavior, not just string equality, to ensure regex compilation is actually correct.
+
+Concrete bad practices/anti-patterns (from B)
+- Scope creep / unrelated API changes: changing `_glob_paths_csv_transformer` signature/behavior without a bug report connection increases regression risk.
+- “Robustness” changes without evidence: accepting `Sequence[str]` inputs in transformers without confirming actual call sites can introduce subtle behavior changes (e.g., iterating a `Path` or other sequence-like objects).
+- Missing durable tests (and summary/patch mismatch): claiming tests existed but patch shows none is a strong signal of weak validation. Also, deleting reproduction tests without replacing them in an existing suite defeats regression prevention.
+- Over-general parsing rules: treating parentheses depth as a reason not to split on commas changes semantics beyond what’s required for `{m,n}` quantifiers and `[...]` classes.
+
+Keep vs avoid (quick comparison)
+- Keep: targeted helper that understands the minimal regex constructs that actually contain commas (`{m,n}`, `[...]`, escaped commas), reuse it across both regex transformers, and validate via CLI/config integration tests.
+- Avoid: broad signature changes, touching unrelated transformers, and relying on unit tests of private functions (or deleting tests entirely) instead of verifying the actual linter config path.

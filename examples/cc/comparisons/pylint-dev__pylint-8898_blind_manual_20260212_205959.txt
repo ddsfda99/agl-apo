@@ -1,0 +1,36 @@
+Attempt A vs Attempt B (generalized)
+
+Correctness & requirement alignment
+- Attempt A aligns closely with the stated requirements: it fixes comma-splitting only for the regex-list parsing, preserves per-item normalization after splitting, applies the fix consistently to multiple regex-CSV transformers, and adds integration-level regression tests that exercise the real parsing/config path.
+- Attempt B fixes only one regex-CSV transformer and leaves parallel regex parsing paths unchanged, violating the “apply consistently anywhere the same behavior is used” requirement. It also broadens function signatures for unrelated transformers, which conflicts with “smallest change” and raises API-compatibility risk. Its tests (per the summary) were written to call a private helper directly and then removed, leaving no lasting regression coverage; the patch contains no tests.
+
+Scope control (minimal change vs overreach)
+- Attempt A is scoped: it introduces a dedicated syntax-aware splitter and wires it into the relevant regex CSV transformers, plus minimal doc/guard tweaks. The blast radius is constrained to the parsing logic that’s actually wrong.
+- Attempt B overreaches by changing accepted input types (string vs sequence) and altering an unrelated CSV path transformer. This expands surface area and can introduce subtle behavior changes in call sites that previously relied on type errors or strict input expectations.
+
+Completeness across related execution paths
+- Attempt A covers multiple related parsing/compilation paths that share the same “regex CSV” behavior, reducing the chance of inconsistent behavior across similar options.
+- Attempt B addresses only one path; the remaining similar transformer(s) likely still split naively and can still crash or misparse.
+
+Validation quality
+- Attempt A includes durable regression tests that go through the real option/config parsing flow, which is the most reliable way to catch integration issues (quoting, trimming, normalization, compilation, etc.).
+- Attempt B provides no tests in the patch. Additionally, relying on direct calls to private helpers is less representative and more brittle, and deleting reproduction tests guarantees future regressions.
+
+Risk profile (regression risk, hidden assumptions, fragile logic)
+- Attempt A’s main risk is correctness of the syntax-aware splitter: it must be conservative and not accidentally treat arbitrary braces as “quantifiers,” and it must handle escapes predictably. Still, the change is localized and backed by integration tests, reducing risk.
+- Attempt B’s risk is higher: signature broadening and unrelated transformer changes can ripple through configuration loading, defaults, and type-checking expectations. Missing tests amplifies risk. Also, splitting rules that account for more constructs (e.g., parentheses) than required can unintentionally change delimiter semantics in edge cases.
+
+Transferable engineering rules (reusable)
+1) Fix the bug at the lowest-level shared parsing boundary, then reuse that fix consistently across all parallel code paths that parse the same conceptual input.
+2) Keep the scope minimal: avoid changing public signatures, accepted input types, or unrelated transformers unless you can prove necessity with failing tests and clear requirements.
+3) Prefer integration tests that exercise the real user-facing parsing/config path over unit tests that call private helpers; integration tests catch normalization, quoting, and compilation behavior holistically.
+4) Preserve existing normalization semantics: split first (correctly), then apply the same trimming/unquoting/normalization per item as before.
+5) When implementing syntax-aware splitting, make the algorithm deterministic, conservative, and explicitly handle escape rules; add tests for each delimiter-avoidance rule you introduce.
+6) Ensure regression tests remain in the suite; never “clean up” by deleting them—cleanup should remove only temporary local artifacts (debug prints, scratch files), not the tests that protect the fix.
+7) If you extend parsing logic to additional constructs (e.g., grouping, classes, quantifiers), justify each addition with a test that would fail otherwise; don’t broaden behavior “just in case.”
+
+Transferable anti-patterns to avoid
+- Changing unrelated modules/functions while fixing a narrow parsing bug.
+- Broadening accepted input types as a “robustness” move without explicit requirement and tests; this can silently change behavior and hide errors.
+- Adding tests that bypass the real execution path (private helper tests only), or removing tests after using them for reproduction.
+- Fixing only one of multiple equivalent parsing paths, leaving inconsistent behavior across options/config sources.

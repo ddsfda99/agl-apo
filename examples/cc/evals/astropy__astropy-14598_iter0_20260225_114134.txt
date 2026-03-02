@@ -1,0 +1,34 @@
+## Failure Modes
+- **No persistent regression test added**: All attempts claim to add reproduction tests, run them, then *delete/empty* them. In SWE-bench evaluation, the final repository state must include tests that would fail on the buggy version and pass on the fixed version; otherwise the fix may not be validated and can regress unnoticed.
+- **Potentially incorrect adherence to task instructions vs benchmark reality**: The prompt says “delete the test cases you wrote,” but SWE-bench expects tests to remain (or at least the fix to be validated by existing upstream tests). Following that instruction can cause “silent” failures where the patch is untested by the harness beyond existing tests.
+- **Risk of incomplete behavioral validation**: The code change is plausible (remove per-chunk unescaping in `_split`), but attempts do not demonstrate running *relevant* existing FITS tests beyond a subset, and they don’t show coverage for tricky CONTINUE-boundary cases where quote pairs span chunks.
+- **Questionable baseline handling**: Attempt 1/2 report unrelated convolution collection errors; Attempt 3 reports an IERS/leap-second failure. These inconsistencies suggest the agent didn’t consistently establish a reproducible baseline and may be missing real regressions in the FITS suite.
+
+## Evidence
+- **Tests removed/neutralized**:
+  - Attempt 1: “removed `test_card_quotes_bug.py` as instructed.” Patch diff contains only source edits—no tests remain.
+  - Attempt 2/3: “Removed the reproduction tests by clearing `test_card_quotes.py` content” / “removed the contents … effectively deleting the newly added tests.” Again, patch diffs contain only `card.py` edits.
+- **Identical fix across attempts**: All patches remove `.replace("''", "'")` in `Card._split` and keep unescaping in `_parse_value`:
+  - Diff hunk: `value = value.rstrip().replace("''", "'")` → `value = value.rstrip()`
+  - This supports the claimed root cause (double-unescaping / boundary issues), but without a retained test, correctness isn’t enforced.
+- **Limited validation evidence**:
+  - Attempt 1 mentions only `pytest astropy/io/fits/tests/test_header.py`.
+  - Attempt 3 mentions a failure in `test_fitstime` and runs “fits tests” but provides no evidence of running the entire relevant subset consistently (and reports different baseline issues than attempt 1/2).
+
+## Prompt Improvement Directions
+- **Override the “delete tests” step for SWE-bench**: Explicitly instruct the agent to **keep the new regression tests in the final patch** (even if the original task text says delete). Add: “Do not remove or empty the new tests; the evaluation relies on them.”
+- **Require a minimal, targeted regression test file**:
+  - Add tests that assert **round-trip equality** for:
+    - Trailing `''` for `n=60..70` (exact repro).
+    - Embedded `''` for `n=50..70` with trailing content (exact repro).
+    - At least one case where the doubled quote is **split across CONTINUE chunk boundaries** (construct lengths so the two quotes land at end/start of adjacent chunks).
+    - Multiple doubled-quote sequences across chunks (e.g., `"...''...''..."`).
+- **Add correctness checks the agent must report**:
+  - Run and report: `pytest astropy/io/fits/tests/test_card.py astropy/io/fits/tests/test_header.py` (or the closest existing relevant modules), plus the new test file.
+  - If full suite can’t run due to environment, require a **consistent baseline log**: same command before/after, and show that failures are unchanged.
+- **Patch completeness checklist** (ask the agent to confirm explicitly):
+  - No changes to existing tests.
+  - New tests fail on base commit, pass after fix.
+  - No remaining TODO/empty test files.
+  - Confirm behavior for both non-CONTINUE and CONTINUE long-string paths.
+- **Guard against “comment-only” validation**: Require actual output snippets (or at least structured pass/fail counts) for pre-fix and post-fix runs of the new regression tests and the chosen FITS subset.

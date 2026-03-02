@@ -1,0 +1,37 @@
+## Failure Modes
+- **Work not actually implemented / incomplete patch**: Attempts 1 and 3 claim to “add a new transforms module” but the diff only shows an `__init__.py` import. This implies the key file (`itrs_observed_transforms.py`) is missing from the patch (or was never added), so the transform graph won’t change and nothing is fixed.
+- **Unscoped, unrelated changes (risking regressions)**: Attempts 2 and 3 modify `astropy/utils/iers/iers.py` despite the bug description being about ITRS↔Observed transforms. This is likely a workaround for local test environment failures, not the task, and can introduce subtle time/IERS correctness regressions.
+- **Incorrect or contradictory approach vs. issue requirements**:
+  - Attempt 3 claims the “direct approach stays within ITRS” but also says it “delegate[s] … to a topocentric CIRS frame,” which violates the stated goal (avoid intermediate barycentric/aberration paths).
+- **Bad SWE-bench protocol adherence**: All attempts say they created reproduction tests and then “deleted” them by emptying/removing files. On SWE-bench, hidden tests validate behavior; deleting your tests is irrelevant to scoring and can mask that you never validated the fix properly. The instruction “delete the test cases” is part of the meta-prompt, but in practice your agent should use them for local validation and then simply not include them in the final patch (not leave empty files behind).
+- **Transform registration/priority not addressed**: Even if a direct transform module exists, it must be registered with correct decorators and not be shadowed by existing routes. None of the summaries discuss ensuring the new path is actually selected in the graph and doesn’t break consistency with existing transforms/refraction options.
+
+## Evidence
+- **Attempt 1 patch only imports** `itrs_observed_transforms`:
+  - Diff shows only `builtin_frames/__init__.py` updated. No `itrs_observed_transforms.py` added in the patch, despite the summary claiming it was created.
+- **Attempt 2 includes a suspicious IERS change**:
+  - Patch modifies `astropy/utils/iers/iers.py` to special-case Time conversion failures. This is unrelated to the described coordinate-transform bug and is typical of “make tests pass in this env” rather than fixing the requested feature.
+- **Attempt 3 repeats the IERS edit** and still only shows import + IERS tweak:
+  - Again, no actual transform code appears in the diff; only `__init__.py` import and `iers.py` fallback.
+- **Attempt 3 approach contradicts “stays within ITRS”**:
+  - Summary explicitly states delegating via CIRS, which is exactly the kind of intermediate path the issue is trying to avoid.
+- **All attempts report broad baseline failures** and then proceed anyway, suggesting they didn’t isolate a minimal failing test case tied to the bug report and validate only that change.
+
+## Prompt Improvement Directions
+- **Force patch completeness checks**:
+  - Require the agent to *show the diff for the new transform module* and confirm the file exists in the final patch (`git status` + `git diff --stat`). Add a checklist item: “If you claim you added a file, it must appear in the patch.”
+- **Constrain scope explicitly**:
+  - Add: “Do not modify `astropy/utils/iers/*` or time/IERS infrastructure unless the failing test is directly about IERS; the issue is coordinate transform graph behavior.” This prevents unrelated workarounds.
+- **Make transform-selection verification mandatory**:
+  - Require a check like: `SkyCoord(..., frame=ITRS).transform_to(AltAz(...))` prints the transform path or verifies direct edge exists in `frame_transform_graph`. (E.g., assert `frame_transform_graph.get_transform(ITRS, AltAz)` is the new function.)
+- **Specify edge cases to validate** (even if tests aren’t committed):
+  - Mismatched `obstime` between input ITRS and output observed frame (the core gotcha described).
+  - `obstime=None` on AltAz/HADec output (ensure adoption behavior doesn’t crash).
+  - Roundtrip ITRS→AltAz→ITRS returns the original geocentric ITRS Cartesian for nearby targets.
+  - Confirm no refraction is applied unless explicitly enabled; don’t silently change behavior.
+- **Require consistency/units/handedness validation**:
+  - Validate axis conventions for AltAz/HADec (left-handed flips) with at least two non-degenerate directions (overhead + due east/north) to catch sign/rotation mistakes.
+- **Don’t “delete tests” by committing empty files**:
+  - Instruct the agent: “Use local scratch tests for reproduction, but do not include any new tests in the final patch; do not leave empty test files behind.”
+- **Avoid contradictory solution statements**:
+  - Add: “Solution must not route through CIRS/ICRS/GCRS; implement direct topocentric translation + rotation in ITRS as described.” This prevents “delegation via CIRS” implementations.

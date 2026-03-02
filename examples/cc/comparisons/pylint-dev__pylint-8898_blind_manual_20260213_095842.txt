@@ -1,0 +1,40 @@
+Both attempts follow a “reproduce → diagnose → fix → test” loop, but they differ in rigor and risk management.
+
+Attempt A strengths (transferable):
+- Uses a user-realistic execution path for reproduction, which reduces the risk of “tests pass but real usage still fails.”
+- Keeps the regression tests permanently, improving long-term protection.
+- Makes a minimal, localized change and applies it consistently where the same logic is reused.
+- States what was verified and focuses tests on representative edge cases.
+- Cleans up temporary artifacts while retaining valuable tests.
+
+Attempt A weaknesses (generalized):
+- Verification scope could be broadened (even a small targeted suite) when feasible.
+- Complex parsing/logic should be accompanied by clear invariants and tests for boundaries and failure modes.
+
+Attempt B strengths (transferable):
+- Has an explicit plan and follows it.
+- Identifies root cause and implements a more robust approach rather than a band-aid.
+- Notes constraints on running the full suite and reports limited verification transparently.
+
+Attempt B weaknesses / risks (generalized):
+- Tests target internal helpers instead of user-observable paths, increasing false confidence.
+- Deletes reproduction tests, losing regression protection (a major quality regression).
+- Expands accepted input types/behavior surface without clearly being required, which can introduce compatibility risk.
+- Mixes unrelated changes into the fix, increasing the chance of collateral impact.
+
+Distilled “DO” rules:
+- Reproduce via the most user-realistic path; prefer integration-level coverage over calling internals.
+- Write a minimal failing test first; keep it as a permanent regression test.
+- Explain root cause succinctly before coding.
+- Implement the smallest correct fix; keep public behavior stable unless requirements demand change.
+- If the same bug exists in multiple places, fix it consistently with shared, small logic.
+- Add at least one nearby edge-case test likely to regress.
+- Verify with the new tests plus the largest relevant existing subset; report exactly what ran.
+- Remove temporary debugging artifacts; keep regression tests.
+
+Distilled “AVOID” rules:
+- Avoid deleting reproducer/regression tests after the fix.
+- Avoid changing signatures, accepted input shapes, defaults, or APIs unless explicitly required.
+- Avoid unit-testing private helpers when you can exercise real usage paths.
+- Avoid opportunistic refactors or “drive-by” improvements during a bug fix.
+- Avoid vague verification claims; always specify executed coverage and remaining gaps.

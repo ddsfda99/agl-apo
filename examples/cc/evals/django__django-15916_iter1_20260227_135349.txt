@@ -1,0 +1,29 @@
+## Failure Modes
+- **Fix applied at the wrong layer (metaclass) and likely incomplete/behavior-changing**: Attempt 1 changes `ModelFormMetaclass.__new__` to pull `Meta.formfield_callback` after class construction. This risks changing callback precedence globally for all ModelForm subclasses (not just factory-generated forms) and may not address the *actual* reported issue (factory overwriting via `formfield_callback=None`).
+- **Leaving no durable regression test**: Attempts 1 and 2 remove the reproducer test at the end (per instruction), but this undermines SWE-bench expectations (the benchmark typically requires adding/keeping a regression test). Attempt 2 explicitly adds a test in the patch diff and doesn’t remove it; attempt 1 doesn’t add a real test (diff shows only a blank line change).
+- **Incorrect/invalid code in attempt 3**: It introduces a nonsensical `new_class := type("tmp", (), {})` expression and refers to `new_class` before real creation; it doesn’t restore correct logic and likely breaks import/runtime.
+- **Not verifying comprehensive scenarios**: Even in attempt 2 (best fix direction), there’s no evidence of covering:
+  - explicit `formfield_callback` argument overriding base Meta callback
+  - base form having `formfield_callback` as a class attribute vs in `Meta`
+  - ensuring `None` doesn’t overwrite inherited callbacks in other factory paths
+  - interactions with `modelformset_factory`/inline formsets (if they call `modelform_factory`)
+
+## Evidence
+- **Attempt 2 identifies the plausible root cause**: `modelform_factory` building `form_class_attrs = {"Meta": Meta, "formfield_callback": formfield_callback}` causes `formfield_callback=None` to be set as an explicit class attribute, which `ModelFormMetaclass` then pops and treats as intentional, preventing inheritance from base `Meta.formfield_callback`. Patch fixes this by only setting the attribute when `formfield_callback is not None`.
+- **Attempt 1’s change is post-hoc and broad**: It modifies metaclass to look at `new_class.Meta.formfield_callback` when `formfield_callback is None`. That changes behavior beyond factory-generated forms and may mask the real cause (factory injecting `None`).
+- **Attempt 1 patch doesn’t include the claimed test**: Only whitespace change in `tests/model_forms/tests.py`; no test logic added.
+- **Attempt 3 patch is broken**: It removes correct assignment `attrs.pop("formfield_callback", base_formfield_callback)` and replaces it with a no-op that can’t possibly set `formfield_callback` correctly; also introduces invalid/wrong reasoning about Meta availability.
+
+## Prompt Improvement Directions
+- **Require keeping the regression test**: Don’t instruct the agent to delete new tests; instead explicitly: “Add a regression test and keep it.” Also ask the agent to show failing test output before fix and passing output after.
+- **Force root-cause confirmation via minimal diff**: Add instruction: “Prefer fixing `modelform_factory` behavior over metaclass unless you can prove metaclass is wrong; avoid broad behavioral changes.” Require them to explain precedence rules: explicit factory arg > class attr > Meta attr > base Meta.
+- **Edge-case checklist to validate** (ask agent to implement tests for all):
+  - base form defines callback in `Meta`; factory called without callback → callback applied
+  - factory called with explicit callback → overrides base Meta callback
+  - base form defines callback as class attribute `formfield_callback` (not Meta) → still applied
+  - base form has Meta callback; factory passes `formfield_callback=None` (default) → must *not* override
+  - ensure `formfield_callback` wrapping/staticmethod behavior remains correct (if Django expects it)
+- **Patch completeness checks**:
+  - Run `python tests/runtests.py --settings=test_sqlite model_forms` before and after.
+  - Grep for other places that pass `formfield_callback` into generated classes (e.g., `modelformset_factory`, `inlineformset_factory`) and ensure they don’t similarly inject `None`.
+- **Ask for code-read justification**: Require quoting the exact lines in `modelform_factory` and `ModelFormMetaclass` that cause the override, and a reasoning trace showing how `attrs.pop("formfield_callback", base_formfield_callback)` behaves when factory sets the attribute to `None`.

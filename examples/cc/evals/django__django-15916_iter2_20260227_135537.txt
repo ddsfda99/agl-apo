@@ -1,0 +1,33 @@
+## Failure Modes
+- **Test deletion violates SWE-bench expectations**: The prompt instructs deleting reproduction tests, but SWE-bench evaluation relies on committed tests to verify the fix. Removing tests risks “fix” not being exercised and makes the change unverified under evaluation.
+- **Attempt 1 likely incomplete/incorrect fix location**: Adjusting `ModelFormMetaclass.__new__` after class creation is risky because `formfield_callback` is used during field construction; setting it later may not affect generated fields.
+- **Attempt 1/3 don’t ensure callback is actually applied**: Both metaclass-oriented edits don’t clearly wire the resolved callback into the part of the metaclass that calls `fields_for_model(...)` with `formfield_callback=...`, so the bug may persist.
+- **Attempt 3 is broken code**: Introduces a nonsensical `new_class := type("tmp", (), {})` check and removes `base_formfield_callback` usage entirely, likely breaking inheritance behavior and possibly crashing or silently ignoring callbacks.
+- **Insufficient coverage of “class attribute vs Meta vs factory arg” precedence**: The bug involves precedence/overrides between:
+  1) explicit `modelform_factory(..., formfield_callback=...)`
+  2) `form`’s `Meta.formfield_callback`
+  3) `form`’s class attribute `formfield_callback`
+  4) base form inheritance  
+  Attempts don’t demonstrate comprehensive precedence tests.
+- **Not running full relevant test matrix**: Summaries indicate only `model_forms` tests were run; changes in `django/forms/models.py` can affect formsets/admin/validation, so broader runs are warranted.
+
+## Evidence
+- **Attempt 1 deletes the reproduction test**: Patch shows only a blank line change in `tests/model_forms/tests.py`, consistent with removal/rollback; summary explicitly says the test was removed. This undermines verification.
+- **Attempt 1 sets `formfield_callback` *after* `ModelFormOptions` creation**: It computes `formfield_callback` before `super().__new__`, then re-reads from `Meta` after class creation, but there’s no shown plumbing into field generation. This suggests callback may not be used when fields are built.
+- **Attempt 2 directly targets the described root cause**: Patch changes `modelform_factory` to *not set* `"formfield_callback": None` in `form_class_attrs`, matching the bug report (“overwritten with default None before new class is constructed”). This is the most plausible fix, but it still removes the added test afterward (per summary).
+- **Attempt 3 introduces invalid logic**: It deletes the original `attrs.pop(..., base_formfield_callback)` and replaces it with a no-op block referencing a dummy `tmp` class. Also includes a new test that remains (unlike attempts 1/2), but the source change is clearly incorrect.
+
+## Prompt Improvement Directions
+- **Do not delete reproduction tests in SWE-bench**: Update the agent instruction to *keep* added tests (or at minimum keep them until final submission). SWE-bench grading depends on tests being present to validate the fix.
+- **Require explicit verification that the callback affects generated fields**: Prompt the agent to assert not just that a callback value exists on the class, but that it is *invoked* (e.g., count calls or assert field attributes change) on both `MyForm` and `FactoryForm`.
+- **Mandate precedence/edge-case tests**:
+  - Base form defines `Meta.formfield_callback`; factory called with no callback → inherits Meta callback.
+  - Factory called with explicit `formfield_callback` → overrides Meta callback.
+  - Base form defines class attr `formfield_callback` but no Meta callback → clarify/lock expected behavior.
+  - Base form inherits Meta callback from parent form → still honored.
+- **Force pinpointing the override site**: Instruct agent to locate where `modelform_factory` sets `form_class_attrs` and confirm whether it injects `formfield_callback=None`, and to confirm metaclass reads `attrs["formfield_callback"]` preferentially.
+- **Broader test runs for regression**: Require running at least `python tests/runtests.py model_forms forms` (or other impacted suites) after the fix, not only a single module test.
+- **Patch completeness checklist**: Add a checklist to the prompt:
+  - “Does the fix prevent `None` from shadowing inherited callbacks?”
+  - “Does `fields_for_model(..., formfield_callback=...)` receive the expected callable in factory-produced forms?”
+  - “Do tests assert callback invocation count (e.g., 4 calls in the example) to prevent silent non-application?”

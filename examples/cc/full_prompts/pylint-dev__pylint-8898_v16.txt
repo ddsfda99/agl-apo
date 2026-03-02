@@ -1,0 +1,32 @@
+# Things Must Do
+- Write a reproduction test to reproduce the bugs and to verify the implementations later.
+- Make Sure you edit the source code to implement the task.
+- Make Sure your patch can be applied correctly.
+- Make Sure you use the reproduction test you have written before to verify your implementations. If failed, edit the code until you pass your reproduction test.
+# Efficiency Tip
+- When exploring, testing, or debugging, consider running multiple related commands in one response (e.g., ls + find + grep patterns, or run tests + check logs + verify config) for faster comprehensive analysis.
+
+# Learned Memory
+Task-Specific:
+- Preserve existing CLI semantics if the suite depends on them; a “bug fix” that changes `--bad-names-rgx`/`--bad-names-rgxs` behavior can instantly regress `tests/config/test_config.py::test_csv_regex_error`.
+- Prefer fixing the config-file parsing layer (TOML/INI) for this issue, not the global `regexp_csv` transformer, to avoid altering command-line behavior relied on by tests.
+- Add both unit and integration coverage while developing: (1) direct transformer behavior, and (2) a real `pyproject.toml`/INI run path via `Run`/`_Run`/`run_using_a_configuration_file` to ensure the exact crash path is covered.
+- If you do implement a smarter comma splitter, keep it conservative and explicit: ignore commas when escaped and when inside `[...]` / `(...)` / `{...}`; avoid ad-hoc stack logic and duplicated “csv” semantics.
+- Unquote config values consistently before splitting/compiling (mirroring other transformers); verify TOML delivers unquoted strings but INI might not.
+- Always test these scenarios explicitly: regex with `{m,n}`; multiple regexes separated by top-level commas; commas inside `[]`; escaped commas `\,`; invalid regex still errors with a useful message.
+- If the visible suite encodes buggy behavior as “expected” (like `test_csv_regex_error`), treat it as a hard constraint under “no existing test changes”: implement a compatibility path (e.g., config-only fix) or flag the conflict early.
+
+Repo-Specific:
+- `bad-names-rgxs` (plural) is the relevant option in this snapshot; option registration/recognition can be sensitive to how tests invoke pylint (checker init timing), so integration tests should use established helpers (`Run`, config-file helpers) rather than only calling transformers.
+- The regression came from changing `pylint/config/argument.py::_regexp_csv_transfomer` globally; many options use `regexp_csv`, so touching it has wide blast radius.
+- TOML parsing likely goes through `_parse_rich_type_value` (or similar) which may stringify lists using `",".join(...)`, reintroducing comma ambiguity; fixes may belong there to preserve TOML list semantics vs single-string semantics.
+- Baseline `pytest` collection may fail in this environment due to missing `git`/GitPython and `_distutils_hack` noise; run the maximal subset that reliably collects (at least `tests/config/test_config.py`) and don’t claim full-suite success unless collection succeeds.
+- The instruction to delete newly added tests is unusual; keep them during development, then remove at the end only if the task explicitly requires it (but recognize this can reduce proof in typical harnesses).
+
+General:
+- Don’t accept a fix that “solves the bug” but breaks any previously passing test; compatibility beats correctness under strict regression constraints.
+- Minimize scope: fix the narrowest layer that addresses the reported input format (here: config files) rather than changing shared parsing used by CLI and other options.
+- Validate end-to-end behavior, not just leaf functions; unit tests can pass while real configuration loading still fails.
+- When implementing parsers, avoid rolling partial grammars; factor helpers, document splitting rules, and create targeted tests for edge cases and error-message expectations.
+- If environment prevents full test runs, explicitly record baseline failures, then run all relevant subsets; never infer “no regressions” without running the tests that can actually detect them.
+- If constraints conflict (e.g., “don’t change tests” but suite expects buggy behavior), surface the conflict immediately and design a compatibility workaround instead of silently regressing.

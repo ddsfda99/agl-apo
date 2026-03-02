@@ -1,0 +1,92 @@
+You are given a code repository in the current directory (`/testbed`). You are an expert Python debugger working on Pylint.
+
+## Bug to fix
+**`bad-names-rgxs` mangles regular expressions with commas**.
+
+Pylint currently parses some “CSV-like” options by splitting on commas. For `bad-names-rgxs` (and related regex list options), this breaks valid regex patterns that legitimately contain commas, e.g. quantifiers like `{1,3}`. In TOML/INI config this can cause Pylint to crash during config parsing because the regex gets split into invalid fragments.
+
+Example config (from report):
+
+```ini
+[tool.pylint.basic]
+bad-name-rgxs = "(foo{1,3})"
+```
+
+Expected: any valid regex should be expressible; commas inside a regex should not corrupt parsing. At minimum, a valid regex like `(foo{1,3})` must not be split and must not crash.
+
+## What went wrong in previous attempts (learn from this)
+1. Some existing tests in the repo likely encode the old buggy behavior (e.g., expecting `(foo{1,3})` to raise). After fixing parsing, those tests must be updated to reflect the new correct behavior; otherwise the suite will fail.
+2. A unit test that only calls the transformer helper is not enough; you must add an **end-to-end test** that reproduces the crash path through config parsing (especially TOML / `pyproject.toml`), matching the real bug report.
+3. Do **not** delete your new tests at the end. Even if the original instructions suggested cleanup, for this task you must keep regression tests in the final state so the fix is validated.
+4. Avoid ad-hoc parsing that diverges from existing CSV semantics unless you test and preserve expected behaviors (whitespace, quoting, empty items, etc.). Prefer a minimal, well-specified improvement.
+
+## Task requirements (do these in order)
+### 1) Explore the repository
+- Identify where config options are defined and parsed.
+- Locate the current implementation of regex “CSV” parsing (the traceback suggests something like `_regexp_csv_transfomer` / `_csv_transformer` under `pylint/config/`).
+- Locate the relevant tests (likely under `tests/config/`).
+
+### 2) Run tests to establish a baseline
+- Run `pytest -q`.
+- Record **any** pre-existing failures and treat them as baseline (not caused by you).
+
+### 3) Add tests that reproduce the bug (must include end-to-end)
+Add tests that:
+1. **End-to-end TOML config parsing path**:
+   - Create a temporary `pyproject.toml` containing:
+     ```toml
+     [tool.pylint.basic]
+     bad-name-rgxs = "(foo{1,3})"
+     ```
+   - Run pylint (or invoke its configuration parsing entrypoints used by existing tests) in a way that exercises parsing of `pyproject.toml`.
+   - Assert **no crash** and assert the resulting option value corresponds to **exactly one** regex pattern, preserving the full string `(foo{1,3})` (i.e., it was not split on the comma).
+
+2. **Transformer behavior test** (if the suite already tests transformer helpers, extend it):
+   - Confirm `(foo{1,3})` is treated as a single pattern (no splitting).
+   - Confirm multiple patterns still split correctly when commas separate patterns (e.g., `"(foo{1,3}),bar"` should become two patterns: `(foo{1,3})` and `bar`).
+   - Ensure behavior remains consistent with existing `_csv_transformer` rules: whitespace trimming, ignoring empty entries (or not) should match existing behavior—mirror what current tests expect.
+
+3. **Update any existing tests that expected failure for `(foo{1,3})`**
+   - Search for tests like `test_csv_regex_error` (or similar) that previously expected a `SystemExit`/error for `(foo{1,3})`.
+   - Change them to use a *truly invalid regex* that remains invalid even without comma splitting, e.g. `"("` or `"(foo{1,3}"` (unterminated group/brace).
+   - Add a new assertion that `(foo{1,3})` is valid and does not error.
+
+### 4) Verify tests fail before the fix
+- Run `pytest -q` after adding/updating tests.
+- Confirm:
+  - Previously passing tests still pass.
+  - Your new end-to-end test(s) fail in a way that matches the crash/bug (e.g., config parsing crashes or option gets mangled).
+
+### 5) Find the root cause
+- Locate the code that splits regex options on commas.
+- Determine why commas inside `{}` (and potentially `[]` / `()` / escaped commas / quoted strings) are being treated as separators.
+
+### 6) Implement the fix (be careful and minimal)
+Goal: **Do not split on commas that are inside a regex construct where commas are valid**, especially `{m,n}` quantifiers.
+
+Implementation guidance:
+- The minimal safe improvement is: when splitting the “CSV” string, only treat commas as separators when they are at “top level”, not inside `{...}` quantifiers. Consider also parentheses/brackets if appropriate, but be cautious: regex syntax is complex; don’t over-engineer.
+- Preserve existing semantics for:
+  - trimming whitespace around items,
+  - behavior on empty items (match current transformer behavior),
+  - quoted items if already supported by the existing transformer (don’t break it).
+- If you add escaping support (e.g., `\,`) or quoted commas, ensure it’s explicitly tested and does not break existing behavior. If not already supported, don’t invent new syntax unless required—focus on fixing `{1,3}` first.
+
+### 7) Run the full test suite after the fix
+- Run `pytest -q` again.
+- Confirm:
+  - All tests pass (except any baseline pre-existing failures you recorded in step 2).
+  - Your new regression tests now pass.
+
+### 8) Final constraints
+- **Do not delete the tests you added.** Keep them as regression coverage.
+- Do not commit changes.
+
+## Deliverables
+- Code fix in the appropriate config/argument parsing module(s).
+- Updated/added tests:
+  - at least one **end-to-end** test for `pyproject.toml` parsing of `bad-name-rgxs` with `(foo{1,3})`,
+  - updated existing tests to not encode the old buggy behavior,
+  - targeted unit tests for the split behavior as needed.
+
+Proceed carefully: fix the parsing, update any now-outdated expectations, and ensure robust test coverage for the real-world config path.

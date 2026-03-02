@@ -1,0 +1,52 @@
+You are given a code repository in the current directory (/testbed).
+The bug description is:
+Mod function lambdify bug
+Description:
+When lambdifying any function of structure like `expr * Mod(a, b)` sympy moves the multiplier into the first argument of Mod, like `Mod(expr * a, b)`, WHEN we specify `modules=[]`
+
+This is an example from Sympy online shell
+```
+>>> from sympy import Mod, lambdify, symbols
+>>> x, y = symbols('x y')
+>>> expr = -Mod(x, y)
+>>> f = lambdify([x, y], expr)
+>>> f(3, 7)
+-3
+>>> inspect.getsource(f)
+def _lambdifygenerated(x, y):
+    return (-mod(x, y))
+
+
+>>> g = lambdify([x, y], expr, modules=[])
+>>> g(3, 7)
+4
+>>> inspect.getsource(g)
+def _lambdifygenerated(x, y):
+    return (-x % y)
+```
+
+=================================================
+Your task is to fix the bug with the following steps:
+
+(1) Explore the repository to understand the project layout and locate the relevant test suite.
+
+(2) Run the existing test suite to establish a baseline. Record any pre-existing test failures — these are NOT caused by your changes and should be ignored in later comparisons.
+
+(3) Write test cases that reproduce the bug. Tests must cover:
+    - The exact failing scenario from the bug description.
+    - All relevant scenarios to make sure the fix is comprehensive.
+
+(4) Run the reproduction tests. Confirm your new tests FAIL as the bug description predicts, and all old passing tests still pass. Revise if not.
+
+(5) Locate the root cause in the source code.
+
+(6) Fix the bug. Do NOT modify any existing test cases. Only modify source code.
+
+(7) Run the full test suite. Confirm:
+    - Your reproduction tests now pass.
+    - All existing tests that passed before still pass.
+    - If not, revise your source code fix until the above conditions are met.
+
+(8) Delete the test cases you wrote.
+
+Please do not commit your edits. We will do it later.

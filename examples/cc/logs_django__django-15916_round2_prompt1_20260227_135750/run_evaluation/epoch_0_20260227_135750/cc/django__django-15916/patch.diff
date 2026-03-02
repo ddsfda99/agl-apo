@@ -1,0 +1,159 @@
+diff --git a/django/forms/models.py b/django/forms/models.py
+index 192d9fad94..0c2d5262d5 100644
+--- a/django/forms/models.py
++++ b/django/forms/models.py
+@@ -630,13 +630,26 @@ def modelform_factory(
+     # creating needs to inherit from the parent's inner meta.
+     bases = (form.Meta,) if hasattr(form, "Meta") else ()
+     Meta = type("Meta", bases, attrs)
+-    if formfield_callback:
++    if formfield_callback is not None:
+         Meta.formfield_callback = staticmethod(formfield_callback)
+     # Give this new form class a reasonable name.
+     class_name = model.__name__ + "Form"
+ 
+     # Class attributes for the new form class.
+-    form_class_attrs = {"Meta": Meta, "formfield_callback": formfield_callback}
++    form_class_attrs = {"Meta": Meta}
++    if formfield_callback is not None:
++        # Explicit factory argument should override any base form callbacks.
++        form_class_attrs["formfield_callback"] = formfield_callback
++    else:
++        # Respect callbacks defined on the base form when no explicit argument
++        # is provided. If the base form defines a callback on its Meta, the
++        # metaclass will pick it up via inheritance. If not, but the base form
++        # has a class attribute `formfield_callback`, propagate it so the
++        # metaclass uses it for field construction.
++        base_meta = getattr(form, "Meta", None)
++        if not (hasattr(base_meta, "formfield_callback") and base_meta.formfield_callback is not None):
++            if hasattr(form, "formfield_callback") and form.formfield_callback is not None:
++                form_class_attrs["formfield_callback"] = form.formfield_callback
+ 
+     if getattr(Meta, "fields", None) is None and getattr(Meta, "exclude", None) is None:
+         raise ImproperlyConfigured(
+diff --git a/tests/model_forms/tests.py b/tests/model_forms/tests.py
+index d2ce3348c5..81c86ef29b 100644
+--- a/tests/model_forms/tests.py
++++ b/tests/model_forms/tests.py
+@@ -3497,6 +3497,121 @@ class FormFieldCallbackTests(SimpleTestCase):
+             )
+ 
+ 
++class ModelFormFactoryFormfieldCallbackTests(SimpleTestCase):
++    def test_factory_respects_meta_formfield_callback(self):
++        def all_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = True
++            return formfield
++
++        class BaseForm(forms.ModelForm):
++            class Meta:
++                model = NullableUniqueCharFieldModel
++                fields = ["email", "slug"]
++                formfield_callback = all_required
++
++        # Factory should use the Meta.formfield_callback when no explicit
++        # formfield_callback is provided.
++        FactoryForm = modelform_factory(NullableUniqueCharFieldModel, form=BaseForm)
++        self.assertTrue(FactoryForm.base_fields["email"].required)
++        self.assertTrue(FactoryForm.base_fields["slug"].required)
++        # And BaseForm itself should also have required fields.
++        self.assertTrue(BaseForm.base_fields["email"].required)
++        self.assertTrue(BaseForm.base_fields["slug"].required)
++
++    def test_explicit_factory_callback_overrides_base_meta(self):
++        def all_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = True
++            return formfield
++
++        def all_not_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = False
++            return formfield
++
++        class BaseForm(forms.ModelForm):
++            class Meta:
++                model = Person
++                fields = ["name"]
++                formfield_callback = all_required
++
++        FactoryForm = modelform_factory(
++            Person, form=BaseForm, formfield_callback=all_not_required
++        )
++        # Explicit factory arg should win over BaseForm.Meta.formfield_callback.
++        self.assertFalse(FactoryForm.base_fields["name"].required)
++        # BaseForm itself still uses its own Meta callback.
++        self.assertTrue(BaseForm.base_fields["name"].required)
++
++    def test_factory_respects_base_class_attribute_callback_when_no_meta(self):
++        def all_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = True
++            return formfield
++
++        class AttrForm(forms.ModelForm):
++            formfield_callback = all_required
++
++            class Meta:
++                model = NullableUniqueCharFieldModel
++                fields = ["email"]
++
++        FactoryForm = modelform_factory(NullableUniqueCharFieldModel, form=AttrForm)
++        # No explicit factory arg provided and Meta has no callback;
++        # factory should respect the base class attribute.
++        self.assertTrue(FactoryForm.base_fields["email"].required)
++
++    def test_precedence_meta_over_class_attribute_in_factory_when_both_defined(self):
++        def all_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = True
++            return formfield
++
++        def all_not_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = False
++            return formfield
++
++        class BothForm(forms.ModelForm):
++            # Class attribute sets not-required.
++            formfield_callback = all_not_required
++
++            class Meta:
++                model = Person
++                fields = ["name"]
++                # Meta sets required.
++                formfield_callback = all_required
++
++        # For the base form itself, ModelFormMetaclass prefers the class
++        # attribute over Meta.formfield_callback.
++        self.assertFalse(BothForm.base_fields["name"].required)
++
++        # For the factory-generated subclass, when no explicit arg is given,
++        # the factory should prefer the base Meta callback over the base class
++        # attribute (i.e., Meta wins in derived class).
++        FactoryForm = modelform_factory(Person, form=BothForm)
++        self.assertTrue(FactoryForm.base_fields["name"].required)
++
++    def test_factory_respects_meta_callback_through_inheritance(self):
++        def all_required(field, **kwargs):
++            formfield = field.formfield(**kwargs)
++            formfield.required = True
++            return formfield
++
++        class Base(forms.ModelForm):
++            class Meta:
++                model = NullableUniqueCharFieldModel
++                fields = ["email"]
++                formfield_callback = all_required
++
++        class Child(Base):
++            pass
++
++        FactoryForm = modelform_factory(NullableUniqueCharFieldModel, form=Child)
++        self.assertTrue(FactoryForm.base_fields["email"].required)
++
++
+ class LocalizedModelFormTest(TestCase):
+     def test_model_form_applies_localize_to_some_fields(self):
+         class PartiallyLocalizedTripleForm(forms.ModelForm):

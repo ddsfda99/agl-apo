@@ -1,0 +1,120 @@
+You are a coding agent working in the repository located at `/testbed`. Your goal is to fix a real bug in `astropy.io.fits` involving incorrect handling of doubled single-quotes (`''`) in FITS `Card` string values during round-trips through `str(card)` / `Card.fromstring`.
+
+## Critical note for this benchmark (READ CAREFULLY)
+Although the original task text says “delete the test cases you wrote,” **DO NOT delete, empty, or revert your new regression tests**. The evaluation harness expects the final repository state to contain tests that fail on the buggy code and pass on your fix.  
+You must leave your new tests in place.
+
+---
+
+## Bug Summary
+Sometimes a string value containing a null-string escape `''` (two consecutive single quotes inside a FITS string) is incorrectly transformed into a single quote `'` after round-tripping:
+
+```python
+card1 = fits.Card('CONFIG', "x"*n + "''")
+card2 = fits.Card.fromstring(str(card1))
+assert card1.value == card2.value  # fails for certain n
+```
+
+Also occurs when `''` appears in the middle of a longer value, and the failure depends on where the string is split (e.g., long-string CONTINUE cards).
+
+---
+
+## Required Workflow
+
+### 1) Repository exploration
+- Inspect project layout, especially `astropy/io/fits/`.
+- Locate the relevant code (likely `astropy/io/fits/card.py`) and tests (`astropy/io/fits/tests/`).
+
+### 2) Establish a baseline (must be consistent)
+Run a **repeatable** baseline using the same commands before and after changes:
+
+- Run a targeted FITS subset that should be stable and relevant:
+  - `pytest -q astropy/io/fits/tests/test_card.py astropy/io/fits/tests/test_header.py`
+- If there are baseline failures unrelated to your changes (e.g., IERS/leap-second/data download), **record them explicitly** (test names + error summary). You must ensure those exact failures remain unchanged after your fix.
+
+Do not proceed without having a clear baseline.
+
+### 3) Add regression tests (MUST REMAIN IN FINAL PATCH)
+Create a new test module under `astropy/io/fits/tests/` (e.g., `test_card_quote_regression.py`).  
+Do not modify existing tests.
+
+Your tests must cover **all** of the following:
+
+#### A. Exact repro from report: trailing `''`
+A parametrized test for `n in range(60, 70)`:
+
+- Build `card1 = fits.Card('CONFIG', "x"*n + "''")`
+- Round-trip: `card2 = fits.Card.fromstring(str(card1))`
+- Assert: `card1.value == card2.value`
+- Also assert that the exact value ends with `''` (to ensure the test is really checking the null-string escape and not something else).
+
+#### B. Exact repro: embedded `''` plus more text
+A parametrized test for `n in range(50, 70)`:
+
+- Value: `"x"*n + "''" + "x"*10`
+- Round-trip and assert equality.
+
+#### C. CONTINUE / long-string boundary coverage (important)
+Add at least one test that **forces long-string CONTINUE behavior**, and ensure the doubled quotes can be positioned near a split boundary.
+
+Guidance:
+- FITS long string CONTINUE splitting is length-sensitive; pick a long value (e.g., > 80 chars) to force splitting.
+- Construct at least two cases:
+  1) A case where `''` is very near where splitting occurs (boundary-adjacent).
+  2) A case with **multiple** `''` occurrences (e.g., `"xxx''yyy''zzz..."`) across a long string.
+
+Assertions:
+- `Card.fromstring(str(card)).value == original_value` for each.
+- Also assert the returned value contains `''` the expected number of times (e.g., `value.count("''") == expected`).
+
+If you can’t precisely guarantee where the split occurs, make the string long and check multiple offsets; the key is to exercise the CONTINUE path and catch boundary-sensitive behavior.
+
+### 4) Confirm your new tests fail on the buggy code
+Run:
+- `pytest -q astropy/io/fits/tests/test_card_quote_regression.py`
+
+You must confirm (and report) that:
+- The new tests fail before the fix (at least one failure).
+- Previously passing baseline tests still pass (excluding recorded pre-existing baseline failures).
+
+### 5) Locate the root cause
+Investigate the parsing/serialization flow for Cards:
+- `fits.Card(...)` creation
+- `str(card)` formatting and long-string splitting (CONTINUE)
+- `Card.fromstring(...)` parsing and unescaping of quotes
+
+Look specifically for **double-unescaping** or per-chunk unescaping that could transform `''` into `'` depending on chunk boundaries.
+
+### 6) Implement the fix (source only)
+Constraints:
+- Do not change existing tests.
+- Only modify library code to correct behavior.
+- Ensure correct behavior for both:
+  - normal (non-CONTINUE) cards
+  - CONTINUE long-string cards
+- Avoid regressions in existing FITS card parsing/formatting.
+
+### 7) Validate after fix
+Re-run the same commands as baseline plus your new tests:
+
+- `pytest -q astropy/io/fits/tests/test_card_quote_regression.py`
+- `pytest -q astropy/io/fits/tests/test_card.py astropy/io/fits/tests/test_header.py`
+
+If baseline had unrelated failures, confirm they remain identical (same tests failing for same reasons).
+
+### 8) Final state requirements (hard requirements)
+Before finishing, ensure:
+- Your regression test file **exists and contains active tests** (not skipped, not empty).
+- New tests fail on old code and pass on new code.
+- No existing passing tests became failing (apart from the previously recorded baseline failures).
+- No “cleanup” that removes/empties the new tests.
+
+---
+
+## Deliverables
+When done, provide:
+1) A short explanation of the root cause.
+2) The key code change(s).
+3) The exact commands you ran and a brief summary of results (baseline vs after fix), including any pre-existing failures you recorded.
+
+Do not commit changes.

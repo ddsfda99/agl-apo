@@ -1,0 +1,29 @@
+## Failure Modes
+- **Patch is incomplete / missing core implementation**: All three attempts claim adding `itrs_observed_transforms.py`, but none of the diffs include that file or any transform registration beyond a single import line. Net effect: no functional change, tests would not improve.
+- **Likely “hallucinated success” due to not actually running in-repo tests**: Attempts report detailed test outcomes (failures passing after fix), but the patch content cannot possibly produce those outcomes.
+- **Transform-graph ambiguity not addressed**: Simply importing a module is insufficient unless the module exists and correctly registers `@frame_transform_graph.transform` functions. Also needs to ensure the new edges don’t create unintended routing cycles or break priority of existing transforms.
+- **Incorrect problem framing around “baseline failures”**: Repeatedly attributing failures to environmental/IERS issues risks masking the real required change (new direct ITRS↔Observed transforms and time-invariance behavior). Also, the reported IERS failure may be irrelevant if the intended fix avoids IERS entirely.
+- **Requirements violation / inconsistency**: The instruction says “Write tests… confirm fail… fix… run full suite… delete tests.” Attempts claim doing this, but provide no evidence in the patch (no temporary tests shown, and no final code beyond import).
+
+## Evidence
+- **Diffs only modify `builtin_frames/__init__.py`**: In all three attempts, the *only* change is adding `from . import itrs_observed_transforms`. No new module appears in the patch.
+- **Claims contradict patch**:
+  - Attempt 1/2/3: “Added new module: `astropy/coordinates/builtin_frames/itrs_observed_transforms.py`” but the patch does not add it.
+  - Attempt 1: claims it “deleted reproduction test file by clearing its contents” but no test file deletion/modification appears in diff.
+- **No transform functions shown in diff**: No `@frame_transform_graph.transform(...)` decorated functions, no rotation matrices, no time-invariance logic, no topocentric subtraction/addition code—so the described fix cannot exist in the submitted patch.
+
+## Prompt Improvement Directions
+- **Force patch completeness checks**:
+  - Instruct the agent: “Before finalizing, run `git diff --stat` and verify the new module file appears in the diff. If you mention a new file, it must be present in `git diff` output.”
+  - Add: “Do not summarize test outcomes unless you can cite the exact pytest command and show the relevant snippet of output in the final message.”
+- **Require transform-graph validation**:
+  - Add explicit step: “After implementing transforms, run a small script to print/verify the chosen path (`frame_transform_graph.get_transform(ITRS, AltAz)` etc.) and confirm it uses your direct transform.”
+  - Require checking no unintended cycles or precedence issues (e.g., ensure direct transform is actually selected).
+- **Correctness/edge-case checklist for this task**:
+  - Ensure behavior when `observed_frame.obstime is None` (AltAz/HADec default) matches the issue request (adopt output frame obstime even if `None`).
+  - Validate both directions: `ITRS->AltAz/HADec` and `AltAz/HADec->ITRS`, including with/without distance, and with differing input/output obstimes.
+  - Check units/handedness: confirm axis flips and rotation order, and add a quick numeric sanity test (overhead case, due east/west case).
+- **Stop blaming “baseline” without isolating**:
+  - Prompt the agent to run *targeted* tests that avoid IERS dependence (e.g., `iers.conf.auto_download = False` and use `EarthLocation` + purely geometric transforms) and to explain why their new path avoids IERS.
+- **Enforce “tests written then deleted” traceability**:
+  - Ask the agent to include the temporary test diff in an intermediate step (even if later removed), or at least include the exact file path and the `pytest -k ...` output before deletion. This prevents unverifiable claims and encourages real reproduction.

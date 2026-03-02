@@ -14,7 +14,7 @@ from utils.type import AgentResult
 
 
 class ClaudeController:
-    system_prompt = """You are an expert software engineer solving swebench bug fixing tasks."""
+    system_prompt = """You are an expert software engineer solving SWE-bench bug-fixing tasks. All requirements specified in the task description must be fully implemented in the current patch. No requirement may be postponed, deferred, or left for future implementation — even if the description mentions “in the future”."""
     _instructions_path = "/testbed/.claude"
     _telemetry_error_markers = (
         "event logging",
@@ -33,7 +33,8 @@ class ClaudeController:
         self.allowed_tools: str = ",".join([f'"{i}"' for i in tools])
         self.disallowed_tools: str = ",".join([f'"{i}"' for i in (all_tools - tools)])
         self.user_prompt: str = user_prompt
-        self._instructions_file = Path("CLAUDE.md")
+        # CLAUDE.md logic disabled:
+        # self._instructions_file = Path("CLAUDE.md")
         return
 
     def init_container(self, image: str, instance: dict) -> Runtime:
@@ -87,9 +88,10 @@ class ClaudeController:
         setting_cmd = "cat > /testbed/.claude/settings.json <<'CC_SETTING'\n" + setting + "\nCC_SETTING\n"
         self.container.send_command(setting_cmd)
 
+        # CLAUDE.md logic disabled:
         # Copy CLAUDE.md to /testbed
-        instructions_dir = self._instructions_path
-        self.container.copy_to_container(str(self._instructions_file), instructions_dir)
+        # instructions_dir = self._instructions_path
+        # self.container.copy_to_container(str(self._instructions_file), instructions_dir)
 
         # with open("utils/handle_hook.template.sh") as f:
         #     handler = f.read()
@@ -269,20 +271,21 @@ fi
             traj = self._run_cli(instance, max_step, timelimit)
         else:
             raise ValueError(f"wrong run_method {run_method}, run_method should be in [python, cli]")
-        try:
-            claude_md_path = "/testbed/.claude/CLAUDE.md"
-            claude_cmd = f"cat {claude_md_path}"
-            claude_md_output = self.container.send_command(claude_cmd).output
-            claude_md = claude_md_output
-            lines = claude_md_output.splitlines()
-            if lines and lines[0].strip() == claude_cmd:
-                claude_md = "\n".join(lines[1:])
-                if claude_md_output.endswith("\n"):
-                    claude_md += "\n"
-            Path("CLAUDE.md").write_text(claude_md, encoding="utf-8")
-            logger(self.run_id, instance["instance_id"], f"Pulled {claude_md_path} to CLAUDE.md")
-        except Exception as exc:
-            logger(self.run_id, instance["instance_id"], f"Failed to pull CLAUDE.md: {exc}")
+        # CLAUDE.md logic disabled:
+        # try:
+        #     claude_md_path = "/testbed/.claude/CLAUDE.md"
+        #     claude_cmd = f"cat {claude_md_path}"
+        #     claude_md_output = self.container.send_command(claude_cmd).output
+        #     claude_md = claude_md_output
+        #     lines = claude_md_output.splitlines()
+        #     if lines and lines[0].strip() == claude_cmd:
+        #         claude_md = "\n".join(lines[1:])
+        #         if claude_md_output.endswith("\n"):
+        #             claude_md += "\n"
+        #     Path("CLAUDE.md").write_text(claude_md, encoding="utf-8")
+        #     logger(self.run_id, instance["instance_id"], f"Pulled {claude_md_path} to CLAUDE.md")
+        # except Exception as exc:
+        #     logger(self.run_id, instance["instance_id"], f"Failed to pull CLAUDE.md: {exc}")
         try:
             traj_dir = Path.cwd() / "traj"
             traj_dir.mkdir(parents=True, exist_ok=True)

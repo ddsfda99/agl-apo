@@ -1,0 +1,45 @@
+diff --git a/sympy/matrices/expressions/blockmatrix.py b/sympy/matrices/expressions/blockmatrix.py
+index 95302a05ca..4845bf0dd5 100644
+--- a/sympy/matrices/expressions/blockmatrix.py
++++ b/sympy/matrices/expressions/blockmatrix.py
+@@ -164,7 +164,29 @@ def structurally_equal(self, other):
+     def _blockmul(self, other):
+         if (isinstance(other, BlockMatrix) and
+                 self.colblocksizes == other.rowblocksizes):
+-            return BlockMatrix(self.blocks*other.blocks)
++            # Multiply block matrices. The naive multiplication using
++            # explicit Matrix multiplication can yield scalar Zero entries
++            # for zero blocks, which then breaks subsequent block operations
++            # that expect MatrixExpr entries with .rows/.cols.
++            BB = self.blocks * other.blocks
++            from sympy.matrices.expressions.matexpr import GenericZeroMatrix
++            data = []
++            for i in range(BB.rows):
++                row = []
++                # expected row size for blocks in this row
++                rsz = self.blocks[i, 0].rows
++                for j in range(BB.cols):
++                    entry = BB[i, j]
++                    # expected col size for blocks in this column
++                    csz = other.blocks[0, j].cols
++                    if isinstance(entry, GenericZeroMatrix) or (
++                        not getattr(entry, 'is_Matrix', False) and getattr(entry, 'is_zero', False)
++                    ):
++                        row.append(ZeroMatrix(rsz, csz))
++                    else:
++                        row.append(entry)
++                data.append(row)
++            return BlockMatrix(data)
+ 
+         return self * other
+ 
+diff --git a/sympy/matrices/expressions/tests/test_blockmatrix.py b/sympy/matrices/expressions/tests/test_blockmatrix.py
+index 1e1033affc..a1ccc419fb 100644
+--- a/sympy/matrices/expressions/tests/test_blockmatrix.py
++++ b/sympy/matrices/expressions/tests/test_blockmatrix.py
+@@ -222,3 +222,5 @@ def test_block_collapse_type():
+     assert block_collapse(Transpose(bm1)).__class__ == BlockDiagMatrix
+     assert bc_transpose(Transpose(bm1)).__class__ == BlockDiagMatrix
+     assert bc_inverse(Inverse(bm1)).__class__ == BlockDiagMatrix
++
++

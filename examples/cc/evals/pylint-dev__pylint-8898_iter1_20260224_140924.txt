@@ -1,0 +1,29 @@
+## Failure Modes
+- **Test suite regression not addressed**: The fix changes behavior so that `(foo{1,3})` is treated as a single valid regex instead of being split, which invalidates an existing test (`test_csv_regex_error`) that previously relied on the buggy split/compile failure. Leaving this test unchanged causes the suite to fail.
+- **Attempt 1 violates SWE-bench expectations by deleting the reproducer test**: Removing the new test means the final patch set has no regression coverage for the reported bug; SWE-bench evaluation expects added tests to remain.
+- **Inconsistent / incomplete handling of “CSV” semantics**: Custom splitters attempt to be regex-aware but may diverge from existing `_csv_transformer` behavior (e.g., handling of quoted values, empty entries, whitespace-only entries). This risks subtle config parsing regressions across other options using `regexp_csv`.
+- **Attempt 3 is incomplete / unverified**: “No files found” indicates the run didn’t validate anything; patch adds logic but no tests and no confirmation against existing failures.
+
+## Evidence
+- Attempt 2 shows the concrete failing test after applying the fix:  
+  `FAILED tests/config/test_config.py::test_csv_regex_error - Failed: DID NOT RAISE <class 'SystemExit'>`  
+  This directly reflects the behavioral change: `(foo{1,3})` no longer crashes because it’s no longer split at the comma.
+- Attempt 1 explicitly notes an existing test expecting the old behavior and states it was not updated:  
+  “There is an existing test … test_csv_regex_error … expects an error for --bad-names-rgx=(foo{1,3}). … After this fix … would need to be revised … I did not alter that file…”
+- Attempt 1 also states it **deleted** the reproduction test after verification, leaving no permanent coverage:  
+  “Removed tests/bugfix/test_bad_names_rgxs_commas.py after verifying the fix.”
+- Attempts 1/3 introduce a bespoke comma-splitting parser in `_regexp_csv_transfomer`, bypassing `_csv_transformer`; attempt 2 adds a new TOML test but does not reconcile the pre-existing CLI-based test failure.
+
+## Prompt Improvement Directions
+- **Require keeping the new regression test**: Explicitly instruct the agent that step (8) (“Delete the test cases”) must be ignored for SWE-bench; tests must remain in the final diff to prevent regressions and satisfy evaluation.
+- **Force full-suite green as a hard gate**: Add an instruction: “Your final output must have `pytest -q` passing; if a pre-existing test fails due to intentional behavior change, update the test to reflect the corrected behavior.”
+- **Guide updating existing tests when bug fixes change expectations**: Tell the agent to search for tests referencing the buggy behavior (e.g., `test_csv_regex_error`) and update them. In this case: change the invalid-regex test to use a *truly invalid* pattern (no comma-dependent mangling), and add a new test asserting commas inside quantifiers/brackets/groups don’t split.
+- **Validation checklist for parsing edge cases** (make the agent implement/verify):
+  - TOML and CLI paths both covered (`pyproject.toml` + `--bad-names-rgxs=...`).
+  - Multiple patterns still split at top-level commas: `"(foo{1,3}),bar" -> 2 patterns`.
+  - Quoted patterns and whitespace trimming preserved.
+  - Backslash-escaped commas behavior documented/confirmed (either supported or explicitly not).
+- **Patch completeness guardrails**: Instruct to run and report:
+  - `pytest -q tests/config/test_config.py` (at minimum)
+  - a targeted test for `bad-names-rgxs = "(foo{1,3})"` that asserts **no crash** and **single compiled pattern**
+  - confirm no other `regexp_csv` options are broken (spot-check one more option using the same type).

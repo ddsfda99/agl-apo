@@ -1,0 +1,150 @@
+The bug description is:
+Allow ModelForm meta to specify formfield_callback.
+Description
+	 
+		(last modified by Klaas-Jan Gorter)
+	 
+The function django.forms.modelform_factory returns a form class based on the class it recieves as form argument. As an additional argument it accepts a formfield_callback function. When no callback is provided the class uses no callback instead of the formfield_callback of the base form provided.
+Example:
+from django import forms
+form django.db import models
+class MyModel(forms.Model):
+	active = models.BooleanField()
+	name = models.CharField(max_length=64, blank=True, null=True)
+	
+def all_required(field, **kwargs):
+	formfield = field.formfield(**kwargs)
+	formfield.required = True
+	return formfield
+class MyForm(forms.ModelForm):
+	formfield_callback = all_required
+	class Meta:
+		model = MyModel
+		formfield_callback = all_required
+		fields = ['active', 'name']
+FactoryForm = forms.modelform_factory(MyModel, form=MyForm)
+The expected behavior would be that the FactoryForm uses the formfield_callback specified in the Meta attribute of MyForm and that therefore the fields would be required in both the FactoryForm and MyForm. However, under the current behavior of modelform_factory the formfield_callback is overwritten (with the default argument None) before the new class is constructed and in FactoryForm the fields are not required.
+I believe this is a bug, because this behavior has been observed before in Ticket #18573 in Django 1.3. The test that was proposed there was incorrect, because under the expected behavior the callback should have been called four times not two times as was asserted. (I believe this test has been removed from version 2, because I find no equivalent test in tests/model_formsets_regress.)
+
+
+You are an expert Django contributor working in a code repository located at `/testbed`.
+
+## Goal
+Fix a Django bug: **`modelform_factory()` should honor `formfield_callback` defined on the base `ModelForm` (especially in `form.Meta.formfield_callback`) when the factory itself is called with `formfield_callback=None` / not provided.** Currently, the factory-created form loses the callback because it gets overwritten with `None` before class construction.
+
+This must work for the exact scenario described and for related precedence/inheritance cases.
+
+---
+
+## Critical SWE-bench Instruction
+**Do NOT delete the tests you add.**  
+The original prompt asked to delete reproduction tests, but for SWE-bench-style evaluation the added tests must remain to validate the fix.
+
+---
+
+## Required Workflow
+
+### (1) Repository exploration
+- Identify where Django’s `modelform_factory` and `ModelForm` metaclass/options are implemented (likely in `django/forms/models.py` or similar).
+- Identify the correct test location for model form behavior (likely under `tests/model_forms/`).
+
+### (2) Establish baseline
+- Run the relevant existing tests first and record any pre-existing failures (ignore them later).
+- At minimum run:
+  - `python tests/runtests.py model_forms`
+- If feasible, also run broader suites affected by forms/model forms:
+  - `python tests/runtests.py forms model_forms`
+
+### (3) Add regression tests (keep them)
+Add new tests that:
+1) Reproduce the exact bug report.
+2) Cover precedence and inheritance so the fix is correct and stable.
+
+#### Test requirements (must include all)
+Create tests that verify **callback is actually applied during field generation**, not just “the attribute exists”. Use one (or both) strategies:
+- Make the callback mutate the generated form field (e.g., set `required=True`), then assert requiredness.
+- Also count invocations to ensure the callback is invoked the expected number of times (e.g., 2 fields => 2 calls per form; MyForm + FactoryForm => 4 calls total).
+
+#### Scenarios to cover
+A. **Bug scenario (core regression)**
+- Base form `MyForm` defines `Meta.formfield_callback = all_required`
+- Call `modelform_factory(MyModel, form=MyForm)` **without** passing `formfield_callback`
+- Assert:
+  - FactoryForm fields reflect callback (e.g., both fields `required=True` even if model allows blank/null)
+  - Callback invocation count matches expected (two fields in `MyForm` + two in `FactoryForm` = 4 total), or otherwise prove callback ran for FactoryForm.
+
+B. **Explicit factory arg overrides Meta**
+- Same setup, but call `modelform_factory(..., form=MyForm, formfield_callback=some_other_callback)`
+- Assert FactoryForm uses the explicit callback (not Meta’s), e.g., one callback makes required=True, the other required=False, and confirm FactoryForm matches the explicit one.
+- Confirm callback count reflects which callable ran.
+
+C. **Class attribute vs Meta precedence (lock expected behavior)**
+- Base form sets `formfield_callback` at the class level and/or in `Meta`. Django historically prefers `Meta` options; confirm actual intended precedence by reading existing Django conventions in the codebase and enforce it in tests.
+- At minimum, add a test for:
+  - `formfield_callback` defined on the form class but not in `Meta`, and no factory arg: FactoryForm should behave consistently with how ModelForm itself behaves in this repo/version. (Write the test to match the intended/observed convention; do not guess—inspect current `ModelFormOptions` behavior.)
+
+D. **Inheritance edge case**
+- A parent `ModelForm` defines `Meta.formfield_callback`
+- A subclass does not redefine it
+- `modelform_factory(..., form=SubClass)` should still honor the inherited callback when no factory callback is provided.
+
+### (4) Confirm tests fail before fix
+- Run the tests you added and confirm they fail under current behavior, demonstrating the bug.
+- Ensure existing passing tests still pass (except any pre-existing failures from step 2).
+
+---
+
+## (5) Root cause analysis (must be explicit in your reasoning)
+Locate exactly where the callback is lost. Specifically check:
+- `django.forms.modelform_factory()` implementation:
+  - Does it build `form_class_attrs` that includes `"formfield_callback": formfield_callback` even when `formfield_callback` is `None`?
+  - Does that `None` shadow the base form’s callback via metaclass attribute lookup?
+- `ModelFormMetaclass` / `ModelFormOptions`:
+  - Where is the callback resolved from `attrs`, `Meta`, and base classes?
+  - Where is `fields_for_model(..., formfield_callback=...)` called, and what value is passed?
+
+**You must ensure that whatever callback is “effective” is the one passed into `fields_for_model()` during class creation.** Setting an attribute after class creation is not sufficient.
+
+---
+
+## (6) Implement the fix (source only)
+- Do not modify any existing tests besides adding new ones.
+- Prefer the minimal, correct fix that:
+  - Prevents `None` from being injected in a way that shadows inherited callbacks.
+  - Preserves precedence rules:
+    1. `modelform_factory(..., formfield_callback=explicit_callable)` should win.
+    2. Otherwise, base `form.Meta.formfield_callback` should be honored.
+    3. Otherwise, fallback to class attribute or default behavior as per current Django conventions in this repo.
+- Use a simple and robust approach:
+  - In `modelform_factory`, only include `formfield_callback` in attrs when it is not `None`, OR
+  - Adjust the metaclass/options resolution to treat `None` as “not provided” (but be careful not to break explicit “disable callback” semantics if that exists—check existing API expectations in this codebase).
+
+---
+
+## (7) Verify with full test runs
+- Re-run:
+  - `python tests/runtests.py model_forms`
+  - And ideally `python tests/runtests.py forms model_forms`
+- Confirm:
+  - Your new tests pass.
+  - All previously passing tests still pass.
+
+---
+
+## (8) Deliverables
+- Keep the added tests in the repo.
+- Provide a short summary in your final output:
+  - What was the root cause (exact code path).
+  - What change you made and why it fixes the issue.
+  - Which tests you added and what they cover.
+
+---
+
+## Checklist (use this to self-verify before finalizing)
+- [ ] Factory-created form calls the callback when base form provides it via `Meta`.
+- [ ] Callback is passed into `fields_for_model()` for FactoryForm.
+- [ ] `None` no longer shadows inherited callback.
+- [ ] Explicit `modelform_factory(..., formfield_callback=...)` overrides base form.
+- [ ] Inheritance scenario works.
+- [ ] Tests prove callback invocation and/or effect on generated fields.
+- [ ] Added tests are NOT deleted.

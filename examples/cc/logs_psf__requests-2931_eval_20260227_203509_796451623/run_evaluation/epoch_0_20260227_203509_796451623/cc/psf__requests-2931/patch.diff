@@ -1,0 +1,48 @@
+diff --git a/requests/models.py b/requests/models.py
+index 9c624d3..88b5592 100644
+--- a/requests/models.py
++++ b/requests/models.py
+@@ -72,16 +72,31 @@ class RequestEncodingMixin(object):
+         return ''.join(url)
+ 
+     @staticmethod
+-    def _encode_params(data):
++    def _encode_params(data, is_body=False):
+         """Encode parameters in a piece of data.
+ 
+         Will successfully encode parameters when passed as a dict or a list of
+         2-tuples. Order is retained if data is a list of 2-tuples but arbitrary
+         if parameters are supplied as a dict.
++
++        If ``data`` is bytes and represents a request body (is_body=True), it
++        will be returned unchanged to allow sending arbitrary binary payloads.
++        Otherwise, bytes will be decoded to text for use in URLs.
+         """
+ 
+-        if isinstance(data, (str, bytes)):
++        if isinstance(data, str):
+             return to_native_string(data)
++        elif isinstance(data, bytes):
++            # For request bodies, preserve raw bytes to avoid decoding errors
++            # with non-ASCII payloads.
++            if is_body:
++                return data
++            # For URL parameters, decode bytes to text (utf-8) for safe joining.
++            # If decoding fails, fall back to ASCII native handling.
++            try:
++                return data.decode('utf-8')
++            except UnicodeDecodeError:
++                return to_native_string(data)
+         elif hasattr(data, 'read'):
+             return data
+         elif hasattr(data, '__iter__'):
+@@ -444,7 +459,8 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+                 (body, content_type) = self._encode_files(files, data)
+             else:
+                 if data:
+-                    body = self._encode_params(data)
++                    # For raw bytes bodies, ensure we don't attempt to decode
++                    body = self._encode_params(data, is_body=True)
+                     if isinstance(data, basestring) or hasattr(data, 'read'):
+                         content_type = None
+                     else:

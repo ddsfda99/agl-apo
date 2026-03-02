@@ -1,0 +1,132 @@
+You are an expert Django contributor fixing a regression in `django.forms.modelform_factory`.
+
+You are given a code repository in the current directory (`/testbed`). Your goal is to fix the bug described below by adding a **permanent regression test** and a **minimal, correct source fix**.
+
+## Bug to fix: Allow ModelForm `Meta` to specify `formfield_callback` and have `modelform_factory()` respect it
+
+### Description (core issue)
+`django.forms.modelform_factory()` creates a new `ModelForm` subclass based on the `form=` argument. It accepts an optional `formfield_callback` parameter.
+
+When no callback is provided (`formfield_callback=None`, the default), the factory currently **overwrites** the base form’s callback (including `MyForm.Meta.formfield_callback`) by injecting `formfield_callback=None` into the generated class attributes. This causes the factory-made form to ignore the callback specified in the base form’s `Meta`.
+
+Expected behavior: If `modelform_factory(..., form=MyForm)` is called **without** an explicit callback argument, the resulting form should behave like `MyForm` regarding callback resolution—i.e., it should use `MyForm.Meta.formfield_callback` (or `MyForm.formfield_callback` if set), not “reset” it to `None`.
+
+### Example scenario (must be covered by tests)
+```python
+from django import forms
+from django.db import models
+
+class MyModel(models.Model):
+    active = models.BooleanField()
+    name = models.CharField(max_length=64, blank=True, null=True)
+
+def all_required(field, **kwargs):
+    formfield = field.formfield(**kwargs)
+    formfield.required = True
+    return formfield
+
+class MyForm(forms.ModelForm):
+    class Meta:
+        model = MyModel
+        formfield_callback = all_required
+        fields = ["active", "name"]
+
+FactoryForm = forms.modelform_factory(MyModel, form=MyForm)
+# Expected: FactoryForm fields are required (callback applied)
+# Actual (bug): callback ignored, fields not required
+```
+
+---
+
+# Hard constraints / guidance (read carefully)
+
+1. **Do not “fix” this by changing global `ModelFormMetaclass` behavior** unless you can *prove* the metaclass is the only correct layer. The preferred fix is **local to `modelform_factory()`**, because the symptom is that the factory injects `formfield_callback=None` and overrides inheritance.
+2. **Keep your new tests. Do NOT delete them.** (This overrides any instruction elsewhere about deleting tests. We need permanent regression coverage.)
+3. Do not modify existing tests except to add new ones.
+4. Your fix must preserve correct precedence rules:
+   - If `modelform_factory(..., formfield_callback=CALLBACK)` is explicitly provided, it must override everything.
+   - If not explicitly provided, the factory should not clobber callbacks defined on the base form (either `BaseForm.formfield_callback` or `BaseForm.Meta.formfield_callback`).
+   - If nowhere is a callback provided, behavior should remain unchanged.
+
+---
+
+# Required workflow
+
+## (1) Explore the repository
+- Identify Django version/layout in this repo.
+- Locate the implementation of `modelform_factory` and the relevant forms/model_forms test modules.
+
+## (2) Run baseline tests
+- Run the existing test suite (or at least the relevant subset if the full suite is huge).
+- Record any pre-existing failures. Those are not caused by your changes.
+
+## (3) Add regression tests (must FAIL before your fix)
+Add tests that reproduce the bug and cover precedence/edge cases. Your test suite additions must include at least the following scenarios:
+
+### A. Exact bug reproduction
+- Base form passed to `modelform_factory` has `Meta.formfield_callback = callback`.
+- `modelform_factory(model, form=BaseForm)` called with **no explicit callback**.
+- Assert that the callback is applied (e.g., fields become required, or callback invocation count matches expected).
+
+### B. Explicit factory argument overrides base Meta
+- Base form has `Meta.formfield_callback = callback1`.
+- `modelform_factory(..., formfield_callback=callback2)` should use `callback2`, not callback1.
+
+### C. Base form class attribute vs base Meta
+Cover at least one of:
+- Base form sets `formfield_callback = callback1` as a class attribute (not in Meta).
+- Ensure factory respects it when no explicit factory callback is given.
+If both class attribute and Meta are set, document/verify expected precedence according to the codebase’s conventions (inspect how `ModelFormOptions` resolves it today) and assert that behavior.
+
+### D. Multi-level inheritance
+- Define `BaseForm` with callback in `Meta`.
+- Define `ChildForm(BaseForm)` with no callback changes.
+- Call `modelform_factory(..., form=ChildForm)` and verify callback still applies.
+
+### Notes for writing tests
+- Prefer tests that check concrete field properties like `required` on generated fields (`form.base_fields["name"].required`).
+- If you count callback calls, ensure you compute the expected number correctly (it should run once per model field included).
+- Create models using the existing Django test patterns in the repository (look for similar ModelForm factory tests).
+- Place tests in the appropriate forms/model_forms test module.
+
+## (4) Confirm failures pre-fix
+- Run the new tests and confirm they fail on current code.
+- Ensure previously passing tests remain passing (aside from any baseline failures you recorded).
+
+## (5) Identify root cause with evidence
+Before editing code, explicitly locate where the factory injects `formfield_callback` into the new class.
+- Show the relevant snippet.
+- Explain how passing `None` overrides inheritance (e.g., attribute set to `None` in `attrs` beats base class / Meta resolution).
+
+## (6) Implement minimal source fix
+Make the smallest change that:
+- Prevents `modelform_factory` from overwriting the base form’s callback when the factory argument is `None`.
+- Still applies the explicit callback argument when non-`None`.
+- Does not alter behavior for forms not created by `modelform_factory`.
+
+**Implementation hint (not mandatory but likely correct):**
+In `modelform_factory`, when building `form_class_attrs`, do not set `"formfield_callback": None` if the argument is `None`. Only include it when not `None`. Similarly, if the factory creates/overrides a `Meta` inner class, ensure you do not inadvertently stomp `Meta.formfield_callback` unless explicitly requested.
+
+Be careful about any `staticmethod()` wrapping used by Django for callbacks—match existing conventions.
+
+## (7) Run full tests post-fix
+- Run the tests you added and any relevant broader suite.
+- Confirm:
+  - New regression tests pass.
+  - Previously passing tests still pass (excluding baseline failures you recorded).
+
+## (8) Output expectations
+In your final response, include:
+- The commands you ran.
+- The list of baseline failures (if any).
+- Where you added tests (file/module).
+- The exact code location you changed and a brief rationale.
+
+Do not commit changes.
+
+--- 
+
+## Reminder: avoid these past failure modes
+- Do **not** implement a broad metaclass-level fallback that changes callback resolution for all ModelForms.
+- Do **not** write invalid code or reference variables before assignment.
+- Do **not** remove the tests you added. They must remain in the repo.

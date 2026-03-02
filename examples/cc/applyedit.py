@@ -12,6 +12,7 @@ from utils.cloudgpt_aoai import get_openai_token_provider
 
 BASE_DIR = Path(__file__).resolve().parent
 FULL_PROMPTS_DIR = BASE_DIR / "full_prompts"
+EVALS_DIR = BASE_DIR / "evals"
 TEXTGRADS_DIR = BASE_DIR / "textgrads"
 OPTIMIZER_PROMPT = """You are an expert in coding agent prompt optimization.
 Your task is to improve the original prompt so that the coding agent can learn from previous failures and solve the problem this time.
@@ -82,16 +83,16 @@ def find_latest_prompt(prompt_dir: Path, instance_id: str) -> Optional[Path]:
     return latest_path
 
 
-def find_latest_textgrad(textgrads_dir: Path, instance_id: str) -> Optional[Path]:
-    """Find the latest versioned textgrad output for the instance."""
-    if not textgrads_dir.exists():
+def find_latest_eval_in_dir(eval_dir: Path, instance_id: str) -> Optional[Path]:
+    """Find the latest versioned evaluation output for the instance in one directory."""
+    if not eval_dir.exists():
         return None
     pattern = re.compile(
         rf"^{re.escape(instance_id)}_iter\d+_[0-9]{{8}}_[0-9]{{6}}\.txt$"
     )
     latest_path = None
     latest_mtime = -1
-    for path in textgrads_dir.iterdir():
+    for path in eval_dir.iterdir():
         if not path.is_file():
             continue
         if not pattern.match(path.name):
@@ -101,6 +102,14 @@ def find_latest_textgrad(textgrads_dir: Path, instance_id: str) -> Optional[Path
             latest_mtime = mtime
             latest_path = path
     return latest_path
+
+
+def find_latest_evaluations(instance_id: str) -> Optional[Path]:
+    """Prefer eval.py outputs, fallback to legacy textgrad outputs."""
+    latest_eval = find_latest_eval_in_dir(EVALS_DIR, instance_id)
+    if latest_eval is not None:
+        return latest_eval
+    return find_latest_eval_in_dir(TEXTGRADS_DIR, instance_id)
 
 
 def next_applyedit_path(output_dir: Path, instance_id: str) -> Path:
@@ -131,9 +140,12 @@ async def main(dataset_path: Path, instance_id: Optional[str]) -> None:
         return
 
     instance_id = instance.get("instance_id", "unknown")
-    evaluations_path = find_latest_textgrad(TEXTGRADS_DIR, instance_id)
+    evaluations_path = find_latest_evaluations(instance_id)
     if evaluations_path is None:
-        print(f"Missing textgrad output in {TEXTGRADS_DIR} for {instance_id}")
+        print(
+            f"Missing evaluation output for {instance_id}. "
+            f"Checked {EVALS_DIR} and fallback {TEXTGRADS_DIR}."
+        )
         return
 
     evaluations = evaluations_path.read_text(encoding="utf-8").strip()

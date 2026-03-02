@@ -1,0 +1,30 @@
+## Failure Modes
+- **Fix applied but existing test suite not updated to new correct behavior**: Changing the regexp CSV splitting semantics makes formerly-“invalid” inputs valid; any tests that encoded the old buggy behavior must be updated accordingly. Attempt 2 fixes the parsing but leaves `test_csv_regex_error` expecting a crash for `(foo{1,3})`, causing a failure.
+- **Insufficient end-to-end reproduction coverage**: Attempt 1 only tested the transformer in isolation and then deleted the test, so it didn’t prove the real bug path (“TOML config parsing for `bad-names-rgxs`”) and didn’t ensure no regressions in argument/config parsing.
+- **Mismatch with task constraints / SWE-bench expectations**: The instruction “delete the test cases you wrote” conflicts with typical SWE-bench evaluation (tests are needed to validate the fix). Attempt 1 followed that instruction literally, likely leaving no regression test and risking hidden failures.
+- **Risky ad-hoc CSV parsing**: The new splitters track parens/brackets/braces (and sometimes quotes) but don’t clearly align with how Pylint expects quoting/escaping to work across config formats (CLI/INI/TOML). There’s a risk of behavior divergence vs existing `_csv_transformer` semantics (spaces, empty items, quoted commas, backslashes).
+
+## Evidence
+- Attempt 2 test failure shows the behavioral change wasn’t reconciled with the suite:
+  - `FAILED tests/config/test_config.py::test_csv_regex_error - Failed: DID NOT RAISE SystemExit`
+  - The failing input is exactly `--bad-names-rgx=(foo{1,3})`, which becomes valid once commas inside `{}` aren’t split.
+- Attempt 1 admits a likely now-wrong existing test but didn’t update it:
+  - Notes: “There is an existing test… `test_csv_regex_error` … expects an error for --bad-names-rgx=(foo{1,3}). After this fix… would need to be revised… I did not alter that file.”
+- Attempt 1 claims full suite couldn’t run due to missing `git`, but Attempt 2 ran most tests (`16 passed, 1 failed`), indicating the environment was usable enough to validate and update tests.
+- Attempt 3 provides only a code change and “No files found” summary; no tests added/updated, no evidence of reproduction or validation.
+
+## Prompt Improvement Directions
+- **Force alignment with existing tests**: Instruct the agent to *search for and update any tests that assert the old buggy behavior*. Specifically: locate failures like `test_csv_regex_error` and rewrite them to use a *truly invalid* regex (e.g., `"(foo{1,3}"` or `"("`) while adding a new test asserting `(foo{1,3})` parses successfully.
+- **Require end-to-end config-path test**: Add a test that loads a `pyproject.toml` with `bad-names-rgxs = "(foo{1,3})"` and asserts Pylint does not crash and that the resulting config contains exactly one compiled pattern. This matches the reported crash path (config parsing), not just the helper.
+- **Define correctness checks for CSV semantics**: Explicitly require tests for:
+  - multiple patterns: `"(foo{1,3}),bar"` → two patterns
+  - commas in `[]` and `()` and `{}` not splitting
+  - quoted patterns containing commas (if supported): `"a,b",c`
+  - backslash-escaped commas (if supported): `a\,b,c`
+  - whitespace handling and empty entries behavior (match existing `_csv_transformer` expectations).
+- **Mandate full-suite run and show baseline vs post-fix deltas**: The agent must run `pytest -q` before and after, report pre-existing failures, and ensure only expected test changes occur. If a dependency error appears, the agent should still run the maximal subset and not stop at “can’t run tests.”
+- **Patch completeness checklist in the prompt**:
+  - update implementation
+  - add/modify tests to reflect new intended behavior
+  - ensure no redundant/unused helper code
+  - avoid deleting tests in final patch (unless the benchmark explicitly requires it); instead, keep regression tests. If the instruction conflicts, prefer SWE-bench norms: keep the tests that validate the fix.

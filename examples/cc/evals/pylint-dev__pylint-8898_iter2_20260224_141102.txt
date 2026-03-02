@@ -1,0 +1,26 @@
+## Failure Modes
+- **Fix breaks an existing test expectation (semantic change not accounted for).** After preventing comma-splitting inside regex quantifiers, `(foo{1,3})` becomes valid input and no longer triggers the previous “invalid regex in CSV list” error path; the existing test `test_csv_regex_error` is now wrong and must be updated to use a truly invalid regex or an actually invalid *CSV element*.
+- **Attempt 1 is non-verifiable and likely fails the suite.** It claims a full-suite run was impossible and also acknowledges an existing test that would need updates, but does not update it. Net result: high chance the patch fails CI even if logic is correct.
+- **Attempt 3 is incomplete/invalid execution context.** “No files found” suggests the agent didn’t run tests or the attempt didn’t apply cleanly / didn’t interact with repo correctly, so it’s not credible as a final fix.
+- **Potential behavioral regression risk in the custom splitter.** The new parsing logic changes semantics of “regexp_csv” values broadly and may mishandle legitimate cases (e.g., commas in verbose-mode regex with comments, or literal commas that should still separate patterns when not inside brackets/braces/paren). Needs targeted tests beyond the single TOML case.
+
+## Evidence
+- Attempt 2 test output shows a concrete regression: `tests/config/test_config.py::test_csv_regex_error` now **fails because SystemExit is not raised** when passing `--bad-names-rgx=(foo{1,3})`. This directly indicates the fix changed behavior and the test must be updated.
+- Attempt 1 explicitly notes: *“There is an existing test … test_csv_regex_error … intentionally expects an error for --bad-names-rgx=(foo{1,3}). After this fix … that test would need to be revised … I did not alter that file.”* This is essentially admitting the patch would break the suite.
+- Attempt 2 adds a new TOML-based regression test (`test_toml_regexp_csv_handles_commas`) and changes `_regexp_csv_transfomer`, but does **not** update `test_csv_regex_error` to remain meaningful, so the suite fails (as shown).
+- Attempt 3 provides only a code diff with no tests and a summary “No files found,” indicating missing validation and likely a broken workflow.
+
+## Prompt Improvement Directions
+- **Require updating/repairing affected existing tests, not just adding new ones.** Explicitly instruct: if the fix changes semantics, update any failing legacy tests to assert the *new correct behavior* (e.g., change `test_csv_regex_error` to pass a genuinely invalid regex like `"(foo{1,3}"` or a CSV with one invalid element such as `"(valid),(foo{1,3"`).
+- **Force an end-to-end reproduction test that matches the bug report path.** Add a requirement: create a `pyproject.toml` (or ini) config with `bad-name-rgxs = "(foo{1,3})"` and assert pylint run does not crash and the option parses as a single pattern.
+- **Mandate full-suite (or at least relevant-subset) verification with evidence.** Prompt should demand running:  
+  - `pytest tests/config/test_config.py -q` (minimum)  
+  - and ideally `pytest -q`  
+  and pasting failing test names before/after. If environment dependency errors occur, require installing deps or selecting a subset that still covers config parsing.
+- **Edge-case checklist for the splitter.** Instruct to add tests for:
+  - multiple patterns: `"(foo{1,3}),bar"` should produce 2 patterns.
+  - commas inside `[]` and `{}`: `"[a,b]"`, `"(a{1,2})"`.
+  - quoting behavior: `"(...)"` vs unquoted.
+  - escaped commas: `r"\,"` should not split (if intended by existing behavior) or explicitly decide/document.
+- **Patch completeness requirement.** Add a rule: no “delete the new test” cleanup; SWE-bench expects keeping regression tests. If asked to delete by prompt, override with: keep tests necessary for evaluation unless explicitly instructed by the benchmark harness (the current instruction to delete tests is counterproductive here).
+- **Constrain scope.** Tell the agent to ensure changes only affect `regexp_csv` parsing and do not alter generic `_csv_transformer` behavior for other option types unless accompanied by tests proving no regression.

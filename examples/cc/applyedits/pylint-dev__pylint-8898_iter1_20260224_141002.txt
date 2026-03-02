@@ -1,0 +1,114 @@
+You are an expert Python contributor fixing a Pylint bug in the repository located at **/testbed**.
+
+## Goal
+
+Fix: **`bad-names-rgxs` mangles regular expressions containing commas** (e.g. quantifiers like `{1,3}`) because the config parser splits on commas too early, causing invalid regex fragments and crashes.
+
+A valid single regex like `"(foo{1,3})"` must be accepted as **one** pattern and must **not** crash, regardless of whether it comes from:
+- `pyproject.toml` / config file, or
+- CLI options like `--bad-names-rgxs=...`
+
+## Critical constraints (read carefully)
+
+1. **Do NOT delete the regression tests you add.**  
+   Ignore the original instruction “(8) Delete the test cases you wrote”. SWE-bench expects the new tests to remain.
+
+2. **Final state must have the full test suite passing (`pytest -q`).**  
+   If an existing test fails because it asserted the *old buggy behavior*, you must **update that existing test** to reflect the correct behavior.
+
+3. **Avoid bespoke parsing that diverges from existing CSV semantics.**  
+   The repo likely has a general CSV parsing helper (e.g., `_csv_transformer`). Reuse or extend common parsing logic rather than inventing a brand-new regex-specific CSV parser that might break quoting/whitespace/empty-item behavior.
+
+4. **You must check for and update any existing tests that relied on the buggy comma-splitting**, notably something like `test_csv_regex_error`. If such a test used `(foo{1,3})` to provoke failure via comma-splitting, change it to a *truly invalid regex* that fails without relying on comma-mangling (e.g. `"("` or `"(unclosed"`), and add a new test for the comma-in-quantifier case.
+
+## What to deliver
+
+A patch that:
+- Prevents splitting inside a single regex that legitimately contains commas (at least quantifiers `{m,n}`; ideally also safe for character classes `[,]` and escaped commas `\,` if feasible).
+- Preserves the intended behavior of comma-separated lists of regexes: e.g. `"(foo{1,3}),bar"` still becomes **two** patterns.
+- Keeps behavior consistent across config sources (TOML/INI and CLI).
+- Keeps or restores compatibility with existing CSV parsing rules (quotes, whitespace trimming, empty entries) as used by other options.
+
+---
+
+## Required workflow (you must follow and report results)
+
+### 1) Explore repository and locate relevant code/tests
+- Identify where argument/config types are implemented (look for `_regexp_csv_transfomer`, `regexp_csv`, argument types).
+- Identify where config parsing from TOML/pyproject and INI happens.
+- Locate existing tests for config parsing, especially ones mentioning `regexp_csv`, `bad-name-rgxs`, `bad-names-rgxs`, or `test_csv_regex_error`.
+
+### 2) Baseline tests
+Run:
+- `pytest -q`
+Record any pre-existing failures (if any). These are the baseline.
+
+Also run targeted:
+- `pytest -q tests/config/test_config.py` (or the closest equivalent config test module)
+
+### 3) Add regression tests (keep them in final diff)
+Add tests that cover **both** config-file and CLI paths.
+
+Your tests must assert:
+
+A. **No mangling / no crash for regex with comma inside quantifier**
+- Example config: `bad-name-rgxs = "(foo{1,3})"`
+- Ensure it is treated as **one** regex pattern and does **not** raise / crash.
+- Validate behavior in at least one of:
+  - The parsed config contains exactly one compiled regex, OR
+  - The resulting linter option value equals a list length 1, OR
+  - Running Pylint with such config exits normally (not `SystemExit` due to config parsing error).
+
+B. **Comma still works as list separator at top level**
+- Example: `bad-name-rgxs = "(foo{1,3}),bar"`
+- Ensure it produces two patterns.
+
+C. **Invalid regex still fails (without relying on commas)**
+- Update any existing test like `test_csv_regex_error` that previously used `(foo{1,3})` to provoke a crash.
+- Replace the invalid pattern with something unambiguously invalid (e.g. `"("`), and keep the assertion that it errors appropriately (likely `SystemExit` from argument parsing).
+
+D. **Cover both config and CLI if feasible**
+- One test via config file (likely TOML `pyproject.toml` or INI)
+- One test via CLI option `--bad-name-rgxs=...` / `--bad-names-rgxs=...` (whichever exists in this repo/version)
+
+After adding tests, run:
+- `pytest -q` and confirm your new tests fail on the current code, demonstrating the bug.
+
+### 4) Find root cause and implement fix
+- Track where the string is split on commas.
+- Ensure the fix applies consistently to all uses of the `regexp_csv` type, not just `bad-name-rgxs`, unless the type is only used there.
+- Prefer: adjust the CSV splitting to be aware of contexts where commas must not split (at minimum inside `{...}` quantifiers).  
+  Do this in a way that **does not break**:
+  - quoted values (e.g. `"a,b"` should remain a single element if quotes are part of CSV semantics here),
+  - whitespace trimming,
+  - empty entries handling (if existing behavior filters or preserves them, keep consistent).
+
+Implementation guidance:
+- If there is a shared `_csv_transformer` helper: extend it or provide an alternate splitter used by `regexp_csv` while keeping parity with `_csv_transformer` rules.
+- Avoid “just split on commas unless inside parentheses” (that’s not regex-correct). A minimal robust improvement:
+  - split on commas only when not inside `{...}` blocks (for quantifiers), and ideally not inside `[...]` character classes,
+  - respect escaping `\,` if the existing CSV rules already recognize backslash escapes (if not, don’t invent new rules unless necessary—document with tests).
+
+### 5) Update impacted existing tests
+Search for tests that expected the buggy behavior. Update them so:
+- They still test “invalid regex causes config/CLI error”
+- They do NOT depend on comma-mangling to become invalid.
+
+### 6) Verify
+Run:
+- `pytest -q`
+- `pytest -q tests/config/test_config.py` (or equivalent)
+All tests must pass.
+
+---
+
+## Extra checklist (must verify before finishing)
+
+- [ ] Regex `"(foo{1,3})"` is accepted as a single pattern from config.
+- [ ] Same value via CLI does not crash.
+- [ ] `"(foo{1,3}),bar"` still becomes two patterns.
+- [ ] A clearly invalid regex (like `"("`) still errors, and the existing “csv regex error” test is updated accordingly.
+- [ ] No divergence from existing CSV behaviors (quotes/whitespace/empties) unless explicitly tested and justified.
+- [ ] New regression tests remain in the repository.
+
+Now perform the work in-repo under `/testbed`.

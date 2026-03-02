@@ -1,0 +1,92 @@
+You are an expert Python engineer working on the repository in `/testbed`. Fix the described pylint bug and **ensure the full relevant test suite passes**.
+
+## Bug to fix (must reproduce and fix)
+`bad-name-rgxs` (a `regexp_csv` option) incorrectly splits on commas **before** parsing/compiling the regex, so valid regexes containing commas (e.g. quantifiers like `{1,3}` or character classes like `[a,b]`) get mangled. With config:
+
+```ini
+[tool.pylint.basic]
+bad-name-rgxs = "(foo{1,3})"
+```
+
+pylint crashes because the option value is split into two invalid regex fragments.
+
+### Expected
+Any valid regex should be expressible as a single element in this option. At minimum, commas inside valid regex constructs must not be treated as CSV separators.
+
+---
+
+## Critical constraints from prior failures (follow these)
+1. **Do not ship a fix that breaks existing tests.** A previous attempt changed parsing so `(foo{1,3})` becomes valid (correct), which caused an existing test (`test_csv_regex_error`) to fail because it used that value to intentionally trigger an error. If your fix makes that test fail, **update that existing test to use a truly invalid regex** (e.g. missing closing paren) or a CSV where one element is invalid.  
+2. **Keep regression tests.** Ignore any instruction to delete new tests—this benchmark expects you to keep them.
+3. **Verify by running tests.** You must run at least:
+   - `pytest -q tests/config/test_config.py`
+   - and ideally `pytest -q`
+   Record baseline failures first, then confirm new tests fail before the fix and pass after.
+
+---
+
+## Step-by-step tasks
+### 1) Repository exploration
+- Inspect repository layout (`ls`, `find`), locate:
+  - config parsing code for options like `regexp_csv` (likely in `pylint/config/argument.py` or similar)
+  - existing tests for config parsing (likely under `tests/config/`)
+
+### 2) Baseline tests
+- Run `pytest -q` (or if too slow, at least `pytest -q tests/config/test_config.py`).
+- Note any pre-existing failures (ignore later).
+
+### 3) Add regression tests (must fail pre-fix)
+Add tests that specifically cover the bug and edge cases, in the appropriate existing test module (likely `tests/config/test_config.py` or another config-focused file).
+
+Your new tests must include:
+1. **Config file reproduction**: create a temporary `pyproject.toml` (preferred) or config that sets:
+   - `bad-name-rgxs = "(foo{1,3})"`
+   Then run/configure pylint in the same way the existing tests do for config parsing (do NOT shell out unless that’s already how the suite tests it). Assert:
+   - no crash / no `SystemExit` due to regex compilation
+   - the resulting parsed option contains exactly one regex pattern equivalent to `(foo{1,3})`
+2. **Comma splitting sanity**: ensure that a real CSV still splits:
+   - `bad-name-rgxs = "(foo{1,3}),bar"` parses into two patterns.
+3. **Other comma-in-regex cases** (at least one):
+   - `[a,b]` stays as a single pattern (commas in character class)
+   - optionally also test escaped comma `\,` if the implementation supports it or decide not to (but be consistent and test/document intended behavior).
+
+After adding tests, rerun the relevant tests and confirm:
+- your new tests fail before the fix with an error matching the bug (regex compilation error / crash / SystemExit).
+
+### 4) Fix implementation
+- Locate the function that transforms `regexp_csv` options (e.g. `_regexp_csv_transfomer`).
+- Fix should ensure commas **inside valid regex contexts** do not act as separators.
+- Keep scope tight: only affect `regexp_csv` handling, not generic CSV handling for other option types, unless you add tests proving no regressions.
+
+Implementation guidance (not mandatory, but likely needed):
+- Implement a robust “split on commas not inside regex constructs” tokenizer for `regexp_csv` values.
+- At minimum, do not split on commas when inside:
+  - `{...}` quantifiers
+  - `[...]` character classes
+  - `(...)` groups (be careful: parentheses nesting)
+- Handle quoted config values correctly (the input may already include quotes from toml/ini parsing—inspect how values arrive).
+- Avoid changing semantics for genuine CSV lists: commas at top level should still split patterns.
+- Ensure whitespace trimming behavior remains compatible with existing tests.
+
+### 5) Update any now-invalid legacy tests
+- If any existing test was relying on `(foo{1,3})` being invalid (e.g. `test_csv_regex_error`), update it:
+  - Use a truly invalid regex like `"(foo{1,3}"` (missing `)`) to still test error behavior, OR
+  - Use a CSV where one element is invalid: `"(valid),(foo{1,3"` and assert it errors.
+- Ensure these tests still validate error reporting for invalid regex list entries.
+
+### 6) Verify
+- Run `pytest -q tests/config/test_config.py` and then `pytest -q` if feasible.
+- Confirm:
+  - baseline failures unchanged
+  - new tests pass
+  - no regressions
+
+---
+
+## Output expectations
+When you finish, provide:
+- The key files you changed and a brief rationale.
+- The exact pytest commands you ran and the outcome (tests passed / which failures were pre-existing).
+- Do **not** commit anything.
+
+Proceed carefully: the last attempts failed mainly because they didn’t update the existing failing test expectation and didn’t add enough edge-case coverage for the new splitter.
